@@ -92,6 +92,8 @@ pub enum SensitiveContentKind {
     TaskContent,
     /// Encrypted routine handoff attached to a task execution.
     TaskAttachment,
+    /// Immutable uploaded artifact content.
+    ArtifactContent,
     /// Project settings sensitive envelope.
     ProjectSettings,
     /// Routine step instruction envelope.
@@ -110,7 +112,7 @@ impl SensitiveContentKind {
             Self::DocumentContent => Some(ResourceType::Document),
             Self::ProjectSettings => Some(ResourceType::Project),
             Self::RoutineStepInstructions => Some(ResourceType::Routine),
-            Self::TaskContent | Self::TaskAttachment => None,
+            Self::TaskContent | Self::TaskAttachment | Self::ArtifactContent => None,
         }
     }
 
@@ -125,6 +127,7 @@ impl SensitiveContentKind {
             Self::DocumentContent => "manifest.document.content",
             Self::TaskContent => "task_content",
             Self::TaskAttachment => "task.attachment",
+            Self::ArtifactContent => "artifact.content",
             Self::ProjectSettings => "project.settings",
             Self::RoutineStepInstructions => "routine.step.instructions",
         }
@@ -141,6 +144,7 @@ impl SensitiveContentKind {
             | Self::DocumentContent
             | Self::TaskContent
             | Self::TaskAttachment
+            | Self::ArtifactContent
             | Self::ProjectSettings
             | Self::RoutineStepInstructions => ContentScope::Org,
         }
@@ -157,6 +161,7 @@ impl SensitiveContentKind {
             "manifest.document.content" => Some(Self::DocumentContent),
             "task_content" => Some(Self::TaskContent),
             "task.attachment" => Some(Self::TaskAttachment),
+            "artifact.content" => Some(Self::ArtifactContent),
             "project.settings" => Some(Self::ProjectSettings),
             "routine.step.instructions" => Some(Self::RoutineStepInstructions),
             _ => None,

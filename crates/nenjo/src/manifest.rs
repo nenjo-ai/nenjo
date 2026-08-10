@@ -620,6 +620,7 @@ pub enum RoutineStepType {
     Agent,
     Council,
     Gate,
+    Human,
     Terminal,
     TerminalFail,
 }
@@ -630,6 +631,7 @@ impl std::fmt::Display for RoutineStepType {
             Self::Agent => "agent",
             Self::Council => "council",
             Self::Gate => "gate",
+            Self::Human => "human",
             Self::Terminal => "terminal",
             Self::TerminalFail => "terminal_fail",
         };
@@ -656,6 +658,9 @@ pub enum RoutineEdgeCondition {
     Always,
     OnPass,
     OnFail,
+    Approved,
+    ChangesRequested,
+    Rejected,
 }
 
 impl RoutineEdgeCondition {
@@ -663,6 +668,9 @@ impl RoutineEdgeCondition {
         match s.to_lowercase().as_str() {
             "on_pass" => Self::OnPass,
             "on_fail" => Self::OnFail,
+            "approved" => Self::Approved,
+            "changes_requested" => Self::ChangesRequested,
+            "rejected" => Self::Rejected,
             _ => Self::Always,
         }
     }
@@ -672,6 +680,7 @@ impl RoutineEdgeCondition {
             Self::Always => true,
             Self::OnPass => passed,
             Self::OnFail => !passed,
+            Self::Approved | Self::ChangesRequested | Self::Rejected => false,
         }
     }
 }

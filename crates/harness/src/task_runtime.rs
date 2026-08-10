@@ -10,10 +10,12 @@ mod store;
 mod types;
 
 pub use runtime::TaskRuntime;
-pub use store::{CancellationOutcome, EnqueueOutcome, OccurrenceOutcome, TaskRuntimeStore};
+pub use store::{
+    CancellationOutcome, ContinuationOutcome, EnqueueOutcome, OccurrenceOutcome, TaskRuntimeStore,
+};
 pub use types::{
-    TaskContent, TaskExecutionState, TaskExecutionTarget, TaskExecutorOutcome, TaskInboxItem,
-    TaskRuntimeEvent, TaskSchedule, TaskSubmission, TaskTrigger,
+    TaskContent, TaskExecutionState, TaskExecutionTarget, TaskExecutorOutcome, TaskInboxAction,
+    TaskInboxItem, TaskRuntimeEvent, TaskSchedule, TaskSubmission, TaskTrigger,
 };
 
 #[cfg(test)]

@@ -85,8 +85,6 @@ pub enum TaskAttachmentKind {
 /// Provenance for one activated edge reaching a terminal routine step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutineHandoffSource {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routine_id: Option<Uuid>,
     pub source_step_slug: String,
     pub destination_step_slug: String,
     pub edge_condition: String,
@@ -104,6 +102,33 @@ pub struct TaskAttachmentManifest {
     pub content_digest: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source: Option<RoutineHandoffSource>,
+}
+
+/// Canonical worker event opening one immutable human-review request round.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ExecutionHumanRequestEvent {
+    pub request_id: Uuid,
+    pub step_slug: String,
+    pub round: u32,
+    pub title: String,
+    /// Ordered schemas for the activated incoming edge inputs.
+    pub input_schemas: serde_json::Value,
+    /// Encrypted ordered human-review inputs. Consumers treat this envelope as opaque.
+    pub encrypted_inputs: EncryptedPayload,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    pub approval_option_snapshot: serde_json::Value,
+    pub checkpoint_id: Uuid,
+    pub checkpoint_contract: String,
+    pub graph_revision: String,
+    pub encrypted_checkpoint: EncryptedPayload,
+    /// Ready immutable artifacts referenced by the encrypted inputs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifact_ids: Vec<Uuid>,
+    /// True while an unrelated graph branch can still make progress.
+    #[serde(default)]
+    pub runnable_work_remaining: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -126,6 +151,8 @@ pub enum ExecutionEventKind {
     AgentTrace,
     #[serde(rename = "task.artifacts")]
     TaskArtifacts,
+    #[serde(rename = "human.request")]
+    HumanRequest,
 }
 
 impl ExecutionEventKind {
@@ -134,6 +161,7 @@ impl ExecutionEventKind {
             Self::WorkflowStep => "workflow.step",
             Self::AgentTrace => "agent.trace",
             Self::TaskArtifacts => "task.artifacts",
+            Self::HumanRequest => "human.request",
         }
     }
 }
@@ -161,6 +189,9 @@ pub enum ExecutionEventPayload {
     /// Outputs and usage produced by a terminal task execution.
     #[serde(rename = "task.artifacts")]
     TaskArtifacts(ExecutionTaskArtifactsEvent),
+    /// A fully materialized human request plus encrypted continuation checkpoint.
+    #[serde(rename = "human.request")]
+    HumanRequest(Box<ExecutionHumanRequestEvent>),
 }
 
 impl ExecutionEventPayload {
@@ -169,6 +200,7 @@ impl ExecutionEventPayload {
             Self::WorkflowStep(_) => ExecutionEventKind::WorkflowStep,
             Self::AgentTrace { .. } => ExecutionEventKind::AgentTrace,
             Self::TaskArtifacts(_) => ExecutionEventKind::TaskArtifacts,
+            Self::HumanRequest(_) => ExecutionEventKind::HumanRequest,
         }
     }
 }
@@ -183,6 +215,7 @@ impl ExecutionEventPayload {
 pub enum TaskExecutionState {
     Queued,
     Running,
+    WaitingForHuman,
     Completed,
     Failed { error: String },
     Cancelled,
@@ -388,6 +421,14 @@ impl std::fmt::Display for Response {
                     "execution.event(run={execution_run_id}, {}, attachments={})",
                     event.kind(),
                     artifacts.attachments.len()
+                ),
+                ExecutionEventPayload::HumanRequest(request) => write!(
+                    f,
+                    "execution.event(run={execution_run_id}, {}, request={}, step={}, round={})",
+                    event.kind(),
+                    request.request_id,
+                    request.step_slug,
+                    request.round
                 ),
             },
             Self::TaskExecutionState {
@@ -1335,7 +1376,7 @@ mod tests {
                 next_run_at: None,
                 assignment_revision: "2026-07-16T11:00:00Z".to_string(),
                 project: Some("demo".to_string()),
-                target: crate::TaskExecutionTarget::Routine("daily-review".to_string()),
+                target: crate::TaskExecutionTarget::routine("daily-review"),
             },
             revision: 2,
             recovered: false,
@@ -1388,7 +1429,7 @@ mod tests {
             project: Some("demo_project".into()),
             execution_run_id: Uuid::nil(),
             trigger: TaskExecutionTrigger::Manual,
-            target: crate::TaskExecutionTarget::Agent("coder".into()),
+            target: crate::TaskExecutionTarget::agent("coder"),
             payload: Some(crate::TaskExecuteContent {
                 title: "Fix bug".into(),
                 instructions: Some("In auth module".into()),

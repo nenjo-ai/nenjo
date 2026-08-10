@@ -274,7 +274,9 @@ where
         SensitiveContentKind::RoutineStepInstructions => {
             apply_decrypted_routine_step_instructions(manifest, rt, id, decrypted)
         }
-        SensitiveContentKind::TaskContent | SensitiveContentKind::TaskAttachment => false,
+        SensitiveContentKind::TaskContent
+        | SensitiveContentKind::TaskAttachment
+        | SensitiveContentKind::ArtifactContent => false,
     }
 }
 

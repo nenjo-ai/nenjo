@@ -19,6 +19,9 @@ pub struct TaskCommandContext<S, W> {
     pub worktrees: W,
     pub git_locks: GitLocks,
     pub attachment_encoder: Arc<dyn TaskAttachmentEncoder>,
+    /// Authenticated platform client used for durable continuation fetches and
+    /// active artifact operations.
+    pub platform_api: Arc<nenjo_platform::ApiClient>,
     pub(crate) local_execution_watcher: LocalRoutineExecutionWatcher,
 }
 
@@ -30,6 +33,10 @@ pub trait TaskAttachmentEncoder: Send + Sync {
         attachment_id: Uuid,
         plaintext: &str,
     ) -> Result<EncryptedPayload>;
+
+    /// Decrypt an organization-scoped payload after validating its embedded
+    /// organization identity against the enrolled worker.
+    async fn decrypt_attachment(&self, payload: &EncryptedPayload) -> Result<String>;
 }
 
 #[async_trait]

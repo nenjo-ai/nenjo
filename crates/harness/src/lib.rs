@@ -95,9 +95,9 @@ pub use local_runtime::{
 pub use request::{ChatDomainActivation, ChatRequest, TaskRequest};
 pub use session::HarnessSessions;
 pub use task_runtime::{
-    CancellationOutcome, EnqueueOutcome, TaskContent, TaskExecutionState, TaskExecutionTarget,
-    TaskExecutorOutcome, TaskInboxItem, TaskRuntime, TaskRuntimeEvent, TaskRuntimeStore,
-    TaskSchedule, TaskSubmission, TaskTrigger,
+    CancellationOutcome, ContinuationOutcome, EnqueueOutcome, TaskContent, TaskExecutionState,
+    TaskExecutionTarget, TaskExecutorOutcome, TaskInboxAction, TaskInboxItem, TaskRuntime,
+    TaskRuntimeEvent, TaskRuntimeStore, TaskSchedule, TaskSubmission, TaskTrigger,
 };
 
 /// Cloneable, thread-safe harness handle.
@@ -269,6 +269,7 @@ mod tests {
                         current_phase: None,
                         active_tool_name: None,
                         worktree: None,
+                        opaque_state: None,
                     },
                 },
             ))

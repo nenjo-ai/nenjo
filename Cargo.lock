@@ -2384,6 +2384,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "base64",
+ "cap-std",
  "chrono",
  "derive_builder",
  "nenjo",

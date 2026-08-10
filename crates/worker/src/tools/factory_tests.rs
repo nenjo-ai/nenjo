@@ -1078,7 +1078,18 @@ async fn worker_factory_exposes_task_tools_under_task_write_scope() {
     assert!(names.iter().any(|name| name == "cancel_execution_run"));
     assert!(names.iter().any(|name| name == "retry_execution_run"));
     assert!(names.iter().any(|name| name == "watch_execution_run"));
+    assert!(names.iter().any(|name| name == "view_artifacts"));
+    assert!(names.iter().any(|name| name == "upload_artifact"));
     assert!(!names.iter().any(|name| name == "start_project_execution"));
+
+    let unscoped_agent = AgentManifest {
+        platform_scopes: Vec::new(),
+        ..agent
+    };
+    let unscoped_tools = factory.create_tools(&unscoped_agent).await;
+    let unscoped_names: Vec<_> = unscoped_tools.iter().map(|tool| tool.name()).collect();
+    assert!(unscoped_names.contains(&"view_artifacts"));
+    assert!(unscoped_names.contains(&"upload_artifact"));
 }
 
 #[tokio::test]

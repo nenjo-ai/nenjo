@@ -56,12 +56,14 @@ pub struct RouteOption {
 
 impl RouteOption {
     fn from_edge(edge: &RoutineEdgeManifest, target: Option<&RoutineStepManifest>) -> Result<Self> {
-        let handoff_schema = edge_handoff_schema(&edge.metadata).with_context(|| {
-            format!(
-                "edge {}:{} must define a valid metadata.handoff_schema",
-                edge.source_step, edge.target_step
-            )
-        })?;
+        let handoff_schema = edge_handoff_schema(&edge.metadata)
+            .with_context(|| {
+                format!(
+                    "edge {}:{} must define a valid metadata.handoff_schema",
+                    edge.source_step, edge.target_step
+                )
+            })?
+            .clone();
         Ok(Self {
             target_step: edge.target_step.clone(),
             target_name: target
@@ -70,7 +72,7 @@ impl RouteOption {
             condition: edge.condition,
             purpose: edge_purpose(edge),
             handoff_instructions: edge_handoff_instructions(edge),
-            handoff_schema: handoff_schema.clone(),
+            handoff_schema,
         })
     }
 }
@@ -781,6 +783,9 @@ fn condition_label(condition: RoutineEdgeCondition) -> &'static str {
         RoutineEdgeCondition::Always => "always",
         RoutineEdgeCondition::OnPass => "on_pass",
         RoutineEdgeCondition::OnFail => "on_fail",
+        RoutineEdgeCondition::Approved => "approved",
+        RoutineEdgeCondition::ChangesRequested => "changes_requested",
+        RoutineEdgeCondition::Rejected => "rejected",
     }
 }
 
@@ -945,5 +950,32 @@ mod tests {
                 .to_string()
                 .contains("target_step 'done' is not activated by verdict 'fail'")
         );
+    }
+
+    #[test]
+    fn human_target_uses_ordinary_edge_handoff_schema() {
+        let mut incoming = edge("review");
+        incoming.metadata = serde_json::json!({
+            "handoff_instructions": "Produce the signed plan.",
+            "handoff_schema": {
+                "type": "object",
+                "required": ["plan"],
+                "properties": {"plan": {"type": "string", "minLength": 1}},
+                "additionalProperties": false
+            }
+        });
+        let target = RoutineStepManifest {
+            slug: crate::Slug::derive("review"),
+            routine: crate::Slug::derive("routine"),
+            name: "Review".to_string(),
+            step_type: crate::manifest::RoutineStepType::Human,
+            council: None,
+            agent: None,
+            config: serde_json::json!({"request": {"title": "Review {{ task.title }}"}}),
+            order_index: 0,
+        };
+        let route = RouteOption::from_edge(&incoming, Some(&target)).unwrap();
+        assert_eq!(route.handoff_schema["properties"]["plan"]["type"], "string");
+        assert_eq!(route.handoff_instructions, "Produce the signed plan.");
     }
 }

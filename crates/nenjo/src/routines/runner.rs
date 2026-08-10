@@ -7,6 +7,10 @@ use tokio_util::sync::CancellationToken;
 use crate::input::RoutineRun;
 use crate::manifest::RoutineManifest;
 use crate::provider::{ErasedProvider, ProviderRuntime};
+use crate::routines::human_materialization::{
+    ResolvedHumanRequest, RoutineCheckpoint, RoutineExecutionOutcome,
+};
+use crate::routines::human_scheduler::RoutineCheckpointIdentity;
 use crate::routines::{self, RoutineEvent, SessionBinding, StepResult};
 
 /// A routine resolved from the manifest, ready to execute.
@@ -96,6 +100,30 @@ where
         }
         run_routine_inner(self.provider.clone(), &self.routine, input).await
     }
+
+    /// Run or restore a human-capable routine until completion, failure, or a
+    /// durable suspension boundary.
+    pub async fn run_resumable_stream(
+        &self,
+        input: impl Into<RoutineRun>,
+        identity: RoutineCheckpointIdentity,
+        checkpoint: Option<RoutineCheckpoint>,
+        resolutions: Vec<ResolvedHumanRequest>,
+    ) -> Result<ResumableRoutineExecutionHandle> {
+        let mut input = input.into();
+        if input.execution.session_binding.is_none() {
+            input.execution.session_binding = self.session_binding.clone();
+        }
+        run_resumable_inner(
+            self.provider.clone(),
+            &self.routine,
+            input,
+            identity,
+            checkpoint,
+            resolutions,
+        )
+        .await
+    }
 }
 
 /// Handle to a running routine execution.
@@ -145,6 +173,30 @@ impl RoutineExecutionHandle {
     }
 }
 
+/// Streaming handle whose output can be a durable human suspension.
+pub struct ResumableRoutineExecutionHandle {
+    events_rx: mpsc::UnboundedReceiver<RoutineEvent>,
+    join: tokio::task::JoinHandle<Result<RoutineExecutionOutcome>>,
+    cancel: CancellationToken,
+}
+
+impl ResumableRoutineExecutionHandle {
+    /// Cancel between graph steps.
+    pub fn cancel(&self) {
+        self.cancel.cancel();
+    }
+    /// Receive the next ordinary routine event.
+    pub async fn recv(&mut self) -> Option<RoutineEvent> {
+        self.events_rx.recv().await
+    }
+    /// Await the completed, failed, or suspended scheduler outcome.
+    pub async fn output(self) -> Result<RoutineExecutionOutcome> {
+        self.join
+            .await
+            .map_err(|error| anyhow::anyhow!("routine execution task panicked: {error}"))?
+    }
+}
+
 async fn run_routine_inner<P>(
     provider: P,
     routine: &RoutineManifest,
@@ -181,4 +233,40 @@ where
     });
 
     Ok(RoutineExecutionHandle::new(events_rx, join, cancel))
+}
+
+async fn run_resumable_inner<P>(
+    provider: P,
+    routine: &RoutineManifest,
+    input: RoutineRun,
+    mut identity: RoutineCheckpointIdentity,
+    checkpoint: Option<RoutineCheckpoint>,
+    resolutions: Vec<ResolvedHumanRequest>,
+) -> Result<ResumableRoutineExecutionHandle>
+where
+    P: ProviderRuntime,
+{
+    let routine = routine.clone();
+    let cancel = CancellationToken::new();
+    let cancel_inner = cancel.clone();
+    let (events_tx, events_rx) = mpsc::unbounded_channel();
+    let input = routines::types::RoutineInput::from_routine_run(input);
+    identity.input = Some(input);
+    let join = tokio::spawn(async move {
+        routines::executor::execute_routine_resumable(
+            &provider,
+            &routine,
+            identity,
+            checkpoint,
+            resolutions,
+            &events_tx,
+            &cancel_inner,
+        )
+        .await
+    });
+    Ok(ResumableRoutineExecutionHandle {
+        events_rx,
+        join,
+        cancel,
+    })
 }

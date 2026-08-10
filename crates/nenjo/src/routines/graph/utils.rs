@@ -22,7 +22,12 @@ pub fn outgoing_edges(edges: &[RoutineGraphEdge]) -> HashMap<Slug, Vec<&RoutineG
 pub fn required_inbound_targets(edges: &[RoutineGraphEdge]) -> HashSet<Slug> {
     edges
         .iter()
-        .filter(|edge| edge.condition != RoutineGraphEdgeCondition::OnFail)
+        .filter(|edge| {
+            !matches!(
+                edge.condition,
+                RoutineGraphEdgeCondition::OnFail | RoutineGraphEdgeCondition::ChangesRequested
+            )
+        })
         .map(|edge| edge.target_step.clone())
         .collect()
 }
@@ -32,6 +37,9 @@ pub fn edge_key(edge: &RoutineGraphEdge) -> String {
         RoutineGraphEdgeCondition::Always => "always",
         RoutineGraphEdgeCondition::OnPass => "on_pass",
         RoutineGraphEdgeCondition::OnFail => "on_fail",
+        RoutineGraphEdgeCondition::Approved => "approved",
+        RoutineGraphEdgeCondition::ChangesRequested => "changes_requested",
+        RoutineGraphEdgeCondition::Rejected => "rejected",
     };
     format!("{}:{}:{}", edge.source_step, condition, edge.target_step)
 }

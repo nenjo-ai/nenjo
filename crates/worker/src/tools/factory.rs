@@ -12,6 +12,7 @@ use nenjo::{
 use nenjo_platform::{
     ManifestAccessPolicy, ManifestMcpBackend, PlatformResourceIdStore, PlatformResourceKind,
     ScopeResource,
+    artifact_tools::{PlatformArtifactToolsBackend, add_artifact_tools},
     task_tools::add_task_tools,
     tools::{
         PlatformNotificationEmitter, PlatformNotificationToolsBackend, add_manifest_tools,
@@ -309,6 +310,18 @@ where
         }
 
         add_task_tools(&mut tools, self.platform.task_backend.clone(), &policy);
+        let artifact_backend = self
+            .platform
+            .platform_client
+            .as_ref()
+            .zip(self.platform.payload_encoder.as_ref())
+            .map(|(client, encoder)| PlatformArtifactToolsBackend {
+                client: Arc::clone(client),
+                payload_encoder: encoder.clone(),
+                cached_org_id: self.platform.cached_org_id,
+                workspace_root: security.workspace_dir.clone(),
+            });
+        add_artifact_tools(&mut tools, artifact_backend);
         if policy.can_read_resource(ScopeResource::Tasks) {
             tools.push(Arc::new(WatchExecutionRunTool::new(
                 self.local_execution_watcher.clone(),

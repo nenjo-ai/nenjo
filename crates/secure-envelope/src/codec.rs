@@ -963,6 +963,11 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     ExecutionEventPayload::TaskArtifacts(artifacts) => {
                         ExecutionEventPayload::TaskArtifacts(artifacts)
                     }
+                    ExecutionEventPayload::HumanRequest(request) => {
+                        // Human-review subjects and checkpoints are already
+                        // encrypted by the execution host before transport.
+                        ExecutionEventPayload::HumanRequest(request)
+                    }
                 };
 
                 Ok(Some(Response::ExecutionEvent {
@@ -1266,7 +1271,7 @@ mod tests {
                     project: Some("demo".into()),
                     execution_run_id: Uuid::new_v4(),
                     trigger: nenjo_events::TaskExecutionTrigger::Manual,
-                    target: nenjo_events::TaskExecutionTarget::Agent("coder".into()),
+                    target: nenjo_events::TaskExecutionTarget::agent("coder"),
                     payload: Some(TaskExecuteContent {
                         title: "plaintext task".into(),
                         instructions: Some("sensitive description".into()),

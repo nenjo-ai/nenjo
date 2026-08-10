@@ -199,6 +199,10 @@ pub struct SessionCheckpoint {
     pub active_tool_name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub worktree: Option<WorktreeSnapshot>,
+    /// Versioned subsystem-owned state. The session runtime persists this
+    /// value opaquely so resumable executors can survive process restarts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub opaque_state: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

@@ -2,17 +2,36 @@
 
 use chrono::Utc;
 use nenjo::memory::MemoryScope;
+use nenjo::routines::human_materialization::RoutineCheckpoint;
 use nenjo_sessions::{
-    ExecutionPhase, SessionCheckpointUpdate, SessionKind, SessionOwnerKind, SessionRefs,
-    SessionRuntimeEvent, SessionStatus, SessionTransition, SessionUpsert, TaskSessionUpsert,
-    WorktreeSnapshot,
+    CheckpointPatch, ExecutionPhase, SessionCheckpointUpdate, SessionKind, SessionOwnerKind,
+    SessionRefs, SessionRuntimeEvent, SessionStatus, SessionTransition, SessionUpsert,
+    TaskSessionUpsert, WorktreeSnapshot,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tracing::warn;
 use uuid::Uuid;
 
 use crate::session::{TurnEventContext, session_runtime_events_from_turn_event};
 use crate::{Harness, ProviderRuntime};
+
+/// Namespaced execution-owned payload stored in a generic session checkpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "kind", content = "state", rename_all = "snake_case")]
+pub enum TaskOpaqueState {
+    /// Human-capable routine scheduler checkpoint.
+    RoutineCheckpointV1(RoutineCheckpoint),
+}
+
+impl TaskOpaqueState {
+    /// Return the enclosed routine checkpoint.
+    pub fn into_routine_checkpoint(self) -> RoutineCheckpoint {
+        match self {
+            Self::RoutineCheckpointV1(checkpoint) => checkpoint,
+        }
+    }
+}
 
 /// Derive the project memory namespace used by a task session.
 pub fn task_memory_namespace(agent_name: Option<&str>, project_slug: &str) -> Option<String> {
@@ -54,7 +73,8 @@ pub async fn upsert_task_session<P, SessionRt>(
     agent_name: Option<&str>,
     agent_slug: Option<&str>,
     mode: SessionUpsertMode,
-) where
+) -> anyhow::Result<()>
+where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
@@ -75,9 +95,7 @@ pub async fn upsert_task_session<P, SessionRt>(
 
     match mode {
         SessionUpsertMode::Await => {
-            if let Err(error) = harness.sessions().upsert_task(upsert).await {
-                warn!(error = %error, task_id = %params.task_id, "Failed to upsert task session");
-            }
+            harness.sessions().upsert_task(upsert).await?;
         }
         SessionUpsertMode::Spawn => {
             let harness = harness.clone();
@@ -89,6 +107,7 @@ pub async fn upsert_task_session<P, SessionRt>(
             });
         }
     }
+    Ok(())
 }
 
 /// Session identity for one agent-bearing routine step.
@@ -205,13 +224,53 @@ pub async fn update_task_checkpoint<P, SessionRt>(
         .update_checkpoint(SessionCheckpointUpdate {
             session_id: task_id,
             phase,
-            worktree,
-            active_tool_name: None,
+            worktree: match worktree {
+                Some(worktree) => CheckpointPatch::Replace(worktree),
+                None if phase == ExecutionPhase::Preparing => CheckpointPatch::Clear,
+                None => CheckpointPatch::Preserve,
+            },
+            active_tool_name: if phase == ExecutionPhase::Preparing {
+                CheckpointPatch::Clear
+            } else {
+                CheckpointPatch::Preserve
+            },
+            opaque_state: if phase == ExecutionPhase::Preparing {
+                CheckpointPatch::Clear
+            } else {
+                CheckpointPatch::Preserve
+            },
         })
         .await
     {
         warn!(error = %error, task_id = %task_id, "Failed to update task checkpoint through session runtime");
     }
+}
+
+/// Persist versioned routine scheduler state alongside the operational task
+/// checkpoint. The session runtime treats the value as opaque and preserves it
+/// across unrelated phase updates.
+pub async fn update_task_routine_checkpoint<P, SessionRt>(
+    harness: &Harness<P, SessionRt>,
+    task_id: Uuid,
+    state: &RoutineCheckpoint,
+) -> anyhow::Result<()>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+{
+    let state = serde_json::to_value(TaskOpaqueState::RoutineCheckpointV1(state.clone()))?;
+    harness
+        .sessions()
+        .update_checkpoint(SessionCheckpointUpdate {
+            session_id: task_id,
+            phase: ExecutionPhase::Waiting,
+            worktree: CheckpointPatch::Preserve,
+            active_tool_name: CheckpointPatch::Preserve,
+            opaque_state: CheckpointPatch::Replace(state),
+        })
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 /// Persist a task pause, resume, cancellation, or terminal transition.

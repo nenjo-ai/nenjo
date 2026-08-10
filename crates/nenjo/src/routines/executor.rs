@@ -25,6 +25,10 @@ use crate::routines::types::StepResult;
 use crate::routines::{apply_session_binding_memory_scope, routing};
 
 use super::RoutineEvent;
+use super::human_materialization::{
+    ResolvedHumanRequest, RoutineCheckpoint, RoutineExecutionOutcome, RoutineFailure,
+};
+use super::human_scheduler::{HumanReviewScheduler, RoutineCheckpointIdentity};
 use super::types::{RoutineHandoff, RoutineState};
 use crate::context::{
     RoutineContext, RoutineHandoffContext, RoutineHandoffsContext, RoutineStepContext,
@@ -114,6 +118,149 @@ where
     P: ProviderRuntime,
 {
     execute_routine_once(provider, routine, state, events_tx, cancel).await
+}
+
+/// Execute runnable work until the routine reaches a terminal or durable
+/// human-wait boundary. Completed steps are restored from `checkpoint` and
+/// therefore never replayed.
+pub(crate) async fn execute_routine_resumable<P>(
+    provider: &P,
+    routine: &RoutineManifest,
+    identity: RoutineCheckpointIdentity,
+    checkpoint: Option<RoutineCheckpoint>,
+    resolutions: Vec<ResolvedHumanRequest>,
+    events_tx: &mpsc::UnboundedSender<RoutineEvent>,
+    cancel: &CancellationToken,
+) -> Result<RoutineExecutionOutcome>
+where
+    P: ProviderRuntime,
+{
+    validate_routine_manifest(routine)
+        .map_err(|error| anyhow::anyhow!("Routine graph is invalid: {error}"))?;
+    let mut scheduler = match checkpoint {
+        Some(checkpoint) => HumanReviewScheduler::restore(routine, checkpoint, &identity)?,
+        None => HumanReviewScheduler::new(routine, identity),
+    };
+    for resolution in resolutions {
+        scheduler.apply_resolution(resolution)?;
+    }
+    let mut state = RoutineState::new(scheduler.checkpoint().input.clone());
+    state.routine_name = Some(routine.name.clone());
+    let restored = scheduler.checkpoint();
+    state.step_results = restored.step_results;
+    state.handoffs = restored.handoffs;
+    state.completed_steps = restored.completed;
+    state.metrics = restored.metrics;
+
+    let steps_by_slug = routine
+        .steps
+        .iter()
+        .map(|step| (step.slug.clone(), step.clone()))
+        .collect::<HashMap<_, _>>();
+    let outgoing = routine.edges.iter().fold(
+        HashMap::<Slug, Vec<RoutineEdgeManifest>>::new(),
+        |mut map, edge| {
+            map.entry(edge.source_step.clone())
+                .or_default()
+                .push(edge.clone());
+            map
+        },
+    );
+    let max_transitions = routine.steps.len().saturating_mul(100).max(100);
+    for _ in 0..max_transitions {
+        if cancel.is_cancelled() {
+            return Ok(RoutineExecutionOutcome::Failed(RoutineFailure {
+                code: "cancelled".to_string(),
+                summary: "Routine execution was cancelled".to_string(),
+                step_slug: None,
+            }));
+        }
+        if let Some(outcome) = scheduler.outcome() {
+            return Ok(outcome);
+        }
+        let ready = scheduler.ready_steps();
+        if ready.is_empty() {
+            return Ok(RoutineExecutionOutcome::Failed(RoutineFailure {
+                code: "scheduler_stalled".to_string(),
+                summary: "Routine has no runnable work, pending request, or terminal result"
+                    .to_string(),
+                step_slug: None,
+            }));
+        }
+        for slug in ready {
+            let step = steps_by_slug
+                .get(&slug)
+                .with_context(|| format!("Ready step {slug} not found"))?
+                .clone();
+            if step.step_type == RoutineStepType::Human {
+                if scheduler.human_inputs_ready(&slug) {
+                    scheduler.open_human(&slug)?;
+                }
+                continue;
+            }
+            scheduler.start_step(&slug)?;
+            let route_edges = outgoing.get(&slug).cloned().unwrap_or_default();
+            let execution = execute_scheduled_step(
+                provider,
+                step.clone(),
+                &route_edges,
+                &routine.steps,
+                &mut state,
+                events_tx,
+                cancel,
+            )
+            .await?;
+            let result = execution.result;
+            if execution.status == StepExecutionStatus::ExecutionFailed {
+                return Ok(RoutineExecutionOutcome::Failed(RoutineFailure {
+                    code: "step_execution_failed".to_string(),
+                    summary: result.output,
+                    step_slug: Some(slug),
+                }));
+            }
+            state
+                .metrics
+                .record_step(&slug, result.input_tokens, result.output_tokens);
+            let activated = activated_edges(&step, &route_edges, result.passed)?;
+            if let Some(edge) = activated.iter().find(|edge| {
+                edge_max_attempts(&step, edge).is_some_and(|max_attempts| {
+                    scheduler
+                        .checkpoint()
+                        .traversal_counts
+                        .get(&edge_key(edge))
+                        .copied()
+                        .unwrap_or_default()
+                        >= max_attempts
+                })
+            }) {
+                let max_attempts =
+                    edge_max_attempts(&step, edge).expect("exhausted edge has a gate retry limit");
+                return Ok(RoutineExecutionOutcome::Failed(RoutineFailure {
+                    code: "retry_exhausted".to_string(),
+                    summary: format!(
+                        "Routine gate retry edge {} exhausted after {max_attempts} attempts",
+                        edge_key(edge)
+                    ),
+                    step_slug: Some(slug),
+                }));
+            }
+            let handoffs = activated
+                .into_iter()
+                .filter_map(|edge| routine_handoff_for_edge(&step, &result, edge))
+                .collect::<Vec<_>>();
+            scheduler.complete_step(&slug, result.clone(), handoffs.clone())?;
+            state.record_step_result(slug.clone(), result);
+            for handoff in handoffs {
+                state.record_handoff(handoff);
+            }
+            scheduler.set_metrics(state.metrics.clone());
+        }
+    }
+    Ok(RoutineExecutionOutcome::Failed(RoutineFailure {
+        code: "transition_limit_exceeded".to_string(),
+        summary: "Routine exceeded the automatic transition safety limit".to_string(),
+        step_slug: None,
+    }))
 }
 
 /// Execute a routine once inside the harness runtime.
@@ -507,6 +654,9 @@ fn edge_matches_result(edge: &RoutineEdgeManifest, passed: bool) -> bool {
         RoutineEdgeCondition::Always => true,
         RoutineEdgeCondition::OnPass => passed,
         RoutineEdgeCondition::OnFail => !passed,
+        RoutineEdgeCondition::Approved
+        | RoutineEdgeCondition::ChangesRequested
+        | RoutineEdgeCondition::Rejected => false,
     }
 }
 
@@ -648,17 +798,18 @@ fn edge_max_attempts(
     current_step: &RoutineStepManifest,
     edge: &RoutineEdgeManifest,
 ) -> Option<u32> {
+    if current_step.step_type != RoutineStepType::Gate
+        || edge.condition != RoutineEdgeCondition::OnFail
+    {
+        return None;
+    }
     let configured = edge
         .metadata
         .get("max_attempts")
         .and_then(|value| value.as_u64())
         .and_then(|value| u32::try_from(value).ok());
 
-    configured.or_else(|| {
-        (current_step.step_type == RoutineStepType::Gate
-            && edge.condition == RoutineEdgeCondition::OnFail)
-            .then_some(DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS)
-    })
+    configured.or(Some(DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS))
 }
 
 fn edge_key(edge: &RoutineEdgeManifest) -> String {
@@ -666,6 +817,9 @@ fn edge_key(edge: &RoutineEdgeManifest) -> String {
         RoutineEdgeCondition::Always => "always",
         RoutineEdgeCondition::OnPass => "on_pass",
         RoutineEdgeCondition::OnFail => "on_fail",
+        RoutineEdgeCondition::Approved => "approved",
+        RoutineEdgeCondition::ChangesRequested => "changes_requested",
+        RoutineEdgeCondition::Rejected => "rejected",
     };
     format!("{}:{}:{}", edge.source_step, condition, edge.target_step)
 }
@@ -749,6 +903,10 @@ where
             super::council::execute_council(provider, step, step_run_id, state, events_tx, cancel)
                 .await
         }
+        RoutineStepType::Human => bail!(
+            "Human step '{}' requires a resumable execution host",
+            step.name
+        ),
         RoutineStepType::Terminal => {
             // Terminal step: return the most recently completed step result.
             let mut last = state.last_step_result().cloned().unwrap_or_default();

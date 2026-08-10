@@ -29,17 +29,21 @@ pub fn validate_routine_manifest(routine: &crate::manifest::RoutineManifest) -> 
 /// - routable fan-out is explicit and auditable through `route_next_steps`;
 /// - `on_fail` edges are only gate verdict branches;
 /// - gate retry exhaustion fails the routine directly;
-/// - cycles are only allowed through gate `on_fail` retry loops.
+/// - cycles are only allowed through gate `on_fail` retries or human
+///   `changes_requested` revision loops.
 pub fn validate_routine_graph(graph: &RoutineGraph) -> ValidationResult {
     validate_not_empty(&graph.steps)?;
     validate_unique_steps(&graph.steps)?;
     validate_step_resource_bindings(&graph.steps)?;
     validate_edges_reference_steps(&graph.steps, &graph.edges)?;
     validate_routable_edge_handoff_schemas(&graph.steps, &graph.edges)?;
+    validate_human_review_inputs(&graph.steps, &graph.edges)?;
     validate_no_self_edges(&graph.edges)?;
     validate_no_duplicate_edges(&graph.edges)?;
     validate_gate_edges_are_verdict_routed(&graph.steps, &graph.edges)?;
     validate_on_fail_edges_originate_from_gates(&graph.steps, &graph.edges)?;
+    validate_retry_limits(&graph.steps, &graph.edges)?;
+    validate_human_outcome_edges(&graph.steps, &graph.edges)?;
     validate_at_least_one_terminal(&graph.steps)?;
     validate_terminal_no_outgoing(&graph.steps, &graph.edges)?;
     validate_non_terminal_have_outgoing(&graph.steps, &graph.edges)?;
@@ -47,6 +51,44 @@ pub fn validate_routine_graph(graph: &RoutineGraph) -> ValidationResult {
     validate_cycles_only_use_on_fail_edges(&graph.steps, &graph.edges)?;
     validate_entry_steps(&graph.steps, &graph.edges, &graph.entry_steps)?;
     validate_all_reachable(&graph.steps, &graph.edges, &graph.entry_steps)?;
+    Ok(())
+}
+
+fn validate_retry_limits(
+    steps: &[RoutineGraphStep],
+    edges: &[RoutineGraphEdge],
+) -> ValidationResult {
+    let step_map = steps_by_slug(steps);
+    for edge in edges {
+        let Some(value) = edge.metadata.get("max_attempts") else {
+            continue;
+        };
+        let source_is_gate = step_map
+            .get(&edge.source_step)
+            .is_some_and(|step| step.step_type == RoutineGraphStepType::Gate);
+        if !source_is_gate || edge.condition != RoutineGraphEdgeCondition::OnFail {
+            return Err(RoutineValidationError::single(
+                RoutineValidationIssue::new(format!(
+                    "Edge {} may define max_attempts only for a gate on_fail retry",
+                    edge_key(edge)
+                ))
+                .edge(edge_key(edge)),
+            ));
+        }
+        if value
+            .as_u64()
+            .is_none_or(|attempts| attempts == 0 || u32::try_from(attempts).is_err())
+        {
+            return Err(RoutineValidationError::single(
+                RoutineValidationIssue::new(format!(
+                    "Edge {} must define max_attempts as an integer from 1 through {}",
+                    edge_key(edge),
+                    u32::MAX
+                ))
+                .edge(edge_key(edge)),
+            ));
+        }
+    }
     Ok(())
 }
 
@@ -101,6 +143,15 @@ fn validate_step_resource_bindings(steps: &[RoutineGraphStep]) -> ValidationResu
                 return Err(RoutineValidationError::single(
                     RoutineValidationIssue::new(format!(
                         "Lambda step '{}' must reference a lambda",
+                        step.name
+                    ))
+                    .step(step.slug.to_string()),
+                ));
+            }
+            RoutineGraphStepType::Human if step.human_request.is_none() => {
+                return Err(RoutineValidationError::single(
+                    RoutineValidationIssue::new(format!(
+                        "Human step '{}' must define a valid request contract",
                         step.name
                     ))
                     .step(step.slug.to_string()),
@@ -173,6 +224,167 @@ fn validate_routable_edge_handoff_schemas(
         }
     }
     Ok(())
+}
+
+fn validate_human_review_inputs(
+    steps: &[RoutineGraphStep],
+    edges: &[RoutineGraphEdge],
+) -> ValidationResult {
+    let step_map = steps_by_slug(steps);
+    for human in steps
+        .iter()
+        .filter(|step| step.step_type == RoutineGraphStepType::Human)
+    {
+        let incoming = edges
+            .iter()
+            .filter(|edge| edge.target_step == human.slug)
+            .collect::<Vec<_>>();
+        let mut source_keys = HashSet::new();
+        for edge in &incoming {
+            if !source_keys.insert(edge.source_step.to_string()) {
+                return Err(RoutineValidationError::single(
+                    RoutineValidationIssue::new(format!(
+                        "Human step '{}' requires unique incoming source steps; '{}' has multiple incoming edges",
+                        human.name, edge.source_step
+                    ))
+                    .step(human.slug.to_string())
+                    .edge(edge_key(edge)),
+                ));
+            }
+        }
+
+        let Some(request) = human.human_request.as_ref() else {
+            continue;
+        };
+        let Some(approval) = request.approval_schema.as_ref() else {
+            continue;
+        };
+        for field in &approval.fields {
+            let crate::routines::human_review::ApprovalOptions::Inputs { inputs } = &field.options
+            else {
+                continue;
+            };
+            for input in inputs {
+                let source = crate::Slug::derive(&input.input);
+                if !source_keys.contains(&source.to_string()) || !step_map.contains_key(&source) {
+                    return Err(RoutineValidationError::single(
+                        RoutineValidationIssue::new(format!(
+                            "Human approval field '{}' references input '{}' which is not an incoming edge source",
+                            field.id, input.input
+                        ))
+                        .step(human.slug.to_string()),
+                    ));
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn validate_human_outcome_edges(
+    steps: &[RoutineGraphStep],
+    edges: &[RoutineGraphEdge],
+) -> ValidationResult {
+    let step_map = steps_by_slug(steps);
+    let outgoing = outgoing_edges(edges);
+    for edge in edges {
+        let Some(source) = step_map.get(&edge.source_step) else {
+            continue;
+        };
+        let is_human_outcome = matches!(
+            edge.condition,
+            RoutineGraphEdgeCondition::Approved
+                | RoutineGraphEdgeCondition::ChangesRequested
+                | RoutineGraphEdgeCondition::Rejected
+        );
+        if is_human_outcome && source.step_type != RoutineGraphStepType::Human {
+            return Err(RoutineValidationError::single(
+                RoutineValidationIssue::new(format!(
+                    "Human outcome edge {} may only originate from a human step",
+                    edge_key(edge)
+                ))
+                .step(source.slug.to_string())
+                .edge(edge_key(edge)),
+            ));
+        }
+    }
+
+    for step in steps
+        .iter()
+        .filter(|step| step.step_type == RoutineGraphStepType::Human)
+    {
+        let outgoing = outgoing.get(&step.slug).cloned().unwrap_or_default();
+        for condition in [
+            RoutineGraphEdgeCondition::Approved,
+            RoutineGraphEdgeCondition::ChangesRequested,
+            RoutineGraphEdgeCondition::Rejected,
+        ] {
+            let count = outgoing
+                .iter()
+                .filter(|edge| edge.condition == condition)
+                .count();
+            if count == 0 {
+                return Err(RoutineValidationError::single(
+                    RoutineValidationIssue::new(format!(
+                        "Human step '{}' must have at least one {} outcome edge",
+                        step.name,
+                        human_condition_label(condition)
+                    ))
+                    .step(step.slug.to_string()),
+                ));
+            }
+            if count > 1
+                && outgoing
+                    .iter()
+                    .filter(|edge| edge.condition == condition)
+                    .any(|edge| {
+                        step_map.get(&edge.target_step).is_some_and(|target| {
+                            matches!(
+                                target.step_type,
+                                RoutineGraphStepType::Terminal | RoutineGraphStepType::TerminalFail
+                            )
+                        })
+                    })
+            {
+                return Err(RoutineValidationError::single(
+                    RoutineValidationIssue::new(format!(
+                        "Human step '{}' {} fan-out must converge before a terminal step",
+                        step.name,
+                        human_condition_label(condition)
+                    ))
+                    .step(step.slug.to_string()),
+                ));
+            }
+        }
+        if outgoing.iter().any(|edge| {
+            matches!(
+                edge.condition,
+                RoutineGraphEdgeCondition::Always
+                    | RoutineGraphEdgeCondition::OnPass
+                    | RoutineGraphEdgeCondition::OnFail
+            )
+        }) {
+            return Err(RoutineValidationError::single(
+                RoutineValidationIssue::new(format!(
+                    "Human step '{}' may only use approved, changes_requested, and rejected edges",
+                    step.name
+                ))
+                .step(step.slug.to_string()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn human_condition_label(condition: RoutineGraphEdgeCondition) -> &'static str {
+    match condition {
+        RoutineGraphEdgeCondition::Approved => "approved",
+        RoutineGraphEdgeCondition::ChangesRequested => "changes_requested",
+        RoutineGraphEdgeCondition::Rejected => "rejected",
+        RoutineGraphEdgeCondition::Always
+        | RoutineGraphEdgeCondition::OnPass
+        | RoutineGraphEdgeCondition::OnFail => "non-human",
+    }
 }
 
 fn validate_no_self_edges(edges: &[RoutineGraphEdge]) -> ValidationResult {
@@ -325,10 +537,12 @@ fn validate_cycles_only_use_on_fail_edges(
         .collect();
     let mut adjacency: HashMap<Slug, Vec<Slug>> = HashMap::new();
 
-    for edge in edges
-        .iter()
-        .filter(|edge| edge.condition != RoutineGraphEdgeCondition::OnFail)
-    {
+    for edge in edges.iter().filter(|edge| {
+        !matches!(
+            edge.condition,
+            RoutineGraphEdgeCondition::OnFail | RoutineGraphEdgeCondition::ChangesRequested
+        )
+    }) {
         adjacency
             .entry(edge.source_step.clone())
             .or_default()
@@ -363,7 +577,7 @@ fn validate_cycles_only_use_on_fail_edges(
         Ok(())
     } else {
         Err(fail(
-            "Routine graph contains a cycle outside a gate on_fail retry loop",
+            "Routine graph contains an automatic cycle outside a gate on_fail or human changes_requested loop",
         ))
     }
 }
@@ -386,6 +600,14 @@ fn validate_entry_steps(
         }
         if !seen.insert(entry.clone()) {
             return Err(fail(format!("Duplicate routine entry step slug: {entry}")));
+        }
+        if known
+            .get(entry)
+            .is_some_and(|step| step.step_type == RoutineGraphStepType::Human)
+        {
+            return Err(fail(format!(
+                "Human review step '{entry}' cannot be an entry step because it requires an incoming handoff"
+            )));
         }
         if required_inbound.contains(entry) {
             return Err(fail(format!(
@@ -440,6 +662,7 @@ fn step_type_label(step_type: RoutineGraphStepType) -> &'static str {
     match step_type {
         RoutineGraphStepType::Agent => "Agent",
         RoutineGraphStepType::Gate => "Gate",
+        RoutineGraphStepType::Human => "Human",
         RoutineGraphStepType::Council => "Council",
         RoutineGraphStepType::Lambda => "Lambda",
         RoutineGraphStepType::Terminal => "Terminal",
@@ -462,6 +685,7 @@ mod tests {
             ),
             has_council: step_type == RoutineGraphStepType::Council,
             has_lambda: step_type == RoutineGraphStepType::Lambda,
+            human_request: None,
         }
     }
 
@@ -480,6 +704,30 @@ mod tests {
                     "additionalProperties": false
                 }
             }),
+        }
+    }
+
+    fn human_step(slug: &str) -> RoutineGraphStep {
+        let mut step = step(slug, RoutineGraphStepType::Human);
+        step.human_request = Some(
+            crate::routines::human_review::HumanStepSpec::parse(serde_json::json!({
+                "title": "Review {{ task.title }}"
+            }))
+            .unwrap(),
+        );
+        step
+    }
+
+    fn human_edge(
+        source: &str,
+        target: &str,
+        condition: RoutineGraphEdgeCondition,
+    ) -> RoutineGraphEdge {
+        RoutineGraphEdge {
+            source_step: Slug::derive(source),
+            target_step: Slug::derive(target),
+            condition,
+            metadata: serde_json::json!({}),
         }
     }
 
@@ -673,7 +921,7 @@ mod tests {
             ],
         };
 
-        assert_invalid(graph, "contains a cycle");
+        assert_invalid(graph, "contains an automatic cycle");
     }
 
     #[test]
@@ -696,6 +944,227 @@ mod tests {
     }
 
     #[test]
+    fn accepts_closed_human_outcomes_and_human_mediated_cycle() {
+        let graph = RoutineGraph {
+            entry_steps: vec![Slug::derive("prepare")],
+            steps: vec![
+                step("prepare", RoutineGraphStepType::Agent),
+                human_step("review"),
+                step("revise", RoutineGraphStepType::Agent),
+                step("revise_parallel", RoutineGraphStepType::Agent),
+                step("approve", RoutineGraphStepType::Agent),
+                step("approve_parallel", RoutineGraphStepType::Agent),
+                step("reject", RoutineGraphStepType::Agent),
+                step("reject_parallel", RoutineGraphStepType::Agent),
+                step("done", RoutineGraphStepType::Terminal),
+                step("rejected", RoutineGraphStepType::TerminalFail),
+            ],
+            edges: vec![
+                edge("prepare", "review", RoutineGraphEdgeCondition::Always),
+                human_edge("review", "approve", RoutineGraphEdgeCondition::Approved),
+                human_edge(
+                    "review",
+                    "approve_parallel",
+                    RoutineGraphEdgeCondition::Approved,
+                ),
+                human_edge(
+                    "review",
+                    "revise",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge(
+                    "review",
+                    "revise_parallel",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge("review", "reject", RoutineGraphEdgeCondition::Rejected),
+                human_edge(
+                    "review",
+                    "reject_parallel",
+                    RoutineGraphEdgeCondition::Rejected,
+                ),
+                edge("approve", "done", RoutineGraphEdgeCondition::Always),
+                edge(
+                    "approve_parallel",
+                    "done",
+                    RoutineGraphEdgeCondition::Always,
+                ),
+                edge("revise", "review", RoutineGraphEdgeCondition::Always),
+                edge(
+                    "revise_parallel",
+                    "review",
+                    RoutineGraphEdgeCondition::Always,
+                ),
+                edge("reject", "rejected", RoutineGraphEdgeCondition::Always),
+                edge(
+                    "reject_parallel",
+                    "rejected",
+                    RoutineGraphEdgeCondition::Always,
+                ),
+            ],
+        };
+        validate_routine_graph(&graph)
+            .expect("human outcome fan-out and mediated cycles should validate");
+    }
+
+    #[test]
+    fn rejects_human_fan_out_directly_to_terminal_steps() {
+        let graph = RoutineGraph {
+            entry_steps: vec![Slug::derive("prepare")],
+            steps: vec![
+                step("prepare", RoutineGraphStepType::Agent),
+                human_step("review"),
+                step("done", RoutineGraphStepType::Terminal),
+                step("done_parallel", RoutineGraphStepType::Terminal),
+                step("revise", RoutineGraphStepType::Terminal),
+                step("rejected", RoutineGraphStepType::TerminalFail),
+            ],
+            edges: vec![
+                edge("prepare", "review", RoutineGraphEdgeCondition::Always),
+                human_edge("review", "done", RoutineGraphEdgeCondition::Approved),
+                human_edge(
+                    "review",
+                    "done_parallel",
+                    RoutineGraphEdgeCondition::Approved,
+                ),
+                human_edge(
+                    "review",
+                    "revise",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge("review", "rejected", RoutineGraphEdgeCondition::Rejected),
+            ],
+        };
+
+        assert_invalid(graph, "fan-out must converge before a terminal step");
+    }
+
+    #[test]
+    fn rejects_missing_and_non_human_outcomes() {
+        let mut graph = RoutineGraph {
+            entry_steps: vec![Slug::derive("prepare")],
+            steps: vec![
+                step("prepare", RoutineGraphStepType::Agent),
+                human_step("review"),
+                step("done", RoutineGraphStepType::Terminal),
+                step("rejected", RoutineGraphStepType::TerminalFail),
+            ],
+            edges: vec![
+                edge("prepare", "review", RoutineGraphEdgeCondition::Always),
+                human_edge("review", "done", RoutineGraphEdgeCondition::Approved),
+                human_edge(
+                    "review",
+                    "done",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge("review", "rejected", RoutineGraphEdgeCondition::Rejected),
+            ],
+        };
+        validate_routine_graph(&graph).expect("closed outcomes should validate");
+        graph.edges.pop();
+        assert_invalid(graph, "at least one rejected");
+
+        let mut non_human = valid_linear_graph();
+        non_human.edges[0].condition = RoutineGraphEdgeCondition::Approved;
+        assert_invalid(non_human, "may only originate from a human step");
+    }
+
+    #[test]
+    fn rejects_human_entry_step_without_incoming_handoff() {
+        let graph = RoutineGraph {
+            entry_steps: vec![Slug::derive("review")],
+            steps: vec![
+                human_step("review"),
+                step("done", RoutineGraphStepType::Terminal),
+                step("revise", RoutineGraphStepType::Terminal),
+                step("rejected", RoutineGraphStepType::TerminalFail),
+            ],
+            edges: vec![
+                human_edge("review", "done", RoutineGraphEdgeCondition::Approved),
+                human_edge(
+                    "review",
+                    "revise",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge("review", "rejected", RoutineGraphEdgeCondition::Rejected),
+            ],
+        };
+
+        assert_invalid(graph, "cannot be an entry step");
+    }
+
+    #[test]
+    fn accepts_explicit_handoff_schema_when_target_is_human() {
+        let graph = RoutineGraph {
+            entry_steps: vec![Slug::derive("prepare")],
+            steps: vec![
+                step("prepare", RoutineGraphStepType::Agent),
+                human_step("review"),
+                step("done", RoutineGraphStepType::Terminal),
+                step("revise", RoutineGraphStepType::Terminal),
+                step("rejected", RoutineGraphStepType::TerminalFail),
+            ],
+            edges: vec![
+                edge("prepare", "review", RoutineGraphEdgeCondition::Always),
+                human_edge("review", "done", RoutineGraphEdgeCondition::Approved),
+                human_edge(
+                    "review",
+                    "revise",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge("review", "rejected", RoutineGraphEdgeCondition::Rejected),
+            ],
+        };
+        validate_routine_graph(&graph).expect("human inputs are defined by incoming edge schemas");
+    }
+
+    #[test]
+    fn rejects_ambiguous_human_input_sources() {
+        let mut graph = RoutineGraph {
+            entry_steps: vec![Slug::derive("prepare")],
+            steps: vec![
+                step("prepare", RoutineGraphStepType::Agent),
+                human_step("review"),
+                step("done", RoutineGraphStepType::Terminal),
+                step("revise", RoutineGraphStepType::Terminal),
+                step("rejected", RoutineGraphStepType::TerminalFail),
+            ],
+            edges: vec![
+                edge("prepare", "review", RoutineGraphEdgeCondition::Always),
+                edge("prepare", "review", RoutineGraphEdgeCondition::OnPass),
+                human_edge("review", "done", RoutineGraphEdgeCondition::Approved),
+                human_edge(
+                    "review",
+                    "revise",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge("review", "rejected", RoutineGraphEdgeCondition::Rejected),
+            ],
+        };
+        assert_invalid(graph.clone(), "unique incoming source steps");
+
+        graph.edges.remove(1);
+        graph.steps[1].human_request = Some(
+            crate::routines::human_review::HumanStepSpec::parse(serde_json::json!({
+                "title": "Review",
+                "approval": {"fields": [{
+                    "id": "selection",
+                    "label": "Selection",
+                    "type": "single_select",
+                    "options": {"type": "inputs", "inputs": [{
+                        "input": "missing",
+                        "pointer": "/items",
+                        "value": "/id",
+                        "label": "/name"
+                    }]}
+                }]}
+            }))
+            .unwrap(),
+        );
+        assert_invalid(graph, "is not an incoming edge source");
+    }
+
+    #[test]
     fn rejects_retry_exhaustion_branch_metadata() {
         let mut retry = edge("gate", "work", RoutineGraphEdgeCondition::OnFail);
         retry.metadata["on_exhausted"] = serde_json::json!("missing");
@@ -714,6 +1183,70 @@ mod tests {
         };
 
         assert_invalid(graph, "must not define on_exhausted metadata");
+    }
+
+    #[test]
+    fn retry_limits_apply_only_to_gate_on_fail_edges() {
+        let mut retry = edge("gate", "work", RoutineGraphEdgeCondition::OnFail);
+        retry.metadata["max_attempts"] = serde_json::json!(2);
+        let valid = RoutineGraph {
+            entry_steps: vec![Slug::derive("work")],
+            steps: vec![
+                step("work", RoutineGraphStepType::Agent),
+                step("gate", RoutineGraphStepType::Gate),
+                step("done", RoutineGraphStepType::Terminal),
+            ],
+            edges: vec![
+                edge("work", "gate", RoutineGraphEdgeCondition::Always),
+                edge("gate", "done", RoutineGraphEdgeCondition::OnPass),
+                retry,
+            ],
+        };
+        validate_routine_graph(&valid).expect("gate on_fail retry limit should validate");
+
+        let mut human = RoutineGraph {
+            entry_steps: vec![Slug::derive("prepare")],
+            steps: vec![
+                step("prepare", RoutineGraphStepType::Agent),
+                human_step("review"),
+                step("done", RoutineGraphStepType::Terminal),
+                step("revise", RoutineGraphStepType::Terminal),
+                step("rejected", RoutineGraphStepType::TerminalFail),
+            ],
+            edges: vec![
+                edge("prepare", "review", RoutineGraphEdgeCondition::Always),
+                human_edge("review", "done", RoutineGraphEdgeCondition::Approved),
+                human_edge(
+                    "review",
+                    "revise",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge("review", "rejected", RoutineGraphEdgeCondition::Rejected),
+            ],
+        };
+        human.edges[2].metadata["max_attempts"] = serde_json::json!(2);
+        assert_invalid(human, "only for a gate on_fail retry");
+    }
+
+    #[test]
+    fn rejects_zero_gate_retry_limit() {
+        let mut retry = edge("gate", "work", RoutineGraphEdgeCondition::OnFail);
+        retry.metadata["max_attempts"] = serde_json::json!(0);
+        let graph = RoutineGraph {
+            entry_steps: vec![Slug::derive("work")],
+            steps: vec![
+                step("work", RoutineGraphStepType::Agent),
+                step("gate", RoutineGraphStepType::Gate),
+                step("done", RoutineGraphStepType::Terminal),
+            ],
+            edges: vec![
+                edge("work", "gate", RoutineGraphEdgeCondition::Always),
+                edge("gate", "done", RoutineGraphEdgeCondition::OnPass),
+                retry,
+            ],
+        };
+
+        assert_invalid(graph, "integer from 1");
     }
 
     #[test]

@@ -58,7 +58,7 @@ impl Default for StepResult {
 ///     .with_execution_run_id(run_id)
 ///     .with_labels(vec!["auth".into(), "security".into()]);
 /// ```
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineInput {
     pub project: Option<Slug>,
     pub title: String,
@@ -266,7 +266,7 @@ impl RoutineState {
 }
 
 /// One activated routine edge and the structured handoff it delivered.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineHandoff {
     pub source_step: Slug,
     pub target_step: Slug,
@@ -292,6 +292,7 @@ pub enum StepType {
     Agent,
     Council,
     Gate,
+    Human,
     Terminal,
     TerminalFail,
 }
@@ -301,6 +302,7 @@ impl StepType {
         match s.to_lowercase().as_str() {
             "council" => Self::Council,
             "gate" => Self::Gate,
+            "human" => Self::Human,
             "terminal" => Self::Terminal,
             "terminal_fail" => Self::TerminalFail,
             _ => Self::Agent,
@@ -313,7 +315,7 @@ impl StepType {
 // ---------------------------------------------------------------------------
 
 /// Accumulated metrics for a single routine step.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StepMetrics {
     pub execution_count: u32,
     pub input_tokens: u64,
@@ -327,7 +329,7 @@ impl StepMetrics {
 }
 
 /// Accumulator for all step metrics within a routine execution.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutineMetrics {
     steps: HashMap<Slug, StepMetrics>,
 }
@@ -401,6 +403,7 @@ mod tests {
         assert_eq!(StepType::from_str_value("agent"), StepType::Agent);
         assert_eq!(StepType::from_str_value("council"), StepType::Council);
         assert_eq!(StepType::from_str_value("gate"), StepType::Gate);
+        assert_eq!(StepType::from_str_value("human"), StepType::Human);
         assert_eq!(StepType::from_str_value("terminal"), StepType::Terminal);
         assert_eq!(
             StepType::from_str_value("terminal_fail"),

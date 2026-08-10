@@ -232,6 +232,14 @@ pub enum Command {
     #[serde(rename = "execution.resume")]
     ExecutionResume { execution_run_id: Uuid },
 
+    /// Continue a suspended routine after one committed human resolution.
+    #[serde(rename = "execution.continue")]
+    ExecutionContinue {
+        execution_run_id: Uuid,
+        request_id: Uuid,
+        resolution_revision: u64,
+    },
+
     /// Replace the worker's complete cached task-schedule snapshot.
     ///
     /// This travels on the always-subscribed broadcast control lane. Only the
@@ -355,6 +363,14 @@ impl std::fmt::Display for Command {
             Self::ExecutionResume { execution_run_id } => {
                 write!(f, "execution.resume(run={execution_run_id})")
             }
+            Self::ExecutionContinue {
+                execution_run_id,
+                request_id,
+                resolution_revision,
+            } => write!(
+                f,
+                "execution.continue(run={execution_run_id}, request={request_id}, revision={resolution_revision})"
+            ),
             Self::TaskSchedulesSync { schedules } => {
                 write!(f, "task_schedules.sync(count={})", schedules.len())
             }
@@ -389,7 +405,8 @@ impl Command {
             Command::TaskExecute { .. }
             | Command::ExecutionCancel { .. }
             | Command::ExecutionPause { .. }
-            | Command::ExecutionResume { .. } => Capability::Task,
+            | Command::ExecutionResume { .. }
+            | Command::ExecutionContinue { .. } => Capability::Task,
 
             Command::WorkerPing => Capability::Ping,
             Command::TaskSchedulesSync { .. } => Capability::Manifest,
@@ -412,7 +429,9 @@ impl Command {
             | Command::PackageGraphChanged { .. }
             | Command::RepoSync { .. }
             | Command::RepoUnsync { .. } => CommandDelivery::Broadcast,
-            Command::WorkerAccountKeyUpdated { .. } => CommandDelivery::Targeted,
+            Command::WorkerAccountKeyUpdated { .. } | Command::ExecutionContinue { .. } => {
+                CommandDelivery::Targeted
+            }
             _ => CommandDelivery::Queue,
         }
     }
@@ -490,7 +509,7 @@ mod tests {
                 project: Some("demo_project".into()),
                 execution_run_id: id,
                 trigger: TaskExecutionTrigger::Manual,
-                target: TaskExecutionTarget::Agent("coder".into()),
+                target: TaskExecutionTarget::agent("coder"),
                 payload: None,
                 encrypted_payload: None,
             }
@@ -538,6 +557,15 @@ mod tests {
             }
             .delivery(),
             CommandDelivery::Broadcast
+        );
+        assert_eq!(
+            Command::ExecutionContinue {
+                execution_run_id: id,
+                request_id: id,
+                resolution_revision: 1,
+            }
+            .delivery(),
+            CommandDelivery::Targeted
         );
         assert_eq!(
             Command::WorkerAccountKeyUpdated {

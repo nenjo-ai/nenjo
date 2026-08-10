@@ -11,6 +11,8 @@
 
 /// Typed HTTP client for worker-facing platform API endpoints.
 pub mod api_client;
+/// Agent-facing immutable artifact publication and catalog tools.
+pub mod artifact_tools;
 /// Platform-backed manifest backend implementations and payload encoding hooks.
 pub mod backend;
 /// Thin HTTP client for the platform manifest API.

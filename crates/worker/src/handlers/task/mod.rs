@@ -4,9 +4,10 @@ mod runtime;
 mod worktree_state;
 use std::collections::{HashMap, HashSet};
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result, anyhow, bail};
 use dashmap::mapref::entry::Entry;
 use nenjo_sessions::{ExecutionPhase, SessionStatus};
+use sha2::{Digest, Sha256};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
@@ -73,7 +74,7 @@ pub struct TaskExecuteRequest<'a> {
 /// transitioned the task execution.
 pub(crate) struct TaskExecutionResult {
     pub(crate) outcome: TaskExecutorOutcome,
-    pub(crate) artifacts: Response,
+    pub(crate) artifacts: Option<Response>,
 }
 
 /// Worker integration methods for task execution platform commands.
@@ -114,6 +115,16 @@ where
         ctx: &TaskCommandContext<S, W>,
         execution_run_id: Uuid,
     ) -> Result<()>;
+
+    /// Consume one durable human resolution idempotently.
+    async fn handle_execution_continue(
+        &self,
+        ctx: &TaskCommandContext<S, W>,
+        execution_run_id: Uuid,
+        request_id: Uuid,
+        resolution_revision: u64,
+        cancellation: CancellationToken,
+    ) -> Result<TaskExecutionResult>;
 }
 
 #[async_trait::async_trait]
@@ -155,6 +166,25 @@ where
     ) -> Result<()> {
         handle_execution_resume(self, ctx, execution_run_id).await
     }
+
+    async fn handle_execution_continue(
+        &self,
+        ctx: &TaskCommandContext<S, W>,
+        execution_run_id: Uuid,
+        request_id: Uuid,
+        resolution_revision: u64,
+        cancellation: CancellationToken,
+    ) -> Result<TaskExecutionResult> {
+        handle_execution_continue(
+            self,
+            ctx,
+            execution_run_id,
+            request_id,
+            resolution_revision,
+            cancellation,
+        )
+        .await
+    }
 }
 
 async fn handle_task_execute<P, SessionRt, S, W>(
@@ -182,8 +212,8 @@ where
         cancellation,
     } = request;
     let (routine, agent) = match target {
-        nenjo_harness::TaskExecutionTarget::Agent(agent) => (None, Some(agent.as_str())),
-        nenjo_harness::TaskExecutionTarget::Routine(routine) => (Some(routine.as_str()), None),
+        nenjo_harness::TaskExecutionTarget::Agent { slug } => (None, Some(slug.as_str())),
+        nenjo_harness::TaskExecutionTarget::Routine { slug } => (Some(slug.as_str()), None),
     };
 
     // A terminal task session is the durable local receipt for a completed
@@ -235,10 +265,6 @@ where
     let assigned_agent_id = agent_slug
         .as_ref()
         .map(|slug| resolver.agent_id(slug))
-        .transpose()?;
-    let routine_id = routine_slug
-        .as_ref()
-        .map(|slug| resolver.routine_id(slug))
         .transpose()?;
     let task_slug = slug.unwrap_or("task");
     let repo_dir = project.as_ref().map(|_| ctx.worktrees.repo_dir(&pslug));
@@ -320,7 +346,7 @@ where
         agent_slug.as_ref().map(|slug| slug.as_str()),
         SessionUpsertMode::Await,
     )
-    .await;
+    .await?;
     update_task_checkpoint(
         harness,
         task_id,
@@ -332,7 +358,6 @@ where
     info!(
         agent = ?aname,
         task_id = %task_id,
-        routine_id = ?routine_id,
         execution_run_id = %execution_run_id,
         project = %pslug,
         title = %title,
@@ -464,7 +489,7 @@ where
                     agent_slug.as_ref().map(|slug| slug.as_str()),
                     SessionUpsertMode::Spawn,
                 )
-                .await;
+                .await?;
                 remove_active_execution_if_current(&harness.executions(), task_id, registry_token);
                 return Ok(task_execution_result(
                     execution_run_id,
@@ -511,18 +536,17 @@ where
     };
 
     let result = match target {
-        nenjo_harness::TaskExecutionTarget::Routine(_) => {
+        nenjo_harness::TaskExecutionTarget::Routine { .. } => {
             let routine = routine_slug
                 .clone()
                 .ok_or_else(|| anyhow!("routine target did not include a valid slug"))?;
-            resolver.routine_id(&routine)?;
             execute_routine_task(RoutineTaskExecution {
                 shared: execution,
                 request: request.clone().with_routine(routine),
             })
             .await
         }
-        nenjo_harness::TaskExecutionTarget::Agent(_) => {
+        nenjo_harness::TaskExecutionTarget::Agent { .. } => {
             let agent = agent_slug
                 .clone()
                 .ok_or_else(|| anyhow!("agent target did not include a valid slug"))?;
@@ -551,6 +575,29 @@ where
             TaskExecutionOutcome::failed(format!("{e:#}"), 0, 0)
         }
     };
+
+    if outcome.waiting_for_human {
+        remove_active_execution_if_current(&harness.executions(), task_id, registry_token);
+        upsert_task_session(
+            harness,
+            &TaskSessionRecord {
+                task_id,
+                memory_namespace: task_memory_namespace.as_deref(),
+                execution_run_id,
+                status: SessionStatus::Waiting,
+            },
+            routine_slug.as_ref().map(|slug| slug.as_str()),
+            &pslug,
+            aname.as_deref(),
+            agent_slug.as_ref().map(|slug| slug.as_str()),
+            SessionUpsertMode::Spawn,
+        )
+        .await?;
+        return Ok(TaskExecutionResult {
+            outcome: TaskExecutorOutcome::WaitingForHuman,
+            artifacts: None,
+        });
+    }
 
     // If execution itself errored (e.g. routine not found, agent build failure),
     // clean up before telling the platform the task is terminal.
@@ -591,7 +638,7 @@ where
             agent_slug.as_ref().map(|slug| slug.as_str()),
             SessionUpsertMode::Spawn,
         )
-        .await;
+        .await?;
         if let (Some(repo_dir), Some(git_lock)) = (repo_dir.as_ref(), git_lock.as_ref()) {
             evict_git_lock(&git_locks, repo_dir, git_lock);
         }
@@ -691,7 +738,7 @@ where
         agent_slug.as_ref().map(|slug| slug.as_str()),
         SessionUpsertMode::Spawn,
     )
-    .await;
+    .await?;
     if let (Some(repo_dir), Some(git_lock)) = (repo_dir.as_ref(), git_lock.as_ref()) {
         evict_git_lock(&git_locks, repo_dir, git_lock);
     }
@@ -818,6 +865,282 @@ where
     Ok(())
 }
 
+/// Restore and advance a durable human-capable scheduler checkpoint. This
+/// transition is committed locally before any downstream scheduling can be
+/// admitted, making broker redelivery a no-op for an already consumed
+/// revision.
+async fn handle_execution_continue<P, SessionRt, S, W>(
+    harness: &Harness<P, SessionRt>,
+    ctx: &TaskCommandContext<S, W>,
+    execution_run_id: Uuid,
+    request_id: Uuid,
+    resolution_revision: u64,
+    cancellation: CancellationToken,
+) -> Result<TaskExecutionResult>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    S: ResponseSender + Clone + 'static,
+    W: TaskWorktreeManager,
+{
+    let request_id = nenjo::routines::human_review::HumanRequestId::new(request_id);
+    let wire = ctx
+        .platform_api
+        .fetch_human_resolution(
+            execution_run_id,
+            request_id.into_uuid(),
+            resolution_revision,
+        )
+        .await
+        .map_err(|error| anyhow!("failed to fetch human resolution: {error}"))?;
+    if wire.review_id != request_id.into_uuid()
+        || wire.execution_id != execution_run_id
+        || u64::try_from(wire.version).ok() != Some(resolution_revision)
+    {
+        bail!("platform review response identity does not match the continuation");
+    }
+    let encrypted_checkpoint = match wire.checkpoint_payload_id {
+        Some(payload_id) => {
+            let payload = ctx
+                .platform_api
+                .fetch_execution_payload(payload_id)
+                .await
+                .map_err(|error| anyhow!("failed to fetch checkpoint payload: {error}"))?;
+            if payload.execution_id != execution_run_id || payload.kind != "checkpoint" {
+                bail!("checkpoint payload identity does not match the continuation");
+            }
+            payload.encrypted
+        }
+        None => wire
+            .encrypted_checkpoint
+            .clone()
+            .ok_or_else(|| anyhow!("platform review response is missing its checkpoint payload"))?,
+    };
+    let encrypted_checkpoint: nenjo_events::EncryptedPayload =
+        serde_json::from_value(encrypted_checkpoint)
+            .context("platform returned an invalid encrypted checkpoint envelope")?;
+    if encrypted_checkpoint.object_id != wire.checkpoint_id {
+        bail!("checkpoint envelope identity does not match the continuation");
+    }
+    let remote_checkpoint = ctx
+        .attachment_encoder
+        .decrypt_attachment(&encrypted_checkpoint)
+        .await
+        .context("failed to decrypt the organization routine checkpoint")?;
+    let remote_checkpoint: nenjo::routines::human_materialization::RoutineCheckpoint =
+        serde_json::from_str(&remote_checkpoint)
+            .context("platform routine checkpoint is incompatible")?;
+
+    let session = harness
+        .sessions()
+        .list()
+        .await?
+        .into_iter()
+        .find(|record| record.execution_run_id == Some(execution_run_id));
+    let checkpoint = if let Some(session) = &session {
+        let local = harness
+            .sessions()
+            .latest_checkpoint(session.session_id, Default::default())
+            .await?
+            .and_then(|checkpoint| checkpoint.opaque_state)
+            .and_then(|state| {
+                serde_json::from_value::<nenjo_harness::task_session::TaskOpaqueState>(state).ok()
+            })
+            .map(nenjo_harness::task_session::TaskOpaqueState::into_routine_checkpoint)
+            .filter(|local| local.execution_run_id == execution_run_id);
+        local.unwrap_or(remote_checkpoint)
+    } else {
+        remote_checkpoint
+    };
+    if checkpoint.execution_run_id != execution_run_id {
+        bail!("continuation execution does not match the checkpoint");
+    }
+    let task_id = checkpoint.task_id;
+    if session
+        .as_ref()
+        .is_some_and(|session| session.session_id != task_id)
+    {
+        bail!("continuation task does not match the local session");
+    }
+    let already_consumed = checkpoint
+        .consumed_resolutions
+        .get(&request_id)
+        .is_some_and(|revision| *revision == resolution_revision);
+    if already_consumed {
+        debug!(%execution_run_id, request_id = %request_id.into_uuid(), resolution_revision,
+            "Replaying durable suspension publication for consumed continuation");
+    }
+    let routine_slug = checkpoint.routine_slug.clone();
+    let manifest = harness.provider().manifest_snapshot();
+    let routine = manifest
+        .routines
+        .iter()
+        .find(|routine| routine.slug == routine_slug)
+        .ok_or_else(|| anyhow!("routine not found in worker manifest: {routine_slug}"))?;
+    let graph_bytes = serde_json::to_vec(routine)?;
+    let current_graph_revision = format!("sha256:{:x}", Sha256::digest(graph_bytes));
+    let identity = nenjo::routines::human_scheduler::RoutineCheckpointIdentity::new(
+        execution_run_id,
+        task_id,
+        routine_slug.clone(),
+        current_graph_revision,
+    );
+    let mut scheduler = nenjo::routines::human_scheduler::HumanReviewScheduler::restore(
+        routine, checkpoint, &identity,
+    )?;
+    if !already_consumed {
+        let decision = serde_json::from_value(wire.decision)
+            .context("platform returned an invalid human decision")?;
+        scheduler.apply_resolution(
+            nenjo::routines::human_materialization::ResolvedHumanRequest {
+                request_id,
+                resolution_revision,
+                decision,
+                resolved_at: wire.resolved_at.to_rfc3339(),
+            },
+        )?;
+    }
+    let checkpoint = scheduler.checkpoint();
+    if session.is_none() {
+        let project_slug = checkpoint
+            .input
+            .project
+            .as_ref()
+            .map(ToString::to_string)
+            .unwrap_or_default();
+        upsert_task_session(
+            harness,
+            &TaskSessionRecord {
+                task_id,
+                memory_namespace: None,
+                execution_run_id,
+                status: SessionStatus::Waiting,
+            },
+            Some(routine_slug.as_str()),
+            &project_slug,
+            None,
+            None,
+            SessionUpsertMode::Await,
+        )
+        .await?;
+    }
+    // Publish the consumed revision as the latest organization checkpoint
+    // before downstream work is admitted. Redelivery after local state loss
+    // restores this checkpoint instead of applying the decision twice.
+    let checkpoint_value = serde_json::to_value(&checkpoint)?;
+    let checkpoint_json = serde_json::to_string(&checkpoint_value)?;
+    let checkpoint_digest = format!("{:x}", Sha256::digest(checkpoint_json.as_bytes()));
+    let checkpoint_id = Uuid::new_v5(
+        &execution_run_id,
+        format!("routine-checkpoint:{checkpoint_digest}").as_bytes(),
+    );
+    let encrypted_checkpoint = ctx
+        .attachment_encoder
+        .encrypt_attachment(checkpoint_id, &checkpoint_json)
+        .await?;
+    ctx.platform_api
+        .put_execution_payload(
+            checkpoint_id,
+            &nenjo_platform::api_client::PutExecutionPayloadRequest {
+                execution_id: execution_run_id,
+                kind: nenjo_platform::api_client::ExecutionPayloadKind::Checkpoint,
+                encrypted: serde_json::to_value(&encrypted_checkpoint)?,
+            },
+        )
+        .await
+        .map_err(|error| anyhow!("failed to store consumed checkpoint payload: {error}"))?;
+    ctx.platform_api
+        .put_execution_checkpoint(
+            checkpoint_id,
+            &nenjo_platform::api_client::PutExecutionCheckpointRequest {
+                execution_id: execution_run_id,
+                contract: checkpoint.contract_version.clone(),
+                graph_revision: checkpoint.graph_revision.clone(),
+                payload_id: checkpoint_id,
+                review_ids: checkpoint
+                    .pending_requests
+                    .iter()
+                    .map(|request_id| request_id.into_uuid())
+                    .collect(),
+            },
+        )
+        .await
+        .map_err(|error| anyhow!("failed to store consumed checkpoint: {error}"))?;
+    // Mirror the same state locally after the authoritative platform commit.
+    nenjo_harness::task_session::update_task_routine_checkpoint(harness, task_id, &checkpoint)
+        .await?;
+    let input = checkpoint.input.clone();
+    let request = TaskRequest {
+        task_id: input.task_id.unwrap_or(task_id),
+        project: input.project.clone(),
+        title: input.title.clone(),
+        instructions: input.instructions.clone(),
+        routine: Some(routine_slug.clone()),
+        agent: None,
+        execution_run_id: Some(execution_run_id),
+        slug: input.slug.clone(),
+        labels: input.labels.clone(),
+        status: input.status.clone(),
+        priority: input.priority.clone(),
+        project_location: input.git.clone().map(ProjectLocation::from_git),
+    };
+    let outcome = execute_resumable_human_routine(ResumableRoutineTaskExecution {
+        harness,
+        command_ctx: ctx,
+        request,
+        routine_slug,
+        execution_run_id,
+        task_id,
+        cancel: &cancellation,
+        checkpoint: Some(checkpoint),
+        resolutions: Vec::new(),
+    })
+    .await?;
+    let status = if outcome.waiting_for_human {
+        SessionStatus::Waiting
+    } else if outcome.success {
+        SessionStatus::Completed
+    } else {
+        SessionStatus::Failed
+    };
+    transition_task_session(
+        harness,
+        &ctx.worker_id,
+        task_id,
+        Some(if outcome.waiting_for_human {
+            ExecutionPhase::Waiting
+        } else {
+            ExecutionPhase::Finalizing
+        }),
+        status,
+    )
+    .await;
+    if outcome.waiting_for_human {
+        return Ok(TaskExecutionResult {
+            outcome: TaskExecutorOutcome::WaitingForHuman,
+            artifacts: None,
+        });
+    }
+    let executor_outcome = if cancellation.is_cancelled() {
+        TaskExecutorOutcome::Cancelled
+    } else if outcome.success {
+        TaskExecutorOutcome::Completed
+    } else {
+        TaskExecutorOutcome::Failed(
+            outcome
+                .error
+                .clone()
+                .unwrap_or_else(|| "Routine failed".to_string()),
+        )
+    };
+    Ok(task_execution_result(
+        execution_run_id,
+        task_id,
+        outcome,
+        executor_outcome,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Execution helpers
 // ---------------------------------------------------------------------------
@@ -861,6 +1184,24 @@ struct DirectTaskExecution<
     request: TaskRequest,
 }
 
+struct ResumableRoutineTaskExecution<
+    'a,
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    S: ResponseSender,
+    W: TaskWorktreeManager,
+> {
+    harness: &'a Harness<P, SessionRt>,
+    command_ctx: &'a TaskCommandContext<S, W>,
+    request: TaskRequest,
+    routine_slug: Slug,
+    execution_run_id: Uuid,
+    task_id: Uuid,
+    cancel: &'a CancellationToken,
+    checkpoint: Option<nenjo::routines::human_materialization::RoutineCheckpoint>,
+    resolutions: Vec<nenjo::routines::human_materialization::ResolvedHumanRequest>,
+}
+
 async fn execute_routine_task<P, SessionRt, S, W>(
     exec: RoutineTaskExecution<'_, P, SessionRt, S, W>,
 ) -> Result<TaskExecutionOutcome>
@@ -899,6 +1240,30 @@ where
         .find(|candidate| candidate.slug == routine)
         .map(|candidate| candidate.steps.len())
         .ok_or_else(|| anyhow!("routine not found in worker manifest: {routine}"))?;
+    let human_capable = manifest
+        .routines
+        .iter()
+        .find(|candidate| candidate.slug == routine)
+        .is_some_and(|candidate| {
+            candidate
+                .steps
+                .iter()
+                .any(|step| step.step_type == nenjo::manifest::RoutineStepType::Human)
+        });
+    if human_capable {
+        return execute_resumable_human_routine(ResumableRoutineTaskExecution {
+            harness,
+            command_ctx: ctx,
+            request,
+            routine_slug: routine,
+            execution_run_id,
+            task_id,
+            cancel,
+            checkpoint: None,
+            resolutions: Vec::new(),
+        })
+        .await;
+    }
     let routine_watch = ctx
         .local_execution_watcher
         .start(execution_run_id, routine, total_steps);
@@ -1034,18 +1399,286 @@ where
     Ok(if cancel.is_cancelled() {
         TaskExecutionOutcome::failed("Cancelled", total_input_tokens, total_output_tokens)
     } else if routine_passed {
-        let routine_id = routine_slug
-            .as_deref()
-            .map(Slug::parse)
-            .transpose()?
-            .as_ref()
-            .map(|slug| crate::resource_resolver::stable_resource_id("routine", slug));
-        let attachments = build_handoff_attachments(ctx, routine_id, &terminal_handoffs).await?;
+        let attachments = build_handoff_attachments(ctx, &terminal_handoffs).await?;
         TaskExecutionOutcome::success(total_input_tokens, total_output_tokens)
             .with_attachments(attachments)
     } else {
         TaskExecutionOutcome::failed(output.text, total_input_tokens, total_output_tokens)
     })
+}
+
+async fn execute_resumable_human_routine<P, SessionRt, S, W>(
+    execution: ResumableRoutineTaskExecution<'_, P, SessionRt, S, W>,
+) -> Result<TaskExecutionOutcome>
+where
+    P: ProviderRuntime,
+    SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    S: ResponseSender + Clone + 'static,
+    W: TaskWorktreeManager,
+{
+    use nenjo::routines::human_materialization::{
+        HumanMaterializationContext, RoutineExecutionOutcome, ValidatedHumanRequestDraft,
+    };
+    let ResumableRoutineTaskExecution {
+        harness,
+        command_ctx: ctx,
+        request,
+        routine_slug,
+        execution_run_id,
+        task_id,
+        cancel,
+        checkpoint,
+        resolutions,
+    } = execution;
+
+    let manifest = harness.provider().manifest_snapshot();
+    let routine_manifest = manifest
+        .routines
+        .iter()
+        .find(|routine| routine.slug == routine_slug)
+        .ok_or_else(|| anyhow!("routine not found in worker manifest: {routine_slug}"))?;
+    let graph_bytes = serde_json::to_vec(routine_manifest)?;
+    let graph_revision = format!("sha256:{:x}", Sha256::digest(graph_bytes));
+    let task_input = TaskInput {
+        project: request.project.clone(),
+        task_id,
+        title: request.title.clone(),
+        instructions: request.instructions.clone(),
+        labels: request.labels.clone(),
+        status: request.status.clone(),
+        priority: request.priority.clone(),
+        slug: request.slug.clone(),
+    };
+    let mut run = nenjo::RoutineRun::task(task_input).execution_run(execution_run_id);
+    if let Some(location) = request.project_location.clone() {
+        run = run.project_location(location);
+    }
+    let identity = nenjo::routines::human_scheduler::RoutineCheckpointIdentity::new(
+        execution_run_id,
+        task_id,
+        routine_slug.clone(),
+        graph_revision,
+    );
+    let mut stream = harness
+        .provider()
+        .routine(&routine_slug)?
+        .run_resumable_stream(run, identity, checkpoint, resolutions)
+        .await?;
+    let mut total_input_tokens = 0;
+    let mut total_output_tokens = 0;
+    while let Some(event) = tokio::select! {
+        event = stream.recv() => event,
+        _ = cancel.cancelled() => { stream.cancel(); None },
+    } {
+        if let nenjo::RoutineEvent::StepCompleted { result, .. } = &event {
+            total_input_tokens += result.input_tokens;
+            total_output_tokens += result.output_tokens;
+        }
+        for response in
+            routine_event_to_responses(&event, execution_run_id, Some(task_id), None, &manifest)
+        {
+            let _ = ctx.response_sink.send(response);
+        }
+    }
+    match stream.output().await? {
+        RoutineExecutionOutcome::Completed(result) if result.passed => Ok(
+            TaskExecutionOutcome::success(total_input_tokens, total_output_tokens),
+        ),
+        RoutineExecutionOutcome::Completed(result) => Ok(TaskExecutionOutcome::failed(
+            result.output,
+            total_input_tokens,
+            total_output_tokens,
+        )),
+        RoutineExecutionOutcome::Failed(failure) => Ok(TaskExecutionOutcome::failed(
+            failure.summary,
+            total_input_tokens,
+            total_output_tokens,
+        )),
+        RoutineExecutionOutcome::Suspended {
+            mut checkpoint,
+            drafts,
+            ..
+        } => {
+            let draft_request_ids = drafts
+                .iter()
+                .map(|draft| draft.request_id)
+                .collect::<HashSet<_>>();
+            let mut opened = Vec::new();
+            for draft in drafts {
+                let context = HumanMaterializationContext {
+                    execution_run_id,
+                    step_slug: draft.step_slug.clone(),
+                    request_round: draft.round,
+                    task_title: request.title.clone(),
+                };
+                let materialized =
+                    ValidatedHumanRequestDraft::new(draft.spec.clone(), draft.inputs.clone())
+                        .prepare(&context)?;
+                opened.push((draft, materialized));
+            }
+            // Keep unpublished drafts only in the worker-local checkpoint so
+            // a failed event send can be retried without rerunning agents.
+            nenjo_harness::task_session::update_task_routine_checkpoint(
+                harness,
+                task_id,
+                &checkpoint,
+            )
+            .await?;
+            // The platform copy is a continuation checkpoint, not an upload
+            // outbox. Workspace-bearing drafts never leave the worker even
+            // inside the encrypted envelope.
+            let mut platform_checkpoint = checkpoint.clone();
+            platform_checkpoint.pending_drafts.clear();
+            let checkpoint_value = serde_json::to_value(&platform_checkpoint)?;
+            let checkpoint_json = serde_json::to_string(&checkpoint_value)?;
+            let checkpoint_digest = format!("{:x}", Sha256::digest(checkpoint_json.as_bytes()));
+            let checkpoint_id = Uuid::new_v5(
+                &execution_run_id,
+                format!("routine-checkpoint:{checkpoint_digest}").as_bytes(),
+            );
+            let encrypted_checkpoint = ctx
+                .attachment_encoder
+                .encrypt_attachment(checkpoint_id, &checkpoint_json)
+                .await?;
+            ctx.platform_api
+                .put_execution_payload(
+                    checkpoint_id,
+                    &nenjo_platform::api_client::PutExecutionPayloadRequest {
+                        execution_id: execution_run_id,
+                        kind: nenjo_platform::api_client::ExecutionPayloadKind::Checkpoint,
+                        encrypted: serde_json::to_value(&encrypted_checkpoint)?,
+                    },
+                )
+                .await
+                .map_err(|error| anyhow!("failed to store routine checkpoint payload: {error}"))?;
+            let existing_pending = checkpoint
+                .pending_requests
+                .iter()
+                .filter(|request_id| !draft_request_ids.contains(request_id))
+                .map(|request_id| request_id.into_uuid())
+                .collect::<Vec<_>>();
+            ctx.platform_api
+                .put_execution_checkpoint(
+                    checkpoint_id,
+                    &nenjo_platform::api_client::PutExecutionCheckpointRequest {
+                        execution_id: execution_run_id,
+                        contract: checkpoint.contract_version.clone(),
+                        graph_revision: checkpoint.graph_revision.clone(),
+                        payload_id: checkpoint_id,
+                        review_ids: existing_pending,
+                    },
+                )
+                .await
+                .map_err(|error| anyhow!("failed to store routine checkpoint: {error}"))?;
+            for (draft, materialized) in opened {
+                let encrypted_inputs = ctx
+                    .attachment_encoder
+                    .encrypt_attachment(
+                        materialized.request_id.into_uuid(),
+                        &serde_json::to_string(&materialized.inputs)?,
+                    )
+                    .await?;
+                let input_payload_id = materialized.request_id.into_uuid();
+                ctx.platform_api
+                    .put_execution_payload(
+                        input_payload_id,
+                        &nenjo_platform::api_client::PutExecutionPayloadRequest {
+                            execution_id: execution_run_id,
+                            kind: nenjo_platform::api_client::ExecutionPayloadKind::ReviewInputs,
+                            encrypted: serde_json::to_value(&encrypted_inputs)?,
+                        },
+                    )
+                    .await
+                    .map_err(|error| anyhow!("failed to store review inputs: {error}"))?;
+                let artifact_ids =
+                    nenjo::routines::handoff_schema::artifact_ids_in_inputs(&materialized.inputs)?;
+                let form = materialized_review_form(
+                    draft.spec.approval_schema,
+                    &materialized.option_snapshot,
+                )?;
+                ctx.platform_api
+                    .put_review(
+                        materialized.request_id.into_uuid(),
+                        &nenjo_platform::api_client::PutReviewRequest {
+                            execution_id: execution_run_id,
+                            task_id,
+                            step: draft.step_slug.to_string(),
+                            round: draft.round,
+                            title: materialized.title,
+                            inputs: nenjo_platform::api_client::ReviewInputsReference {
+                                blob_id: input_payload_id,
+                                schemas: materialized
+                                    .inputs
+                                    .iter()
+                                    .map(|input| input.schema.clone())
+                                    .collect(),
+                            },
+                            form,
+                            checkpoint_id,
+                            artifact_ids,
+                            wait_for_review: checkpoint.ready.is_empty()
+                                && checkpoint.running.is_empty(),
+                        },
+                    )
+                    .await
+                    .map_err(|error| anyhow!("failed to create review: {error}"))?;
+            }
+            for request_id in draft_request_ids {
+                checkpoint.pending_drafts.remove(&request_id);
+            }
+            nenjo_harness::task_session::update_task_routine_checkpoint(
+                harness,
+                task_id,
+                &checkpoint,
+            )
+            .await?;
+            Ok(TaskExecutionOutcome::waiting(
+                total_input_tokens,
+                total_output_tokens,
+            ))
+        }
+    }
+}
+
+fn materialized_review_form(
+    schema: Option<nenjo::routines::human_review::ApprovalSchema>,
+    snapshot: &nenjo::routines::human_review::ApprovalOptionSnapshot,
+) -> Result<Option<serde_json::Value>> {
+    let Some(schema) = schema else {
+        return Ok(None);
+    };
+    let fields = schema
+        .fields
+        .into_iter()
+        .map(|field| {
+            let options = snapshot
+                .fields
+                .get(&field.id)
+                .cloned()
+                .or(match field.options {
+                    nenjo::routines::human_review::ApprovalOptions::Static { values } => {
+                        Some(values)
+                    }
+                    nenjo::routines::human_review::ApprovalOptions::Inputs { .. } => None,
+                })
+                .ok_or_else(|| {
+                    anyhow!(
+                        "review form field '{}' is missing its materialized options",
+                        field.id
+                    )
+                })?;
+            Ok(serde_json::json!({
+                "id": field.id,
+                "label": field.label,
+                "type": field.field_type,
+                "required": field.required,
+                "min_items": field.min_items,
+                "max_items": field.max_items,
+                "options": options,
+            }))
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Some(serde_json::json!({ "fields": fields })))
 }
 
 async fn execute_direct_task<P, SessionRt, S, W>(
@@ -1166,13 +1799,15 @@ fn task_execution_result(
 ) -> TaskExecutionResult {
     TaskExecutionResult {
         outcome: executor_outcome,
-        artifacts: execution_task_artifacts_response(ExecutionTaskArtifactsResponse {
-            execution_run_id,
-            task_id: Some(task_id),
-            total_input_tokens: outcome.total_input_tokens,
-            total_output_tokens: outcome.total_output_tokens,
-            attachments: outcome.attachments,
-        }),
+        artifacts: Some(execution_task_artifacts_response(
+            ExecutionTaskArtifactsResponse {
+                execution_run_id,
+                task_id: Some(task_id),
+                total_input_tokens: outcome.total_input_tokens,
+                total_output_tokens: outcome.total_output_tokens,
+                attachments: outcome.attachments,
+            },
+        )),
     }
 }
 
@@ -1180,7 +1815,7 @@ fn task_execution_result(
 mod tests {
     use std::sync::Arc;
 
-    use super::remove_active_execution_if_current;
+    use super::{materialized_review_form, remove_active_execution_if_current};
     use dashmap::DashMap;
     use nenjo_harness::registry::{ActiveExecution, ExecutionKind, ExecutionRegistry};
     use tokio_util::sync::CancellationToken;
@@ -1216,5 +1851,43 @@ mod tests {
             .expect("current token should remove active execution");
         assert_eq!(removed.registry_token, current_token);
         assert!(!executions.contains_key(&task_id));
+    }
+
+    #[test]
+    fn review_form_contains_only_materialized_options() {
+        let schema = serde_json::from_value(serde_json::json!({
+            "fields": [{
+                "id": "component",
+                "label": "Component",
+                "type": "single_select",
+                "required": true,
+                "options": {
+                    "type": "inputs",
+                    "inputs": [{
+                        "input": "draft",
+                        "pointer": "/components",
+                        "value": "/id",
+                        "label": "/name"
+                    }]
+                }
+            }]
+        }))
+        .unwrap();
+        let snapshot = serde_json::from_value(serde_json::json!({
+            "fields": {
+                "component": [{ "value": "api", "label": "API" }]
+            }
+        }))
+        .unwrap();
+
+        let form = materialized_review_form(Some(schema), &snapshot)
+            .unwrap()
+            .unwrap();
+
+        assert_eq!(
+            form["fields"][0]["options"],
+            serde_json::json!([{ "value": "api", "label": "API" }])
+        );
+        assert!(form["fields"][0]["options"].get("type").is_none());
     }
 }

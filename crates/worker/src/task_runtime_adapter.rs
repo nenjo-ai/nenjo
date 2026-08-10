@@ -134,6 +134,7 @@ pub(crate) fn task_runtime_response(event: TaskRuntimeEvent) -> Response {
     let state = match item.state {
         TaskExecutionState::Queued => WireTaskExecutionState::Queued,
         TaskExecutionState::Running => WireTaskExecutionState::Running,
+        TaskExecutionState::WaitingForHuman => WireTaskExecutionState::WaitingForHuman,
         TaskExecutionState::Completed => WireTaskExecutionState::Completed,
         TaskExecutionState::Failed { error } => WireTaskExecutionState::Failed { error },
         TaskExecutionState::Cancelled => WireTaskExecutionState::Cancelled,
@@ -243,9 +244,48 @@ impl WorkerTaskExecutor {
                 },
             )
             .await?;
-        if !matches!(&result.outcome, TaskExecutorOutcome::Cancelled) {
+        if !matches!(
+            &result.outcome,
+            TaskExecutorOutcome::Cancelled | TaskExecutorOutcome::WaitingForHuman
+        ) && let Some(artifacts) = result.artifacts
+        {
             self.pending_artifacts
-                .insert(submission.execution_run_id, result.artifacts);
+                .insert(submission.execution_run_id, artifacts);
+        }
+        Ok(result.outcome)
+    }
+
+    /// Continue a suspended task under its original actor route while the
+    /// harness task runtime owns lifecycle revision advancement.
+    pub(crate) async fn continue_execution(
+        &self,
+        submission: TaskSubmission,
+        request_id: Uuid,
+        resolution_revision: u64,
+        cancellation: tokio_util::sync::CancellationToken,
+    ) -> Result<TaskExecutorOutcome> {
+        let mut context = self.base_context.clone();
+        context.actor_user_id = submission.requested_by;
+        context.response_tx =
+            ResponseSender::for_actor(self.response_tx.clone(), submission.requested_by);
+        context.org_response_tx = self.system_response_tx.clone();
+        let result = context
+            .harness
+            .handle_execution_continue(
+                &context.task_context(),
+                submission.execution_run_id,
+                request_id,
+                resolution_revision,
+                cancellation,
+            )
+            .await?;
+        if !matches!(
+            &result.outcome,
+            TaskExecutorOutcome::Cancelled | TaskExecutorOutcome::WaitingForHuman
+        ) && let Some(artifacts) = result.artifacts
+        {
+            self.pending_artifacts
+                .insert(submission.execution_run_id, artifacts);
         }
         Ok(result.outcome)
     }
@@ -274,7 +314,7 @@ mod tests {
         Command::TaskExecute {
             task_id: Uuid::new_v4(),
             project: None,
-            target: TaskExecutionTarget::Agent("coder".to_string()),
+            target: TaskExecutionTarget::agent("coder"),
             execution_run_id: Uuid::new_v4(),
             trigger,
             payload: Some(TaskExecuteContent {
@@ -304,7 +344,7 @@ mod tests {
             next_run_at: "2026-07-18T12:00:00Z".to_string(),
             enabled: true,
             project: None,
-            target: TaskExecutionTarget::Agent("coder".to_string()),
+            target: TaskExecutionTarget::agent("coder"),
             payload: Some(TaskExecuteContent {
                 title: "Plain task".to_string(),
                 instructions: Some("stored as plain JSON".to_string()),
@@ -328,7 +368,7 @@ mod tests {
                     task_id: Uuid::new_v4(),
                     execution_run_id: Uuid::new_v4(),
                     project: None,
-                    target: TaskExecutionTarget::Agent("coder".to_string()),
+                    target: TaskExecutionTarget::agent("coder"),
                     content: TaskContent {
                         title: "task".to_string(),
                         instructions: "work".to_string(),
@@ -339,6 +379,7 @@ mod tests {
                     },
                     trigger: TaskTrigger::Manual,
                 },
+                action: Default::default(),
                 state,
                 queued_at: now,
                 updated_at: now,

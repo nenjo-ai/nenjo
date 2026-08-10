@@ -105,3 +105,71 @@ pub struct WorkerEnrollmentStatusResponse {
     #[serde(default)]
     pub wrapped_ock: Option<WrappedOrgContentKey>,
 }
+
+/// Worker-authorized committed review response used to resume a checkpoint.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WorkerHumanResolutionResponse {
+    pub review_id: Uuid,
+    pub execution_id: Uuid,
+    pub version: i64,
+    pub checkpoint_id: Uuid,
+    pub checkpoint_payload_id: Option<Uuid>,
+    pub encrypted_checkpoint: Option<serde_json::Value>,
+    pub decision: serde_json::Value,
+    pub resolved_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ExecutionPayloadKind {
+    ReviewInputs,
+    Checkpoint,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PutExecutionPayloadRequest {
+    pub execution_id: Uuid,
+    pub kind: ExecutionPayloadKind,
+    pub encrypted: serde_json::Value,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ExecutionPayloadResponse {
+    pub id: Uuid,
+    pub execution_id: Uuid,
+    pub kind: String,
+    pub encrypted: serde_json::Value,
+    pub size_bytes: i64,
+    pub digest: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ReviewInputsReference {
+    pub blob_id: Uuid,
+    pub schemas: Vec<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct PutReviewRequest {
+    pub execution_id: Uuid,
+    pub task_id: Uuid,
+    pub step: String,
+    pub round: u32,
+    pub title: String,
+    pub inputs: ReviewInputsReference,
+    pub form: Option<serde_json::Value>,
+    pub checkpoint_id: Uuid,
+    pub artifact_ids: Vec<Uuid>,
+    pub wait_for_review: bool,
+}
+
+/// Encrypted replacement checkpoint for requests that remain pending after a
+/// parallel human decision advances the graph.
+#[derive(Debug, Clone, Serialize)]
+pub struct PutExecutionCheckpointRequest {
+    pub execution_id: Uuid,
+    pub contract: String,
+    pub graph_revision: String,
+    pub payload_id: Uuid,
+    pub review_ids: Vec<Uuid>,
+}

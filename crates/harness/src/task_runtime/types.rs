@@ -48,12 +48,27 @@ pub struct TaskSubmission {
     pub trigger: TaskTrigger,
 }
 
+/// Durable action the task inbox must execute for one receipt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum TaskInboxAction {
+    /// Start or recover the original task submission.
+    #[default]
+    Initial,
+    /// Resume one human-review request revision exactly once.
+    Continue {
+        request_id: Uuid,
+        resolution_revision: u64,
+    },
+}
+
 /// Durable lifecycle state for one local task invocation.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "status", rename_all = "snake_case")]
 pub enum TaskExecutionState {
     Queued,
     Running,
+    WaitingForHuman,
     Completed,
     Failed { error: String },
     Cancelled,
@@ -69,6 +84,7 @@ pub enum TaskExecutorOutcome {
     Completed,
     Failed(String),
     Cancelled,
+    WaitingForHuman,
 }
 
 impl TaskExecutionState {
@@ -85,6 +101,9 @@ impl TaskExecutionState {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TaskInboxItem {
     pub submission: TaskSubmission,
+    /// Durable execution intent retained across process restarts.
+    #[serde(default)]
+    pub action: TaskInboxAction,
     pub state: TaskExecutionState,
     pub queued_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -102,6 +121,7 @@ impl TaskInboxItem {
     pub fn queued(submission: TaskSubmission, now: DateTime<Utc>) -> Self {
         Self {
             submission,
+            action: TaskInboxAction::Initial,
             state: TaskExecutionState::Queued,
             queued_at: now,
             updated_at: now,

@@ -5,9 +5,9 @@ use uuid::Uuid;
 
 use super::FileTaskRuntimeStore;
 use crate::task_runtime::{
-    CancellationOutcome, EnqueueOutcome, OccurrenceOutcome, TaskContent, TaskExecutionState,
-    TaskExecutionTarget, TaskInboxItem, TaskRuntimeStore, TaskSchedule, TaskSubmission,
-    TaskTrigger,
+    CancellationOutcome, ContinuationOutcome, EnqueueOutcome, OccurrenceOutcome, TaskContent,
+    TaskExecutionState, TaskExecutionTarget, TaskInboxAction, TaskInboxItem, TaskRuntimeStore,
+    TaskSchedule, TaskSubmission, TaskTrigger,
 };
 
 fn submission(task_id: Uuid, execution_run_id: Uuid) -> TaskSubmission {
@@ -16,7 +16,7 @@ fn submission(task_id: Uuid, execution_run_id: Uuid) -> TaskSubmission {
         task_id,
         execution_run_id,
         project: None,
-        target: TaskExecutionTarget::Agent("coder".to_string()),
+        target: TaskExecutionTarget::agent("coder"),
         content: TaskContent {
             title: "task".to_string(),
             instructions: "work".to_string(),
@@ -48,7 +48,7 @@ fn schedule(task_id: Uuid, next_run_at: chrono::DateTime<Utc>) -> TaskSchedule {
         enabled: true,
         runnable: true,
         project: None,
-        target: TaskExecutionTarget::Agent("coder".to_string()),
+        target: TaskExecutionTarget::agent("coder"),
         content: TaskContent {
             title: "task".to_string(),
             instructions: "work".to_string(),
@@ -105,6 +105,48 @@ async fn running_receipts_recover_as_queued_and_are_persisted() {
     drop(recovered);
     let reopened = FileTaskRuntimeStore::open(dir.path().to_path_buf(), 10).unwrap();
     assert_eq!(reopened.recoverable().await.unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn continuation_is_persisted_before_dispatch_and_recovers_exactly() {
+    let dir = tempdir().unwrap();
+    let task_id = Uuid::new_v4();
+    let run_id = Uuid::new_v4();
+    let request_id = Uuid::new_v4();
+    let action = TaskInboxAction::Continue {
+        request_id,
+        resolution_revision: 3,
+    };
+    let store = FileTaskRuntimeStore::open(dir.path().to_path_buf(), 10).unwrap();
+    store
+        .enqueue(TaskInboxItem::queued(
+            submission(task_id, run_id),
+            Utc::now(),
+        ))
+        .await
+        .unwrap();
+    store
+        .transition(run_id, TaskExecutionState::Running)
+        .await
+        .unwrap();
+    store
+        .transition(run_id, TaskExecutionState::WaitingForHuman)
+        .await
+        .unwrap();
+    assert!(matches!(
+        store.enqueue_continuation(run_id, action).await.unwrap(),
+        ContinuationOutcome::Queued(_)
+    ));
+    assert_eq!(
+        store.enqueue_continuation(run_id, action).await.unwrap(),
+        ContinuationOutcome::Duplicate
+    );
+    drop(store);
+
+    let reopened = FileTaskRuntimeStore::open(dir.path().to_path_buf(), 10).unwrap();
+    let recoverable = reopened.recoverable().await.unwrap();
+    assert_eq!(recoverable.len(), 1);
+    assert_eq!(recoverable[0].action, action);
 }
 
 #[tokio::test]

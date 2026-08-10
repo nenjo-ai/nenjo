@@ -15,7 +15,7 @@ pub mod updates;
 pub use checkpoint::{CheckpointQuery, CheckpointStore};
 pub use lease::SessionLeaseGrant;
 pub use runtime::{
-    ChatSessionUpsert, CheckpointRecord, DomainSessionUpsert, NoopSessionRuntime,
+    ChatSessionUpsert, CheckpointPatch, CheckpointRecord, DomainSessionUpsert, NoopSessionRuntime,
     SessionCheckpointUpdate, SessionLeaseRequest, SessionOwnerKind, SessionRuntime,
     SessionRuntimeEvent, SessionRuntimeEventType, SessionTranscriptAppend, SessionTranscriptRecord,
     SessionTransition, SessionUpsert, SessionWriteOutcome, TaskSessionUpsert,

@@ -25,7 +25,7 @@ parking_lot = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "process", "sync", "time"] }
 tokio-util = { workspace = true, features = ["rt"] }
 futures-util = { workspace = true }
-uuid = { workspace = true, features = ["v4", "serde"] }
+uuid = { workspace = true, features = ["v4", "v5", "serde"] }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

@@ -2,8 +2,11 @@ use std::collections::HashSet;
 
 use anyhow::{Result, bail};
 use serde_json::Value;
+use uuid::Uuid;
 
 pub const HANDOFF_SCHEMA_METADATA_KEY: &str = "handoff_schema";
+/// JSON Schema string format identifying a ready Nenjo artifact.
+pub const ARTIFACT_ID_FORMAT: &str = "nenjo-artifact-id";
 
 const SUPPORTED_SCHEMA_KEYS: &[&str] = &[
     "$schema",
@@ -11,6 +14,7 @@ const SUPPORTED_SCHEMA_KEYS: &[&str] = &[
     "const",
     "description",
     "enum",
+    "format",
     "items",
     "maxItems",
     "maximum",
@@ -79,6 +83,9 @@ fn validate_schema_at(schema: &Value, path: &str, root: bool) -> Result<()> {
     }
     if schema_types.contains(&"string") {
         validate_non_negative_integer(object, path, "minLength")?;
+        validate_string_format(object, path)?;
+    } else if object.contains_key("format") {
+        bail!("{path}.format is only valid for string schemas");
     }
     if schema_types
         .iter()
@@ -87,6 +94,16 @@ fn validate_schema_at(schema: &Value, path: &str, root: bool) -> Result<()> {
         validate_number_schema(object, path)?;
     }
 
+    Ok(())
+}
+
+fn validate_string_format(object: &serde_json::Map<String, Value>, path: &str) -> Result<()> {
+    let Some(format) = object.get("format") else {
+        return Ok(());
+    };
+    if format.as_str() != Some(ARTIFACT_ID_FORMAT) {
+        bail!("{path}.format must be '{ARTIFACT_ID_FORMAT}'");
+    }
     Ok(())
 }
 
@@ -395,6 +412,66 @@ fn validate_string_value(
     {
         bail!("{path} must contain at least {min} character(s)");
     }
+    if schema.get("format").and_then(Value::as_str) == Some(ARTIFACT_ID_FORMAT) {
+        Uuid::parse_str(value)
+            .map_err(|_| anyhow::anyhow!("{path} must be a valid Nenjo artifact id"))?;
+    }
+    Ok(())
+}
+
+/// Collect distinct artifact identifiers from validated human-review inputs.
+///
+/// Only values whose handoff schema declares `format: nenjo-artifact-id` are
+/// considered artifact references; arbitrary UUID-looking strings are ignored.
+pub fn artifact_ids_in_inputs(
+    inputs: &[crate::routines::human_review::HumanReviewInput],
+) -> Result<Vec<Uuid>> {
+    let mut ids = Vec::new();
+    let mut seen = HashSet::new();
+    for input in inputs {
+        collect_artifact_ids(&input.schema, &input.value, &mut ids, &mut seen)?;
+    }
+    Ok(ids)
+}
+
+fn collect_artifact_ids(
+    schema: &Value,
+    value: &Value,
+    ids: &mut Vec<Uuid>,
+    seen: &mut HashSet<Uuid>,
+) -> Result<()> {
+    let Some(object) = schema.as_object() else {
+        return Ok(());
+    };
+    if object.get("format").and_then(Value::as_str) == Some(ARTIFACT_ID_FORMAT) {
+        if value.is_null() {
+            return Ok(());
+        }
+        let raw = value
+            .as_str()
+            .ok_or_else(|| anyhow::anyhow!("artifact reference must be a string"))?;
+        let id = Uuid::parse_str(raw)
+            .map_err(|_| anyhow::anyhow!("artifact reference must be a UUID"))?;
+        if seen.insert(id) {
+            ids.push(id);
+        }
+        return Ok(());
+    }
+    if let (Some(properties), Some(values)) = (
+        object.get("properties").and_then(Value::as_object),
+        value.as_object(),
+    ) {
+        for (name, child_schema) in properties {
+            if let Some(child) = values.get(name) {
+                collect_artifact_ids(child_schema, child, ids, seen)?;
+            }
+        }
+    }
+    if let (Some(items), Some(values)) = (object.get("items"), value.as_array()) {
+        for child in values {
+            collect_artifact_ids(items, child, ids, seen)?;
+        }
+    }
     Ok(())
 }
 
@@ -502,5 +579,45 @@ mod tests {
                 .to_string()
                 .contains("handoff.rating must be less than or equal to 5")
         );
+    }
+
+    #[test]
+    fn validates_and_collects_explicit_artifact_references() {
+        let artifact_id = Uuid::new_v4();
+        let schema = serde_json::json!({
+            "type": "object",
+            "required": ["report"],
+            "properties": {
+                "report": {"type": "string", "format": ARTIFACT_ID_FORMAT}
+            },
+            "additionalProperties": false
+        });
+        let value = serde_json::json!({"report": artifact_id});
+        validate_handoff_schema(&schema).unwrap();
+        validate_handoff_payload(&schema, &value).unwrap();
+        let inputs = vec![crate::routines::human_review::HumanReviewInput {
+            input: "prepare".into(),
+            source_name: "Prepare".into(),
+            purpose: None,
+            schema,
+            value,
+        }];
+        assert_eq!(artifact_ids_in_inputs(&inputs).unwrap(), vec![artifact_id]);
+    }
+
+    #[test]
+    fn rejects_invalid_artifact_reference_values() {
+        let schema = serde_json::json!({
+            "type": "object",
+            "properties": {
+                "report": {"type": "string", "format": ARTIFACT_ID_FORMAT}
+            }
+        });
+        let error = validate_handoff_payload(
+            &schema,
+            &serde_json::json!({"report": "not-an-artifact-id"}),
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("valid Nenjo artifact id"));
     }
 }

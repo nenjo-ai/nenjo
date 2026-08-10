@@ -92,6 +92,10 @@ impl TaskAttachmentEncoder for WorkerTaskAttachmentEncoder {
         )
         .await
     }
+
+    async fn decrypt_attachment(&self, payload: &EncryptedPayload) -> Result<String> {
+        decrypt_text_with_provider(&self.auth_provider, payload).await
+    }
 }
 
 #[async_trait]
@@ -402,7 +406,9 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     },
                 )
                 .await?;
-            ctx.response_tx.send(result.artifacts)?;
+            if let Some(artifacts) = result.artifacts {
+                ctx.response_tx.send(artifacts)?;
+            }
             Ok(())
         }
 
@@ -425,6 +431,10 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .handle_execution_resume(&ctx.task_context(), execution_run_id)
                 .await
         }
+
+        Command::ExecutionContinue { .. } => Err(anyhow::anyhow!(
+            "execution.continue must be routed through the durable task runtime"
+        )),
 
         Command::RepoSync {
             project,
@@ -632,6 +642,7 @@ impl CommandContext {
             attachment_encoder: Arc::new(WorkerTaskAttachmentEncoder {
                 auth_provider: self.auth_provider.clone(),
             }),
+            platform_api: self.api.clone(),
             local_execution_watcher: self.local_execution_watcher.clone(),
         }
     }

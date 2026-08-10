@@ -14,7 +14,7 @@ pub struct Envelope {
     pub message_id: Uuid,
     /// The user whose connection should receive this event.
     pub user_id: Uuid,
-    /// The event payload (a serialized [`Command`] or [`Response`]).
+    /// The event payload (a serialized [`crate::Command`] or [`crate::Response`]).
     pub payload: serde_json::Value,
     /// When the event was created.
     pub created_at: DateTime<Utc>,

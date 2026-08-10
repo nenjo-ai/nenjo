@@ -321,6 +321,7 @@ impl FileSessionRuntime {
                 current_phase: None,
                 active_tool_name: None,
                 worktree: None,
+                opaque_state: None,
             });
 
         let checkpoint = SessionCheckpoint {
@@ -328,8 +329,9 @@ impl FileSessionRuntime {
             seq,
             saved_at,
             current_phase: Some(update.phase),
-            active_tool_name: update.active_tool_name.or(base.active_tool_name),
-            worktree: update.worktree.or(base.worktree),
+            active_tool_name: update.active_tool_name.apply(base.active_tool_name),
+            worktree: update.worktree.apply(base.worktree),
+            opaque_state: update.opaque_state.apply(base.opaque_state),
         };
 
         self.checkpoints.save(checkpoint).await?;
@@ -375,8 +377,13 @@ impl FileSessionRuntime {
                 .update_checkpoint_record(SessionCheckpointUpdate {
                     session_id: transition.session_id,
                     phase,
-                    worktree: None,
-                    active_tool_name: None,
+                    worktree: nenjo_sessions::CheckpointPatch::Preserve,
+                    active_tool_name: nenjo_sessions::CheckpointPatch::Preserve,
+                    opaque_state: if Self::is_terminal_status(transition.status) {
+                        nenjo_sessions::CheckpointPatch::Clear
+                    } else {
+                        nenjo_sessions::CheckpointPatch::Preserve
+                    },
                 })
                 .await?;
         }
@@ -860,8 +867,9 @@ mod tests {
                     SessionCheckpointUpdate {
                         session_id,
                         phase: ExecutionPhase::Preparing,
-                        active_tool_name: None,
-                        worktree: None,
+                        active_tool_name: nenjo_sessions::CheckpointPatch::Preserve,
+                        worktree: nenjo_sessions::CheckpointPatch::Preserve,
+                        opaque_state: nenjo_sessions::CheckpointPatch::Preserve,
                     },
                 )],
             )
@@ -881,8 +889,9 @@ mod tests {
                     SessionCheckpointUpdate {
                         session_id,
                         phase: ExecutionPhase::Finalizing,
-                        active_tool_name: None,
-                        worktree: Some(worktree.clone()),
+                        active_tool_name: nenjo_sessions::CheckpointPatch::Preserve,
+                        worktree: nenjo_sessions::CheckpointPatch::Replace(worktree.clone()),
+                        opaque_state: nenjo_sessions::CheckpointPatch::Preserve,
                     },
                 )],
             )
@@ -965,6 +974,7 @@ mod tests {
                 current_phase: Some(ExecutionPhase::ExecutingTools),
                 active_tool_name: None,
                 worktree: None,
+                opaque_state: None,
             })
             .await
             .unwrap();

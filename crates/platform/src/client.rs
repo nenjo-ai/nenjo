@@ -5,6 +5,9 @@ use reqwest::{Client, StatusCode, Url, header, multipart};
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::artifact_tools::{
+    ArtifactCatalogRecord, ArtifactRecord, ArtifactUploadGrant, CreateArtifactUploadRequest,
+};
 use crate::manifest_contract::{
     AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, DomainPromptRecord, RoutineRecord,
 };
@@ -187,6 +190,9 @@ fn routine_graph_body<'a>(
                         RoutineEdgeCondition::Always => "always",
                         RoutineEdgeCondition::OnPass => "on_pass",
                         RoutineEdgeCondition::OnFail => "on_fail",
+                        RoutineEdgeCondition::Approved => "approved",
+                        RoutineEdgeCondition::ChangesRequested => "changes_requested",
+                        RoutineEdgeCondition::Rejected => "rejected",
                     }
                     .to_string(),
                 ),
@@ -2303,6 +2309,108 @@ impl PlatformManifestClient {
         }
 
         bail!("knowledge document not found in pack {pack}: {reference}")
+    }
+
+    /// Create an organization-scoped signed artifact upload session.
+    pub async fn create_artifact_upload(
+        &self,
+        request: &CreateArtifactUploadRequest,
+    ) -> Result<ArtifactUploadGrant> {
+        let response = self
+            .http
+            .post(format!("{}/api/v1/artifacts/uploads", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(request)
+            .send_with_platform_retry()
+            .await
+            .context("failed to create artifact upload")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("artifact upload initiation failed with status {status}: {body}");
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode artifact upload grant")
+    }
+
+    /// Upload encrypted bytes directly to a signed object-store URL.
+    pub async fn put_signed_artifact(
+        &self,
+        grant: &ArtifactUploadGrant,
+        ciphertext: Vec<u8>,
+    ) -> Result<()> {
+        if grant.already_ready {
+            return Ok(());
+        }
+        let upload_url = grant
+            .upload_url
+            .as_deref()
+            .context("artifact upload grant is missing its signed URL")?;
+        let response = self
+            .http
+            .put(upload_url)
+            .header(header::CONTENT_TYPE, &grant.content_type)
+            .header("x-amz-meta-sha256", &grant.ciphertext_digest)
+            .body(ciphertext)
+            .send()
+            .await
+            .context("failed to upload artifact to object storage")?;
+        if !response.status().is_success() {
+            bail!(
+                "signed artifact upload failed with status {}",
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Finalize a signed upload and return immutable artifact metadata.
+    pub async fn complete_artifact_upload(&self, upload_id: Uuid) -> Result<ArtifactRecord> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/api/v1/artifacts/uploads/{upload_id}/complete",
+                self.base_url
+            ))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to finalize artifact upload")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("artifact upload finalization failed with status {status}: {body}");
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode finalized artifact")
+    }
+
+    /// Browse the organization artifact catalog without exposing storage keys.
+    pub async fn view_artifacts(&self, path: &str, depth: u32) -> Result<ArtifactCatalogRecord> {
+        let mut url = Url::parse(&format!("{}/api/v1/artifacts", self.base_url))?;
+        url.query_pairs_mut()
+            .append_pair("path", path)
+            .append_pair("depth", &depth.to_string());
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to view artifacts")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("artifact catalog request failed with status {status}: {body}");
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode artifact catalog")
     }
 }
 

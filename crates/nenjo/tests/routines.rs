@@ -584,6 +584,7 @@ fn canonical_routine(mut routine: RoutineManifest) -> RoutineManifest {
                     | RoutineStepType::Council
                     | RoutineStepType::Terminal
                     | RoutineStepType::TerminalFail => RoutineEdgeCondition::Always,
+                    RoutineStepType::Human => RoutineEdgeCondition::Approved,
                 },
                 metadata: serde_json::json!({}),
             });

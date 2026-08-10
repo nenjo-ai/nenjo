@@ -268,6 +268,7 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
                 current_phase: Some(nenjo_sessions::ExecutionPhase::CallingModel),
                 active_tool_name: None,
                 worktree: None,
+                opaque_state: None,
             },
         }))
         .await
