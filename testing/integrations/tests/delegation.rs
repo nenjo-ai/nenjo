@@ -47,6 +47,10 @@ fn make_model() -> ModelManifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     }
 }
 
@@ -91,20 +95,13 @@ fn tool_call_names(output: &nenjo::TurnOutput) -> Vec<String> {
     output
         .messages
         .iter()
-        .filter(|message| message.role == "assistant")
-        .filter_map(|message| serde_json::from_str::<serde_json::Value>(&message.content).ok())
-        .filter_map(|value| {
-            value
-                .get("tool_calls")
-                .and_then(|calls| calls.as_array())
-                .cloned()
+        .filter_map(|message| match message {
+            nenjo_models::ConversationMessage::AssistantToolCalls { tool_calls, .. } => {
+                Some(tool_calls.iter().map(|call| call.name.clone()))
+            }
+            _ => None,
         })
         .flatten()
-        .filter_map(|call| {
-            call.get("name")
-                .and_then(|name| name.as_str())
-                .map(str::to_string)
-        })
         .collect()
 }
 
@@ -112,7 +109,18 @@ fn transcript_text(output: &nenjo::TurnOutput) -> String {
     output
         .messages
         .iter()
-        .map(|message| message.content.as_str())
+        .map(|message| match message {
+            nenjo_models::ConversationMessage::Chat(chat) => chat.content.clone(),
+            nenjo_models::ConversationMessage::AssistantToolCalls { text, tool_calls } => text
+                .clone()
+                .unwrap_or_else(|| serde_json::to_string(tool_calls).unwrap()),
+            nenjo_models::ConversationMessage::ToolResults(results) => results
+                .iter()
+                .map(|result| result.output.text_content())
+                .collect::<Vec<_>>()
+                .join("\n"),
+            nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.clone(),
+        })
         .collect::<Vec<_>>()
         .join("\n")
 }
@@ -121,14 +129,12 @@ fn tool_result_payloads(output: &nenjo::TurnOutput) -> Vec<serde_json::Value> {
     output
         .messages
         .iter()
-        .filter(|message| message.role == "tool")
-        .filter_map(|message| serde_json::from_str::<serde_json::Value>(&message.content).ok())
-        .filter_map(|message| {
-            message
-                .get("content")
-                .and_then(|content| content.as_str())
-                .and_then(|content| serde_json::from_str::<serde_json::Value>(content).ok())
+        .filter_map(|message| match message {
+            nenjo_models::ConversationMessage::ToolResults(results) => Some(results.iter()),
+            _ => None,
         })
+        .flatten()
+        .filter_map(|result| serde_json::from_str(result.output.as_text()?).ok())
         .collect()
 }
 

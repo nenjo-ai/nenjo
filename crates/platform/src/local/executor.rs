@@ -918,6 +918,10 @@ where
             context_window: params.data.context_window,
             base_url: params.data.base_url,
             native_tools: params.data.native_tools,
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         };
         self.writer
             .upsert_resource(&ManifestResource::Model(model.clone()))
@@ -1259,6 +1263,10 @@ mod tests {
             context_window: None,
             base_url: None,
             native_tools: vec![],
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         };
 
         let alt_model = ModelManifest {
@@ -1271,6 +1279,10 @@ mod tests {
             context_window: None,
             base_url: Some("https://api.example.com".into()),
             native_tools: vec![],
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         };
 
         let agent = AgentManifest {
@@ -2438,6 +2450,8 @@ mod tests {
                             config: RoutineStepConfigInput {
                                 instructions: None,
                                 metadata: Some(serde_json::json!({ "revised": true })),
+                                request: None,
+                                failure_reason: None,
                             },
                             encrypted_payload: None,
                             position_x: None,

@@ -5,7 +5,7 @@
 //! payloads used for deterministic fan-out and audit trails.
 
 use anyhow::{Context, Result, bail};
-use nenjo_models::ChatMessage;
+use nenjo_models::ConversationMessage;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -197,16 +197,19 @@ impl Tool for RouteNextStepsTool {
                 "pass" => format!(
                     "{} routing task(s) recorded for downstream routine steps.",
                     activated_routes(self.step_kind, &self.routes, verdict).len()
-                ),
+                )
+                .into(),
                 _ => match activated_routes(self.step_kind, &self.routes, verdict).len() {
                     0 => format!(
                         "{} step failure verdict recorded; downstream routing will not run.",
                         self.step_kind.label()
-                    ),
+                    )
+                    .into(),
                     count => format!(
                         "{} routing task(s) recorded for downstream routine steps.",
                         count
-                    ),
+                    )
+                    .into(),
                 },
             },
             error: None,
@@ -228,25 +231,15 @@ pub struct RouteNextStepsDecision {
 /// The most recent assistant message containing the tool must contain exactly
 /// one call. Earlier invalid attempts may remain in history after a corrective
 /// retry, but the terminal turn is always single-call.
-pub fn extract_route_next_steps(messages: &[ChatMessage]) -> Result<Option<Value>> {
-    for msg in messages.iter().rev() {
-        if msg.role != "assistant" {
-            continue;
-        }
-        let Ok(parsed) = serde_json::from_str::<Value>(&msg.content) else {
-            continue;
-        };
-        let Some(tool_calls) = parsed.get("tool_calls").and_then(|value| value.as_array()) else {
+pub fn extract_route_next_steps(messages: &[ConversationMessage]) -> Result<Option<Value>> {
+    for message in messages.iter().rev() {
+        let ConversationMessage::AssistantToolCalls { tool_calls, .. } = message else {
             continue;
         };
 
         let matching = tool_calls
             .iter()
-            .filter(|call| {
-                call.get("name")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|name| name == ROUTE_NEXT_STEPS_TOOL_NAME)
-            })
+            .filter(|call| call.name == ROUTE_NEXT_STEPS_TOOL_NAME)
             .collect::<Vec<_>>();
         if matching.is_empty() {
             continue;
@@ -254,12 +247,7 @@ pub fn extract_route_next_steps(messages: &[ChatMessage]) -> Result<Option<Value
         if matching.len() > 1 {
             bail!("Agent called {ROUTE_NEXT_STEPS_TOOL_NAME} more than once in the final turn");
         }
-        let args = matching[0]
-            .get("arguments")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                anyhow::anyhow!("{ROUTE_NEXT_STEPS_TOOL_NAME} arguments must be a JSON string")
-            })?;
+        let args = &matching[0].arguments;
         let value = serde_json::from_str::<Value>(args).with_context(|| {
             format!("{ROUTE_NEXT_STEPS_TOOL_NAME} arguments must parse as JSON")
         })?;
@@ -272,7 +260,9 @@ pub fn extract_route_next_steps(messages: &[ChatMessage]) -> Result<Option<Value
 ///
 /// This parses the terminal `route_next_steps` call into the verdict fields used
 /// by the task runtime and step result audit data.
-pub fn resolve_route_next_steps(messages: &[ChatMessage]) -> Result<RouteNextStepsDecision> {
+pub fn resolve_route_next_steps(
+    messages: &[ConversationMessage],
+) -> Result<RouteNextStepsDecision> {
     let Some(arguments) = extract_route_next_steps(messages)? else {
         bail!("Routine step did not call required route_next_steps tool");
     };
@@ -574,10 +564,17 @@ fn route_retry_instruction(step_kind: RoutingStepKind) -> &'static str {
     }
 }
 
-fn chat_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+fn chat_history(messages: &[ConversationMessage]) -> Vec<ConversationMessage> {
     messages
         .iter()
-        .filter(|message| message.role != "system" && message.role != "developer")
+        .filter(|message| {
+            !message.as_chat().is_some_and(|chat| {
+                matches!(
+                    chat.role,
+                    nenjo_models::ChatRole::System | nenjo_models::ChatRole::Developer
+                )
+            })
+        })
         .cloned()
         .collect()
 }

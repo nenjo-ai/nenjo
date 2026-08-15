@@ -1,4 +1,4 @@
-//! Memory and artifact tools for agent use.
+//! Persistent memory tools for agent use.
 
 use std::sync::Arc;
 
@@ -95,7 +95,7 @@ where
         if fact.is_empty() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("fact is required".into()),
             });
         }
@@ -105,7 +105,7 @@ where
 
         Ok(ToolResult {
             success: true,
-            output: format!("Stored in {scope} memory (category: {category})"),
+            output: format!("Stored in {scope} memory (category: {category})").into(),
             error: None,
         })
     }
@@ -206,7 +206,7 @@ where
 
         Ok(ToolResult {
             success: true,
-            output,
+            output: output.into(),
             error: None,
         })
     }
@@ -275,7 +275,7 @@ where
         if fact.is_empty() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("fact is required".into()),
             });
         }
@@ -295,15 +295,15 @@ where
             success: true,
             output: if deleted {
                 if let Some(category) = category {
-                    format!("Deleted fact from {scope}/{category}")
+                    format!("Deleted fact from {scope}/{category}").into()
                 } else {
-                    format!("Deleted fact from {scope} memory")
+                    format!("Deleted fact from {scope} memory").into()
                 }
             } else {
                 if let Some(category) = category {
-                    format!("Fact not found in {scope}/{category}")
+                    format!("Fact not found in {scope}/{category}").into()
                 } else {
-                    format!("Fact not found in {scope} memory")
+                    format!("Fact not found in {scope} memory").into()
                 }
             },
             error: None,
@@ -345,29 +345,18 @@ where
     Ok(false)
 }
 
-mod artifacts;
-
-pub use artifacts::{ArtifactDeleteTool, ArtifactReadTool, ArtifactSaveTool};
-
 // ---------------------------------------------------------------------------
 // Tool factory
 // ---------------------------------------------------------------------------
 
-/// Create all memory and artifact tools for an agent.
-pub fn memory_tools<M>(memory: Arc<M>, scope: MemoryScope, agent_name: &str) -> Vec<Arc<dyn Tool>>
+/// Create all persistent memory tools for an agent.
+pub fn memory_tools<M>(memory: Arc<M>, scope: MemoryScope) -> Vec<Arc<dyn Tool>>
 where
     M: Memory + ?Sized + 'static,
 {
     vec![
         Arc::new(MemoryStoreTool::new(memory.clone(), scope.clone())),
         Arc::new(MemoryRecallTool::new(memory.clone(), scope.clone())),
-        Arc::new(MemoryForgetTool::new(memory.clone(), scope.clone())),
-        Arc::new(ArtifactSaveTool::new(
-            memory.clone(),
-            scope.clone(),
-            agent_name.to_string(),
-        )),
-        Arc::new(ArtifactReadTool::new(memory.clone(), scope.clone())),
-        Arc::new(ArtifactDeleteTool::new(memory, scope)),
+        Arc::new(MemoryForgetTool::new(memory, scope)),
     ]
 }

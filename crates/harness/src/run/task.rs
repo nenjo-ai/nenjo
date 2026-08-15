@@ -574,6 +574,7 @@ fn task_input_from_request(request: &TaskRequest, task_slug: String) -> TaskInpu
         status: request.status.clone(),
         priority: request.priority.clone(),
         slug: Some(task_slug),
+        artifacts: request.artifacts.clone(),
     }
 }
 

@@ -214,14 +214,15 @@ Platform-connected workers compose several crates:
 - `nenjo-platform` fetches bootstrap manifests, persists manifest mutations, exposes manifest MCP tools, and classifies sensitive payload content.
 - `nenjo-sessions` defines shared session storage and coordination traits used by runtime implementations.
 - `nenjo-harness` handles platform commands around an assembled provider and records session/trace state through runtime traits.
-- `nenjo-worker` owns concrete config, bootstrap, event loop, native tools, local project knowledge sync, and file-backed session/artifact storage.
+- `nenjo-worker` owns concrete config, bootstrap, event loop, native tools, local project knowledge sync, file-backed sessions, and the trusted artifact cache.
 
 ## Key Features
 
 - **Provider-agnostic** — swap LLM providers without changing application code
 - **Turn loop engine** — automatic tool call execution, parallel tool dispatch, context compaction, and streaming
 - **Multi-agent delegation** — agents delegate subtasks to other agents with cycle detection and depth limiting
-- **Persistent memory and artifacts** — project, core, and shared memory scopes plus project/workspace artifact indexes with automatic prompt injection
+- **Persistent memory** — project, core, and shared fact scopes with automatic prompt injection
+- **Organization artifacts** — immutable platform revisions with catalog browsing and trusted worker-side plaintext caching
 - **Routine orchestration** — DAG-based multi-step execution with gates, councils, terminals, and cron scheduling
 - **Platform worker runtime** — capability-scoped event handling, secure envelopes, manifest sync, and session coordination
 - **Knowledge packs** — built-in, project, and custom documentation packs with metadata-first search and graph traversal tools
@@ -301,7 +302,7 @@ Provider::builder()
     .with_model_factory(factory)  // ModelProviderFactory — creates LLM providers
     .with_tool_factory(tools)     // ToolFactory — creates tools per agent
     .with_knowledge_packs([KnowledgePackEntry::new("docs:app", docs_pack)])
-    .with_memory(memory)          // Memory + artifacts — persistent agent state
+    .with_memory(memory)          // Project/core/shared persistent facts
     .build().await?
     -> Provider
 

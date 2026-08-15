@@ -187,20 +187,20 @@ impl Tool for NativeMediaTool {
                             model: &self.resolved.model,
                             provider_job: job,
                             instruction: "This media request is still rendering asynchronously. Do not call this generation tool again for the same user request.",
-                        })?,
+                        })?.into(),
                         error: None,
                     });
                 }
 
                 Ok(ToolResult {
                     success: true,
-                    output: serde_json::to_string_pretty(&NativeMediaResponse::Job { job })?,
+                    output: serde_json::to_string_pretty(&NativeMediaResponse::Job { job })?.into(),
                     error: None,
                 })
             }
             response => Ok(ToolResult {
                 success: true,
-                output: serde_json::to_string_pretty(&response)?,
+                output: serde_json::to_string_pretty(&response)?.into(),
                 error: None,
             }),
         }

@@ -4,7 +4,7 @@
 //! locations, such as checked-out worktrees, can be supplied by the caller via
 //! [`ProjectLocation`].
 
-use nenjo_models::ChatMessage;
+use nenjo_models::{ArtifactRef, ConversationMessage};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -71,6 +71,8 @@ pub struct TaskInput {
     pub status: Option<String>,
     pub priority: Option<String>,
     pub slug: Option<String>,
+    /// Immutable artifact revisions supplied with this task.
+    pub artifacts: Vec<ArtifactRef>,
 }
 
 impl TaskInput {
@@ -85,6 +87,7 @@ impl TaskInput {
             status: None,
             priority: None,
             slug: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -118,6 +121,11 @@ impl TaskInput {
         self.slug = Some(value.into());
         self
     }
+
+    pub fn artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
+        self.artifacts = artifacts;
+        self
+    }
 }
 
 /// Chat execution input.
@@ -125,8 +133,10 @@ impl TaskInput {
 pub struct ChatInput {
     pub project: Option<Slug>,
     pub message: String,
-    pub history: Vec<ChatMessage>,
+    pub history: Vec<ConversationMessage>,
     pub template_override: Option<String>,
+    /// Immutable artifact revisions attached to this user turn.
+    pub artifacts: Vec<ArtifactRef>,
 }
 
 impl ChatInput {
@@ -136,6 +146,7 @@ impl ChatInput {
             message: message.into(),
             history: Vec::new(),
             template_override: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -144,13 +155,18 @@ impl ChatInput {
         self
     }
 
-    pub fn history(mut self, history: Vec<ChatMessage>) -> Self {
+    pub fn history(mut self, history: Vec<ConversationMessage>) -> Self {
         self.history = history;
         self
     }
 
     pub fn template_override(mut self, template: impl Into<String>) -> Self {
         self.template_override = Some(template.into());
+        self
+    }
+
+    pub fn artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
+        self.artifacts = artifacts;
         self
     }
 }
@@ -160,7 +176,7 @@ impl ChatInput {
 pub struct FollowUpInput {
     pub project: Option<Slug>,
     pub message: String,
-    pub history: Vec<ChatMessage>,
+    pub history: Vec<ConversationMessage>,
 }
 
 /// Gate evaluation input used by routine internals.

@@ -25,7 +25,7 @@ pub use trace::{TokenUsage, TraceEvent, TracePhase, TraceQuery, TraceStore};
 pub use transcript::{TranscriptQuery, TranscriptStore};
 pub use types::{
     DomainState, ExecutionPhase, SessionCheckpoint, SessionKind, SessionLease, SessionRecord,
-    SessionRefs, SessionStatus, SessionSummary, SessionTranscriptChatMessage,
-    SessionTranscriptEvent, SessionTranscriptEventPayload, TranscriptState, WorktreeSnapshot,
+    SessionRefs, SessionStatus, SessionSummary, SessionTranscriptEvent,
+    SessionTranscriptEventPayload, TranscriptState, WorktreeSnapshot,
 };
 pub use updates::SessionUpdate;

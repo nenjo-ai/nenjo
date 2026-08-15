@@ -5,7 +5,9 @@
 
 use crate::ToolSpec;
 use crate::openai_tools::{ProviderToolSpec, convert_tools};
-use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
+use crate::traits::{
+    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
+};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -90,65 +92,52 @@ impl OllamaProvider {
         convert_tools(tools, crate::sanitize_tool_name_lenient)
     }
 
-    fn convert_messages(messages: &[ChatMessage]) -> Vec<Message> {
+    fn convert_messages(messages: &[ConversationMessage]) -> Vec<Message> {
         messages
             .iter()
-            .map(|m| {
-                // Reconstruct assistant tool-call messages for Ollama's format.
-                if m.role == "assistant"
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
-                    && let Some(tool_calls_value) = value.get("tool_calls")
-                    && let Ok(parsed_calls) =
-                        serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
-                {
-                    let tool_calls = parsed_calls
-                        .into_iter()
-                        .map(|tc| NativeToolCall {
-                            function: NativeFunctionCall {
-                                name: tc.name,
-                                arguments: serde_json::from_str(&tc.arguments)
-                                    .unwrap_or(serde_json::Value::Object(Default::default())),
-                            },
-                        })
-                        .collect::<Vec<_>>();
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    return Message {
-                        role: "assistant".to_string(),
-                        content,
-                        tool_calls: Some(tool_calls),
-                        tool_call_id: None,
-                    };
-                }
-
-                // Reconstruct tool result messages.
-                if m.role == "tool"
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
-                {
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    return Message {
+            .flat_map(|message| match message {
+                ConversationMessage::AssistantToolCalls { text, tool_calls } => vec![Message {
+                    role: "assistant".to_string(),
+                    content: text.clone(),
+                    tool_calls: Some(
+                        tool_calls
+                            .iter()
+                            .map(|tc| NativeToolCall {
+                                function: NativeFunctionCall {
+                                    name: tc.name.clone(),
+                                    arguments: serde_json::from_str(&tc.arguments)
+                                        .unwrap_or(serde_json::Value::Object(Default::default())),
+                                },
+                            })
+                            .collect(),
+                    ),
+                    tool_call_id: None,
+                }],
+                ConversationMessage::ToolResults(results) => results
+                    .iter()
+                    .map(|result| Message {
                         role: "tool".to_string(),
-                        content,
+                        content: Some(result.output.text_content()),
                         tool_calls: None,
                         tool_call_id: None,
-                    };
-                }
-
-                Message {
-                    role: if m.role == "developer" {
+                    })
+                    .collect(),
+                ConversationMessage::Chat(message) => vec![Message {
+                    role: if message.role == ChatRole::Developer {
                         "system".to_string()
                     } else {
-                        m.role.clone()
+                        message.role.to_string()
                     },
-                    content: Some(m.content.clone()),
+                    content: Some(message.content.clone()),
                     tool_calls: None,
                     tool_call_id: None,
-                }
+                }],
+                ConversationMessage::ArtifactAnalysis(analysis) => vec![Message {
+                    role: "user".to_string(),
+                    content: Some(analysis.model_context()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }],
             })
             .collect()
     }
@@ -162,6 +151,7 @@ impl ModelProvider for OllamaProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        request.reject_artifact_inputs()?;
         let ollama_request = NativeChatRequest {
             model: model.to_string(),
             messages: Self::convert_messages(request.messages),
@@ -272,8 +262,8 @@ mod tests {
     #[test]
     fn request_serializes_with_system() {
         let messages = vec![
-            ChatMessage::system("You are Nenjo"),
-            ChatMessage::user("hello"),
+            ConversationMessage::system("You are Nenjo"),
+            ConversationMessage::user("hello"),
         ];
         let req = NativeChatRequest {
             model: "llama3".to_string(),
@@ -292,7 +282,7 @@ mod tests {
 
     #[test]
     fn request_serializes_without_system() {
-        let messages = vec![ChatMessage::user("test")];
+        let messages = vec![ConversationMessage::user("test")];
         let req = NativeChatRequest {
             model: "mistral".to_string(),
             messages: OllamaProvider::convert_messages(&messages),
@@ -307,7 +297,7 @@ mod tests {
 
     #[test]
     fn developer_role_mapped_to_system() {
-        let messages = vec![ChatMessage::developer("Be helpful")];
+        let messages = vec![ConversationMessage::developer("Be helpful")];
         let converted = OllamaProvider::convert_messages(&messages);
         assert_eq!(converted[0].role, "system");
         assert_eq!(converted[0].content.as_deref(), Some("Be helpful"));

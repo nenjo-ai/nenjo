@@ -28,7 +28,9 @@ use crate::bootstrap::{
 use crate::config::Config;
 use crate::crypto::WorkerAuthProvider;
 use crate::external_mcp::ExternalMcpPool;
-use crate::media::{MediaProviderResolver, ModelAssignmentResolver, ResourceRef};
+use crate::media::{
+    MediaProviderResolver, ModelAssignmentResolver, ResourceRef, WorkerArtifactInputPreparer,
+};
 use crate::package_manifests::PackageManifestLoader;
 use crate::providers::registry::ModelProviderRegistry;
 use crate::sessions::{WorkerSessionRuntime, WorkerSessionStores};
@@ -37,8 +39,12 @@ use crate::tools::platform_payload::PlatformPayloadEncoder;
 use crate::tools::platform_services::PlatformToolServices;
 use crate::tools::{NativeRuntime, SecurityPolicy, WorkerToolFactory};
 
-pub type WorkerProvider =
-    Provider<Arc<ModelProviderRegistry>, WorkerToolFactory<NativeRuntime>, MarkdownMemory>;
+pub type WorkerProvider = Provider<
+    Arc<ModelProviderRegistry>,
+    WorkerToolFactory<NativeRuntime>,
+    MarkdownMemory,
+    WorkerArtifactInputPreparer,
+>;
 
 pub type WorkerHarness = Harness<WorkerProvider, WorkerSessionRuntime>;
 
@@ -261,6 +267,18 @@ pub(crate) async fn build_provider(
     let platform_tools =
         build_platform_tool_services(config, auth_provider, manifest_cache, manifest_refresh).await;
     let effective_config = config_with_cached_media_providers(config);
+    let artifact_input_preparer = match (
+        platform_tools.cached_org_id,
+        platform_tools.artifact_materializer.clone(),
+    ) {
+        (Some(org_id), Some(materializer)) => Some(WorkerArtifactInputPreparer::new(
+            org_id,
+            materializer,
+            config.manifests_dir.clone(),
+            provider_registry.clone(),
+        )),
+        (Some(_), None) | (None, Some(_)) | (None, None) => None,
+    };
     let tool_factory = WorkerToolFactory::with_skill_registry_and_provider_registry(
         security,
         NativeRuntime,
@@ -273,11 +291,11 @@ pub(crate) async fn build_provider(
     .with_local_execution_watcher(local_execution_watcher);
 
     let memory_dir = config.state_dir.join("memory");
-    let mem = MarkdownMemory::new(&memory_dir, &config.state_dir);
+    let mem = MarkdownMemory::new(&memory_dir);
     let live_manifest_reader = local_manifest_loader.clone();
     let argument_bindings = load_platform_package_argument_bindings(config)?;
 
-    let provider = Provider::builder()
+    let provider_builder = Provider::builder()
         .with_loader(global_package_manifest_loader(config))
         .with_loader(platform_package_manifest_loader(config))
         .with_loader(local_manifest_loader)
@@ -288,6 +306,8 @@ pub(crate) async fn build_provider(
         .with_agent_config(config.agent.clone())
         .with_argument_bindings(argument_bindings)
         .with_live_manifest_reader(live_manifest_reader)
+        .with_optional_artifact_input_preparer(artifact_input_preparer);
+    let provider = provider_builder
         .build()
         .await
         .context("Failed to build Provider")?;
@@ -503,13 +523,18 @@ async fn build_platform_tool_services(
         .filter(|org_id| !org_id.is_nil());
 
     PlatformToolServices::new(
-        manifest_store,
-        platform_client,
-        payload_encoder,
-        cached_org_id,
-        config.workspace_dir.clone(),
-        config.config_dir.join("library"),
-        read_only_manifest,
+        crate::tools::platform_services::PlatformToolServiceDependencies {
+            manifest_store,
+            platform_client,
+            payload_encoder,
+        },
+        crate::tools::platform_services::PlatformToolServiceConfig {
+            cached_org_id,
+            workspace_dir: config.workspace_dir.clone(),
+            library_dir: config.config_dir.join("library"),
+            state_dir: config.state_dir.clone(),
+            read_only_manifest,
+        },
     )
 }
 
@@ -576,6 +601,7 @@ mod tests {
         })
         .await
         .unwrap();
+        assert!(provider.artifact_input_preparer().is_none());
         let session_runtime = WorkerSessionRuntime::with_host(
             WorkerSessionStores::new(&config.state_dir),
             "manifest-refresh-test",

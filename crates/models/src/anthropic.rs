@@ -1,7 +1,9 @@
 //! Anthropic Claude provider. Authenticates via `x-api-key` header.
 
 use crate::ToolSpec;
-use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
+use crate::traits::{
+    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
+};
 use async_trait::async_trait;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
@@ -142,19 +144,12 @@ impl AnthropicProvider {
         )
     }
 
-    fn parse_assistant_tool_call_message(content: &str) -> Option<Vec<NativeContentOut>> {
-        let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
-        let tool_calls = value
-            .get("tool_calls")
-            .and_then(|v| serde_json::from_value::<Vec<ToolCall>>(v.clone()).ok())?;
-
+    fn assistant_tool_call_content(
+        text: Option<&str>,
+        tool_calls: &[crate::ToolCall],
+    ) -> Vec<NativeContentOut> {
         let mut blocks = Vec::new();
-        if let Some(text) = value
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .map(str::trim)
-            .filter(|t| !t.is_empty())
-        {
+        if let Some(text) = text.map(str::trim).filter(|t| !t.is_empty()) {
             blocks.push(NativeContentOut::Text {
                 text: text.to_string(),
             });
@@ -163,81 +158,75 @@ impl AnthropicProvider {
             let input = serde_json::from_str::<serde_json::Value>(&call.arguments)
                 .unwrap_or_else(|_| serde_json::Value::Object(serde_json::Map::new()));
             blocks.push(NativeContentOut::ToolUse {
-                id: call.id,
-                name: call.name,
+                id: call.id.clone(),
+                name: call.name.clone(),
                 input,
             });
         }
-        Some(blocks)
+        blocks
     }
 
-    fn parse_tool_result_message(content: &str) -> Option<NativeMessage> {
-        let value = serde_json::from_str::<serde_json::Value>(content).ok()?;
-        let tool_use_id = value
-            .get("tool_call_id")
-            .and_then(serde_json::Value::as_str)?
-            .to_string();
-        let result = value
-            .get("content")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("")
-            .to_string();
-        Some(NativeMessage {
+    fn tool_results_message(results: &[crate::ToolResultMessage]) -> NativeMessage {
+        NativeMessage {
             role: "user".to_string(),
-            content: vec![NativeContentOut::ToolResult {
-                tool_use_id,
-                content: result,
-            }],
-        })
+            content: results
+                .iter()
+                .map(|result| NativeContentOut::ToolResult {
+                    tool_use_id: result.tool_call_id.clone(),
+                    content: result.output.text_content(),
+                })
+                .collect(),
+        }
     }
 
-    fn convert_messages(messages: &[ChatMessage]) -> (Option<String>, Vec<NativeMessage>) {
+    fn convert_messages(messages: &[ConversationMessage]) -> (Option<String>, Vec<NativeMessage>) {
         let mut system_prompt: Option<String> = None;
         let mut native_messages = Vec::new();
 
-        for msg in messages {
-            match msg.role.as_str() {
-                "system" | "developer" => match &mut system_prompt {
-                    Some(existing) => {
-                        existing.push_str("\n\n");
-                        existing.push_str(&msg.content);
-                    }
-                    None => {
-                        system_prompt = Some(msg.content.clone());
-                    }
-                },
-                "assistant" => {
-                    if let Some(blocks) = Self::parse_assistant_tool_call_message(&msg.content) {
-                        native_messages.push(NativeMessage {
-                            role: "assistant".to_string(),
-                            content: blocks,
-                        });
-                    } else {
-                        native_messages.push(NativeMessage {
-                            role: "assistant".to_string(),
-                            content: vec![NativeContentOut::Text {
-                                text: msg.content.clone(),
-                            }],
-                        });
+        for message in messages {
+            match message {
+                ConversationMessage::Chat(msg)
+                    if matches!(msg.role, ChatRole::System | ChatRole::Developer) =>
+                {
+                    match &mut system_prompt {
+                        Some(existing) => {
+                            existing.push_str("\n\n");
+                            existing.push_str(&msg.content);
+                        }
+                        None => {
+                            system_prompt = Some(msg.content.clone());
+                        }
                     }
                 }
-                "tool" => {
-                    if let Some(tool_result) = Self::parse_tool_result_message(&msg.content) {
-                        native_messages.push(tool_result);
-                    } else {
-                        native_messages.push(NativeMessage {
-                            role: "user".to_string(),
-                            content: vec![NativeContentOut::Text {
-                                text: msg.content.clone(),
-                            }],
-                        });
-                    }
+                ConversationMessage::Chat(msg) => {
+                    let role = match msg.role {
+                        ChatRole::Assistant => "assistant",
+                        ChatRole::User => "user",
+                        ChatRole::System | ChatRole::Developer => unreachable!(
+                            "system and developer messages are handled by the guarded arm"
+                        ),
+                    };
+                    native_messages.push(NativeMessage {
+                        role: role.to_string(),
+                        content: vec![NativeContentOut::Text {
+                            text: msg.content.clone(),
+                        }],
+                    });
                 }
-                _ => {
+                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                    native_messages.push(NativeMessage {
+                        role: "assistant".to_string(),
+                        content: Self::assistant_tool_call_content(text.as_deref(), tool_calls),
+                    });
+                }
+                ConversationMessage::ToolResults(results) => {
+                    native_messages.push(Self::tool_results_message(results));
+                }
+                ConversationMessage::ArtifactAnalysis(analysis) => {
                     native_messages.push(NativeMessage {
                         role: "user".to_string(),
                         content: vec![NativeContentOut::Text {
-                            text: msg.content.clone(),
+                            text: analysis.model_context(),
                         }],
                     });
                 }
@@ -307,6 +296,7 @@ impl ModelProvider for AnthropicProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        request.reject_artifact_inputs()?;
         let credential = self.credential.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "Anthropic credentials not set. Set ANTHROPIC_API_KEY or ANTHROPIC_OAUTH_TOKEN (setup-token)."
@@ -419,11 +409,12 @@ mod tests {
     #[tokio::test]
     async fn chat_fails_without_key() {
         let p = AnthropicProvider::new(None);
-        let messages = vec![ChatMessage::user("hello")];
+        let messages = vec![ConversationMessage::user("hello")];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = p.chat(request, "claude-3-opus", 0.7).await;
         assert!(result.is_err());
@@ -444,13 +435,14 @@ mod tests {
     async fn chat_with_system_fails_without_key() {
         let p = AnthropicProvider::new(None);
         let messages = vec![
-            ChatMessage::system("You are Nenjo"),
-            ChatMessage::user("hello"),
+            ConversationMessage::system("You are Nenjo"),
+            ConversationMessage::user("hello"),
         ];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = p.chat(request, "claude-3-opus", 0.7).await;
         assert!(result.is_err());
@@ -460,8 +452,8 @@ mod tests {
     fn temperature_clamped_to_1() {
         // Anthropic caps temperature at 1.0; verify our request builder clamps it.
         let messages = vec![
-            ChatMessage::system("You are helpful"),
-            ChatMessage::user("hello"),
+            ConversationMessage::system("You are helpful"),
+            ConversationMessage::user("hello"),
         ];
         let (system, native_msgs) = AnthropicProvider::convert_messages(&messages);
         assert!(system.is_some());
@@ -482,9 +474,9 @@ mod tests {
     #[test]
     fn convert_messages_combines_system_and_developer() {
         let messages = vec![
-            ChatMessage::system("System prompt"),
-            ChatMessage::developer("Developer instructions"),
-            ChatMessage::user("hello"),
+            ConversationMessage::system("System prompt"),
+            ConversationMessage::developer("Developer instructions"),
+            ConversationMessage::user("hello"),
         ];
         let (system, native_msgs) = AnthropicProvider::convert_messages(&messages);
         assert_eq!(

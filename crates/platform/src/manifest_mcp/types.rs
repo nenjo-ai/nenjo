@@ -704,23 +704,30 @@ pub struct RoutineStepConfigInput {
     pub instructions: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub metadata: Option<Value>,
+    #[serde(
+        default,
+        deserialize_with = "deserialize_optional_human_step_spec",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub request: Option<nenjo::routines::human_review::HumanStepSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub failure_reason: Option<String>,
+}
+
+fn deserialize_optional_human_step_spec<'de, D>(
+    deserializer: D,
+) -> Result<Option<nenjo::routines::human_review::HumanStepSpec>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let request = Option::<Value>::deserialize(deserializer)?;
+    request
+        .map(nenjo::routines::human_review::HumanStepSpec::parse)
+        .transpose()
+        .map_err(serde::de::Error::custom)
 }
 
 impl RoutineStepConfigInput {
-    pub fn from_stored_config(config: &Value) -> Self {
-        let Some(object) = config.as_object() else {
-            return Self::default();
-        };
-
-        Self {
-            instructions: object
-                .get("instructions")
-                .and_then(|value| value.as_str())
-                .map(ToString::to_string),
-            metadata: object.get("metadata").cloned(),
-        }
-    }
-
     pub fn as_value(&self) -> Value {
         serde_json::to_value(self).unwrap_or_else(|_| serde_json::json!({}))
     }
@@ -801,42 +808,6 @@ pub struct RoutineConfigureDocument {
     pub graph: Option<RoutineGraphInput>,
 }
 
-impl RoutineDocument {
-    /// Convert the stored routine document into a graph write payload.
-    pub fn graph_input(&self) -> RoutineGraphInput {
-        RoutineGraphInput {
-            entry_steps: self.metadata.entry_steps.clone(),
-            steps: self
-                .steps
-                .iter()
-                .map(|step| RoutineStepInput {
-                    id: None,
-                    slug: step.slug.clone(),
-                    name: step.name.clone(),
-                    step_type: step.step_type,
-                    council: step.council.clone(),
-                    agent: step.agent.clone(),
-                    config: RoutineStepConfigInput::from_stored_config(&step.config),
-                    encrypted_payload: None,
-                    position_x: None,
-                    position_y: None,
-                    order_index: step.order_index,
-                })
-                .collect(),
-            edges: self
-                .edges
-                .iter()
-                .map(|edge| RoutineEdgeInput {
-                    source_step: edge.source_step.clone(),
-                    target_step: edge.target_step.clone(),
-                    condition: edge.condition,
-                    metadata: edge.metadata.clone(),
-                })
-                .collect(),
-        }
-    }
-}
-
 impl From<RoutineManifest> for RoutineDocument {
     fn from(routine: RoutineManifest) -> Self {
         let slug = routine.slug().clone();
@@ -909,6 +880,14 @@ pub struct ModelDocument {
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub native_tools: Vec<NativeModelToolId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<nenjo_models::ModelCapabilityId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<nenjo_models::ModelModality>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_modalities: Vec<nenjo_models::ModelModality>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_modes: Vec<nenjo_models::ModelExecutionMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -965,6 +944,10 @@ impl From<ModelManifest> for ModelDocument {
             context_window: model.context_window,
             base_url: model.base_url,
             native_tools: model.native_tools,
+            capabilities: model.capabilities,
+            input_modalities: model.input_modalities,
+            output_modalities: model.output_modalities,
+            execution_modes: model.execution_modes,
         }
     }
 }
@@ -1105,6 +1088,61 @@ mod tests {
                 .as_ref()
                 .and_then(|metadata| metadata.get("inputs")),
             Some(&serde_json::json!(["approved_script"]))
+        );
+        assert!(config.request.is_none());
+        assert!(config.failure_reason.is_none());
+    }
+
+    #[test]
+    fn routine_step_config_accepts_valid_human_request() {
+        let config = serde_json::from_value::<RoutineStepConfigInput>(serde_json::json!({
+            "request": {
+                "title": "Review {{ task.title }}"
+            }
+        }))
+        .expect("valid human request should deserialize");
+
+        assert_eq!(
+            config
+                .request
+                .as_ref()
+                .map(|request| request.title_template.as_str()),
+            Some("Review {{ task.title }}")
+        );
+    }
+
+    #[test]
+    fn routine_step_config_rejects_invalid_human_request() {
+        let error = serde_json::from_value::<RoutineStepConfigInput>(serde_json::json!({
+            "request": {
+                "title": ""
+            }
+        }))
+        .expect_err("empty human request title should fail at the tool boundary");
+
+        assert!(
+            error
+                .to_string()
+                .contains("request title must contain 1 to")
+        );
+    }
+
+    #[test]
+    fn human_and_terminal_config_round_trip_through_wire_shape() {
+        let config = serde_json::from_value::<RoutineStepConfigInput>(serde_json::json!({
+            "request": { "title": "Review release" },
+            "failure_reason": "Release rejected"
+        }))
+        .expect("valid step config");
+        let round_trip = serde_json::to_value(&config).expect("serialize step config");
+
+        assert_eq!(
+            round_trip["request"]["title"],
+            serde_json::json!("Review release")
+        );
+        assert_eq!(
+            round_trip["failure_reason"],
+            serde_json::json!("Release rejected")
         );
     }
 }

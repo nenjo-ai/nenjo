@@ -5,6 +5,7 @@
 //! via [`Provider::agent`], or start a
 //! blank agent builder with [`Provider::new_agent`].
 
+pub mod artifact_input;
 pub mod builder;
 pub mod error;
 pub mod runtime;
@@ -16,6 +17,7 @@ use std::sync::Arc;
 use anyhow::Result;
 
 pub use crate::routines::RoutineRunner;
+pub use artifact_input::{ArtifactInputPreparer, NoArtifactInputPreparer, PreparedModelArtifacts};
 pub use builder::ProviderBuilder;
 pub use error::ProviderError;
 pub use nenjo_models::{ModelProviderFactory, TypedModelProviderFactory};
@@ -53,17 +55,26 @@ use tracing::{debug, warn};
 /// factories. Use [`agent`](Self::agent) for manifest-backed agents, or
 /// [`new_agent`](Self::new_agent) when the caller supplies an agent manifest
 /// and model explicitly.
-pub struct Provider<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> {
-    inner: Arc<ProviderInner<ModelFactory, ToolFactoryImpl, Mem>>,
+pub struct Provider<
+    ModelFactory: ?Sized,
+    ToolFactoryImpl: ?Sized,
+    Mem: ?Sized,
+    ArtifactPreparer = NoArtifactInputPreparer,
+> {
+    inner: Arc<ProviderInner<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>>,
 }
 
 /// Compatibility provider with erased model factory, tool factory, and memory
 /// backend types.
-pub type ErasedProvider =
-    Provider<dyn ModelProviderFactory + 'static, dyn ToolFactory + 'static, dyn Memory + 'static>;
+pub type ErasedProvider<ArtifactPreparer = NoArtifactInputPreparer> = Provider<
+    dyn ModelProviderFactory + 'static,
+    dyn ToolFactory + 'static,
+    dyn Memory + 'static,
+    ArtifactPreparer,
+>;
 
-impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
-    for Provider<ModelFactory, ToolFactoryImpl, Mem>
+impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized, ArtifactPreparer> Clone
+    for Provider<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
 {
     fn clone(&self) -> Self {
         Self {
@@ -72,10 +83,15 @@ impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
     }
 }
 
-pub(crate) struct ProviderInner<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> {
+pub(crate) struct ProviderInner<
+    ModelFactory: ?Sized,
+    ToolFactoryImpl: ?Sized,
+    Mem: ?Sized,
+    ArtifactPreparer,
+> {
     manifest: ManifestIndex,
     context_renderer: ContextRenderer,
-    services: ProviderServices<ModelFactory, ToolFactoryImpl, Mem>,
+    services: ProviderServices<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>,
 }
 
 pub(crate) struct ManifestIndex {
@@ -596,7 +612,12 @@ impl KnowledgeRegistry for ManifestBackedKnowledgeRegistry {
     }
 }
 
-pub(crate) struct ProviderServices<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> {
+pub(crate) struct ProviderServices<
+    ModelFactory: ?Sized,
+    ToolFactoryImpl: ?Sized,
+    Mem: ?Sized,
+    ArtifactPreparer,
+> {
     pub(crate) model_factory: Arc<ModelFactory>,
     pub(crate) tool_factory: Arc<ToolFactoryImpl>,
     pub(crate) memory: Option<Arc<Mem>>,
@@ -604,10 +625,11 @@ pub(crate) struct ProviderServices<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized
     pub(crate) render_ctx_extra: RenderContextVars,
     pub(crate) argument_bindings: Vec<ResolvedArgumentBinding>,
     pub(crate) knowledge: ProviderKnowledgeState,
+    pub(crate) artifact_input_preparer: Option<Arc<ArtifactPreparer>>,
 }
 
-impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
-    for ProviderServices<ModelFactory, ToolFactoryImpl, Mem>
+impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized, ArtifactPreparer> Clone
+    for ProviderServices<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
 {
     fn clone(&self) -> Self {
         Self {
@@ -618,6 +640,7 @@ impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized> Clone
             render_ctx_extra: self.render_ctx_extra.clone(),
             argument_bindings: self.argument_bindings.clone(),
             knowledge: self.knowledge.clone(),
+            artifact_input_preparer: self.artifact_input_preparer.clone(),
         }
     }
 }
@@ -629,22 +652,24 @@ impl ErasedProvider {
     }
 }
 
-impl<ModelFactory, ToolFactoryImpl, Mem> Provider<ModelFactory, ToolFactoryImpl, Mem>
+impl<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
+    Provider<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
 where
     ModelFactory: TypedModelProviderFactory + ?Sized + 'static,
     ToolFactoryImpl: ToolFactory + ?Sized + 'static,
     Mem: ProviderMemory + ?Sized + 'static,
+    ArtifactPreparer: ArtifactInputPreparer + 'static,
 {
     pub(crate) fn new_inner(
         manifest: Arc<Manifest>,
-        services: ProviderServices<ModelFactory, ToolFactoryImpl, Mem>,
+        services: ProviderServices<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>,
     ) -> Self {
         Self::from_services(manifest, services)
     }
 
     fn from_services(
         manifest: Arc<Manifest>,
-        services: ProviderServices<ModelFactory, ToolFactoryImpl, Mem>,
+        services: ProviderServices<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>,
     ) -> Self {
         let render_blocks: Vec<_> = manifest
             .context_blocks
@@ -711,6 +736,10 @@ where
     /// Access the tool factory.
     pub fn tool_factory(&self) -> &ToolFactoryImpl {
         self.inner.services.tool_factory.as_ref()
+    }
+
+    pub fn artifact_input_preparer(&self) -> Option<&ArtifactPreparer> {
+        self.inner.services.artifact_input_preparer.as_deref()
     }
 
     pub(crate) fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest> {
@@ -998,12 +1027,13 @@ where
 }
 
 #[async_trait::async_trait]
-impl<ModelFactory, ToolFactoryImpl, Mem> ProviderRuntime
-    for Provider<ModelFactory, ToolFactoryImpl, Mem>
+impl<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer> ProviderRuntime
+    for Provider<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
 where
     ModelFactory: TypedModelProviderFactory + ?Sized + 'static,
     ToolFactoryImpl: ToolFactory + ?Sized + 'static,
     Mem: ProviderMemory + ?Sized + 'static,
+    ArtifactPreparer: ArtifactInputPreparer + 'static,
 {
     type Model<'a>
         = ModelFactory::Provider<'static>
@@ -1017,6 +1047,7 @@ where
         = Mem::Runtime<'static>
     where
         Self: 'a;
+    type ArtifactPreparer = ArtifactPreparer;
 
     fn manifest_snapshot(&self) -> Arc<Manifest> {
         Provider::manifest_snapshot(self)
@@ -1032,6 +1063,10 @@ where
 
     fn tool_factory(&self) -> &Self::ToolFactory<'_> {
         self.tool_factory()
+    }
+
+    fn artifact_input_preparer(&self) -> Option<&Self::ArtifactPreparer> {
+        self.artifact_input_preparer()
     }
 
     fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest> {

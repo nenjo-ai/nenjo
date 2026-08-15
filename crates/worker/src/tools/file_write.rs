@@ -81,7 +81,7 @@ impl Tool for FileWriteTool {
         if content.len() > MAX_FILE_MUTATION_BYTES {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "Content is too large: {} bytes (limit: {MAX_FILE_MUTATION_BYTES} bytes)",
                     content.len()
@@ -92,7 +92,7 @@ impl Tool for FileWriteTool {
         if !self.security.can_act() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Action blocked: autonomy is read-only".into()),
             });
         }
@@ -100,7 +100,7 @@ impl Tool for FileWriteTool {
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: too many actions in the last hour".into()),
             });
         }
@@ -109,7 +109,7 @@ impl Tool for FileWriteTool {
         if !self.security.is_path_allowed(&path) {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Path not allowed by security policy: {path}")),
             });
         }
@@ -121,7 +121,7 @@ impl Tool for FileWriteTool {
         if self.security.is_managed_runtime_path(&mutation_key) {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Path is managed by Nenjo runtime installs and is read-only".into()),
             });
         }
@@ -129,7 +129,7 @@ impl Tool for FileWriteTool {
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
@@ -150,12 +150,12 @@ impl Tool for FileWriteTool {
         match write_result {
             Ok(()) => Ok(ToolResult {
                 success: true,
-                output: format!("Written {content_len} bytes to {path}"),
+                output: format!("Written {content_len} bytes to {path}").into(),
                 error: None,
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Failed to write file: {e}")),
             }),
         }

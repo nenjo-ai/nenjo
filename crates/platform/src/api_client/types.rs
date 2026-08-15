@@ -113,8 +113,7 @@ pub struct WorkerHumanResolutionResponse {
     pub execution_id: Uuid,
     pub version: i64,
     pub checkpoint_id: Uuid,
-    pub checkpoint_payload_id: Option<Uuid>,
-    pub encrypted_checkpoint: Option<serde_json::Value>,
+    pub checkpoint_payload_id: Uuid,
     pub decision: serde_json::Value,
     pub resolved_at: DateTime<Utc>,
 }

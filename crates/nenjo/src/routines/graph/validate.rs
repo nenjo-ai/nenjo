@@ -157,6 +157,18 @@ fn validate_step_resource_bindings(steps: &[RoutineGraphStep]) -> ValidationResu
                     .step(step.slug.to_string()),
                 ));
             }
+            step_type
+                if step_type != RoutineGraphStepType::Human && step.human_request.is_some() =>
+            {
+                return Err(RoutineValidationError::single(
+                    RoutineValidationIssue::new(format!(
+                        "{} step '{}' may not define a human request contract",
+                        step_type_label(step_type),
+                        step.name
+                    ))
+                    .step(step.slug.to_string()),
+                ));
+            }
             _ => {}
         }
     }
@@ -1067,6 +1079,41 @@ mod tests {
         let mut non_human = valid_linear_graph();
         non_human.edges[0].condition = RoutineGraphEdgeCondition::Approved;
         assert_invalid(non_human, "may only originate from a human step");
+    }
+
+    #[test]
+    fn rejects_missing_or_misplaced_human_request_contract() {
+        let mut missing = RoutineGraph {
+            entry_steps: vec![Slug::derive("prepare")],
+            steps: vec![
+                step("prepare", RoutineGraphStepType::Agent),
+                human_step("review"),
+                step("done", RoutineGraphStepType::Terminal),
+                step("revise", RoutineGraphStepType::Terminal),
+                step("rejected", RoutineGraphStepType::TerminalFail),
+            ],
+            edges: vec![
+                edge("prepare", "review", RoutineGraphEdgeCondition::Always),
+                human_edge("review", "done", RoutineGraphEdgeCondition::Approved),
+                human_edge(
+                    "review",
+                    "revise",
+                    RoutineGraphEdgeCondition::ChangesRequested,
+                ),
+                human_edge("review", "rejected", RoutineGraphEdgeCondition::Rejected),
+            ],
+        };
+        missing.steps[1].human_request = None;
+        assert_invalid(missing, "must define a valid request contract");
+
+        let mut misplaced = valid_linear_graph();
+        misplaced.steps[0].human_request = Some(
+            crate::routines::human_review::HumanStepSpec::parse(serde_json::json!({
+                "title": "Review"
+            }))
+            .unwrap(),
+        );
+        assert_invalid(misplaced, "may not define a human request contract");
     }
 
     #[test]

@@ -53,6 +53,7 @@ fn schedule(definition: TaskScheduleDefinition) -> TaskSchedule {
             labels: Vec::new(),
             status: None,
             priority: None,
+            artifacts: Vec::new(),
         },
         revision: "1".to_string(),
     }
@@ -164,6 +165,7 @@ async fn manual_and_scheduled_tasks_share_one_concurrency_gate() {
                 labels: Vec::new(),
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             },
             trigger: TaskTrigger::Manual,
         })
@@ -209,6 +211,7 @@ async fn handled_executor_failure_is_persisted_as_failed() {
                 labels: Vec::new(),
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             },
             trigger: TaskTrigger::Manual,
         })
@@ -268,6 +271,7 @@ async fn human_continuation_uses_monotonic_inbox_revisions() {
                 labels: Vec::new(),
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             },
             trigger: TaskTrigger::Manual,
         })
@@ -346,6 +350,7 @@ async fn cancelling_running_work_flows_through_the_host_executor() {
                 labels: Vec::new(),
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             },
             trigger: TaskTrigger::Manual,
         })

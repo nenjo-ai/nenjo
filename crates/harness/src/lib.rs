@@ -269,7 +269,7 @@ mod tests {
                         current_phase: None,
                         active_tool_name: None,
                         worktree: None,
-                        opaque_state: None,
+                        state: None,
                     },
                 },
             ))

@@ -1570,7 +1570,6 @@ mod tests {
         McpServerManifest, SkillManifest,
     };
     use nenjo::skills::SkillProvider;
-    use nenjo_models::ChatMessage;
     use nenjo_nenpm::LockedPackage;
     use nenjo_packages::{
         ClaudePluginResource, claude_plugin_resources, parse_claude_plugin_command,
@@ -2564,8 +2563,8 @@ Run ${CLAUDE_SKILL_DIR}/scripts/review.sh when useful.
             .next()
             .unwrap();
         let messages = vec![
-            ChatMessage::user("run the loop".to_string()),
-            ChatMessage::assistant("done".to_string()),
+            nenjo_models::ConversationMessage::user("run the loop"),
+            nenjo_models::ConversationMessage::assistant("done"),
         ];
 
         let execution = runtime

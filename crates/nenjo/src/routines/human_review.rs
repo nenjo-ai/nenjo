@@ -18,6 +18,16 @@ use uuid::Uuid;
 /// Current normalized human-review contract identifier.
 pub const HUMAN_REVIEW_CONTRACT: &str = "nenjo.human-review.v1";
 
+const MAX_REQUEST_TITLE_BYTES: usize = 512;
+const MAX_APPROVAL_FIELDS: usize = 50;
+const MAX_FIELD_ID_BYTES: usize = 128;
+const MAX_FIELD_LABEL_BYTES: usize = 512;
+const MAX_APPROVAL_OPTIONS: usize = 500;
+const MAX_OPTION_SOURCES: usize = 32;
+const MAX_OPTION_VALUE_BYTES: usize = 4 * 1024;
+const MAX_JSON_POINTER_BYTES: usize = 1024;
+const MAX_DECISION_TEXT_BYTES: usize = 16 * 1024;
+
 /// Stable identifier for one immutable human request round.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(transparent)]
@@ -52,10 +62,12 @@ impl HumanStepSpec {
     pub fn parse(value: Value) -> Result<Self, HumanReviewError> {
         let spec: Self = serde_json::from_value(value)
             .map_err(|error| HumanReviewError::InvalidRequest(error.to_string()))?;
-        if spec.title_template.trim().is_empty() {
-            return Err(HumanReviewError::InvalidRequest(
-                "request title must not be empty".to_string(),
-            ));
+        if spec.title_template.trim().is_empty()
+            || spec.title_template.len() > MAX_REQUEST_TITLE_BYTES
+        {
+            return Err(HumanReviewError::InvalidRequest(format!(
+                "request title must contain 1 to {MAX_REQUEST_TITLE_BYTES} bytes"
+            )));
         }
         if let Some(approval) = &spec.approval_schema {
             approval.validate()?;
@@ -102,6 +114,11 @@ pub struct ApprovalSchema {
 
 impl ApprovalSchema {
     fn validate(&self) -> Result<(), HumanReviewError> {
+        if self.fields.len() > MAX_APPROVAL_FIELDS {
+            return Err(HumanReviewError::InvalidApprovalSchema(format!(
+                "approval schemas may define at most {MAX_APPROVAL_FIELDS} fields"
+            )));
+        }
         let mut ids = HashSet::new();
         for field in &self.fields {
             field.validate()?;
@@ -201,9 +218,13 @@ pub struct ApprovalField {
 
 impl ApprovalField {
     fn validate(&self) -> Result<(), HumanReviewError> {
-        if self.id.trim().is_empty() || self.label.trim().is_empty() {
+        if self.id.trim().is_empty()
+            || self.id.len() > MAX_FIELD_ID_BYTES
+            || self.label.trim().is_empty()
+            || self.label.len() > MAX_FIELD_LABEL_BYTES
+        {
             return Err(HumanReviewError::InvalidApprovalSchema(
-                "approval field id and label must not be empty".to_string(),
+                "approval field id or label is empty or too long".to_string(),
             ));
         }
         if self.field_type == ApprovalFieldType::SingleSelect
@@ -229,10 +250,22 @@ impl ApprovalField {
                     self.id
                 )))
             }
+            ApprovalOptions::Static { values } if values.len() > MAX_APPROVAL_OPTIONS => {
+                Err(HumanReviewError::InvalidApprovalSchema(format!(
+                    "approval field '{}' may define at most {MAX_APPROVAL_OPTIONS} options",
+                    self.id
+                )))
+            }
             ApprovalOptions::Static { values } => ensure_unique_option_values(&self.id, values),
             ApprovalOptions::Inputs { inputs } if inputs.is_empty() => {
                 Err(HumanReviewError::InvalidApprovalSchema(format!(
                     "approval field '{}' must define at least one input option source",
+                    self.id
+                )))
+            }
+            ApprovalOptions::Inputs { inputs } if inputs.len() > MAX_OPTION_SOURCES => {
+                Err(HumanReviewError::InvalidApprovalSchema(format!(
+                    "approval field '{}' may define at most {MAX_OPTION_SOURCES} option sources",
                     self.id
                 )))
             }
@@ -351,9 +384,9 @@ pub struct InputOptionSource {
 
 impl InputOptionSource {
     fn validate(&self, field_id: &str) -> Result<(), HumanReviewError> {
-        if self.input.trim().is_empty() {
+        if self.input.trim().is_empty() || self.input.len() > MAX_FIELD_ID_BYTES {
             return Err(HumanReviewError::InvalidApprovalSchema(format!(
-                "approval field '{field_id}' options input must not be empty"
+                "approval field '{field_id}' options input is empty or too long"
             )));
         }
         for (label, pointer) in [
@@ -361,6 +394,11 @@ impl InputOptionSource {
             ("value", &self.value),
             ("label", &self.label),
         ] {
+            if pointer.len() > MAX_JSON_POINTER_BYTES {
+                return Err(HumanReviewError::InvalidApprovalSchema(format!(
+                    "approval field '{field_id}' {label} exceeds {MAX_JSON_POINTER_BYTES} bytes"
+                )));
+            }
             validate_json_pointer(pointer).map_err(|reason| {
                 HumanReviewError::InvalidApprovalSchema(format!(
                     "approval field '{field_id}' has invalid {label}: {reason}"
@@ -382,6 +420,12 @@ impl InputOptionSource {
                 field: field_id.to_string(),
                 reason: format!("pointer '{}' did not resolve to an array", self.pointer),
             })?;
+        if items.len() > MAX_APPROVAL_OPTIONS {
+            return Err(HumanReviewError::OptionProjection {
+                field: field_id.to_string(),
+                reason: format!("option source produced more than {MAX_APPROVAL_OPTIONS} records"),
+            });
+        }
         items
             .iter()
             .map(|item| {
@@ -409,6 +453,15 @@ impl InputOptionSource {
                         ),
                     })?
                     .to_string();
+                if label.len() > MAX_FIELD_LABEL_BYTES
+                    || serde_json::to_vec(&value)
+                        .is_ok_and(|encoded| encoded.len() > MAX_OPTION_VALUE_BYTES)
+                {
+                    return Err(HumanReviewError::OptionProjection {
+                        field: field_id.to_string(),
+                        reason: "option value or label is too long".to_string(),
+                    });
+                }
                 Ok(ApprovalOption { value, label })
             })
             .collect()
@@ -429,7 +482,16 @@ fn resolve_input_options(
             continue;
         };
         matched = true;
-        options.extend(source.resolve(&input.value, field_id)?);
+        let projected = source.resolve(&input.value, field_id)?;
+        if options.len().saturating_add(projected.len()) > MAX_APPROVAL_OPTIONS {
+            return Err(HumanReviewError::OptionProjection {
+                field: field_id.to_string(),
+                reason: format!(
+                    "combined option sources produced more than {MAX_APPROVAL_OPTIONS} records"
+                ),
+            });
+        }
+        options.extend(projected);
     }
     if !matched {
         return Err(HumanReviewError::OptionProjection {
@@ -490,7 +552,7 @@ impl HumanDecision {
                 };
                 Ok(Self::Approved {
                     answers,
-                    comment: trim_optional(comment),
+                    comment: trim_optional(comment)?,
                 })
             }
             Self::ChangesRequested { instructions } => Ok(Self::ChangesRequested {
@@ -564,20 +626,29 @@ fn empty_object() -> Value {
 
 fn required_text(label: &str, value: String) -> Result<String, HumanReviewError> {
     let value = value.trim();
-    if value.is_empty() {
+    if value.is_empty() || value.len() > MAX_DECISION_TEXT_BYTES {
         Err(HumanReviewError::InvalidAnswers(format!(
-            "{label} must not be empty"
+            "{label} must contain 1 to {MAX_DECISION_TEXT_BYTES} bytes"
         )))
     } else {
         Ok(value.to_string())
     }
 }
 
-fn trim_optional(value: Option<String>) -> Option<String> {
-    value.and_then(|value| {
+fn trim_optional(value: Option<String>) -> Result<Option<String>, HumanReviewError> {
+    let value = value.and_then(|value| {
         let trimmed = value.trim();
         (!trimmed.is_empty()).then(|| trimmed.to_string())
-    })
+    });
+    if value
+        .as_ref()
+        .is_some_and(|value| value.len() > MAX_DECISION_TEXT_BYTES)
+    {
+        return Err(HumanReviewError::InvalidAnswers(format!(
+            "approval comment exceeds {MAX_DECISION_TEXT_BYTES} bytes"
+        )));
+    }
+    Ok(value)
 }
 
 fn ensure_unique_option_values(
@@ -586,12 +657,16 @@ fn ensure_unique_option_values(
 ) -> Result<(), HumanReviewError> {
     let mut values = HashSet::new();
     for option in options {
-        if !is_stable_scalar(&option.value) || option.label.trim().is_empty() {
+        let encoded = serde_json::to_string(&option.value).expect("JSON value serializes");
+        if !is_stable_scalar(&option.value)
+            || encoded.len() > MAX_OPTION_VALUE_BYTES
+            || option.label.trim().is_empty()
+            || option.label.len() > MAX_FIELD_LABEL_BYTES
+        {
             return Err(HumanReviewError::InvalidApprovalSchema(format!(
                 "approval field '{field_id}' options require scalar values and non-empty labels"
             )));
         }
-        let encoded = serde_json::to_string(&option.value).expect("JSON scalar serializes");
         if !values.insert(encoded) {
             return Err(HumanReviewError::InvalidApprovalSchema(format!(
                 "approval field '{field_id}' contains duplicate option values"
@@ -749,5 +824,46 @@ mod tests {
                 comment: Some("ok".into())
             }
         );
+    }
+
+    #[test]
+    fn review_contract_bounds_user_controlled_collections_and_text() {
+        assert!(
+            HumanStepSpec::parse(json!({"title": "x".repeat(MAX_REQUEST_TITLE_BYTES + 1)}))
+                .is_err()
+        );
+        assert!(
+            HumanStepSpec::parse(json!({
+                "title": "Review",
+                "approval": {"fields": (0..=MAX_APPROVAL_FIELDS).map(|index| json!({
+                    "id": format!("field_{index}"),
+                    "label": "Field",
+                    "type": "single_select",
+                    "options": {"type": "static", "values": [{"value": true, "label": "Yes"}]}
+                })).collect::<Vec<_>>()}
+            }))
+            .is_err()
+        );
+        assert!(
+            HumanDecision::Rejected {
+                reason: "x".repeat(MAX_DECISION_TEXT_BYTES + 1)
+            }
+            .validate(None, &ApprovalOptionSnapshot::default())
+            .is_err()
+        );
+
+        let spec = release_spec();
+        let oversized = vec![HumanReviewInput {
+            input: "api".into(),
+            source_name: "API".into(),
+            purpose: None,
+            schema: json!({"type": "object"}),
+            value: json!({
+                "components": (0..=MAX_APPROVAL_OPTIONS)
+                    .map(|index| json!({"id": index, "name": format!("Option {index}")}))
+                    .collect::<Vec<_>>()
+            }),
+        }];
+        assert!(spec.snapshot_options(&oversized).is_err());
     }
 }

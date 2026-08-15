@@ -7,7 +7,9 @@ use chrono::Utc;
 use nenjo::hooks::{ActiveHookScope, HookRuntime};
 use nenjo::memory::MemoryScope;
 use nenjo::provider::ToolFactory as _;
-use nenjo_models::ChatMessage;
+use nenjo_models::{
+    ArtifactInput, ArtifactInputSource, ArtifactRef, ChatMessage, ConversationMessage,
+};
 use nenjo_sessions::{
     ChatSessionUpsert, DomainSessionUpsert, DomainState, ExecutionPhase, SessionKind,
     SessionLeaseGrant, SessionOwnerKind, SessionRefs, SessionRuntimeEvent, SessionStatus,
@@ -25,8 +27,7 @@ use crate::handle::HarnessExecutionHandle;
 use crate::registry::{ActiveExecution, ExecutionKind};
 use crate::request::ChatRequest;
 use crate::session::{
-    TurnEventContext, chat_message_to_transcript, replay_transcript_history,
-    session_runtime_events_from_turn_event,
+    TurnEventContext, replay_transcript_history, session_runtime_events_from_turn_event,
 };
 use crate::{Harness, ProviderRuntime};
 
@@ -45,23 +46,16 @@ where
     let (events_tx, events_rx) = mpsc::unbounded_channel();
     let mut prepared = prepare_chat_execution(harness, request, events_tx).await?;
     let runner = build_chat_runner(harness, &prepared).await?;
-    let history = std::mem::take(&mut prepared.history);
-    let handle = match prepared.template_override.take() {
-        Some(template_override) => {
-            runner
-                .chat_with_history_template_stream(
-                    &prepared.effective_content,
-                    history,
-                    template_override,
-                )
-                .await?
-        }
-        None => {
-            runner
-                .chat_with_history_stream(&prepared.effective_content, history)
-                .await?
-        }
-    };
+    let mut input = nenjo::ChatInput::new(prepared.effective_content.clone())
+        .history(std::mem::take(&mut prepared.history))
+        .artifacts(std::mem::take(&mut prepared.artifacts));
+    if let Some(project) = prepared.project.clone() {
+        input = input.project(project);
+    }
+    if let Some(template_override) = prepared.template_override.take() {
+        input = input.template_override(template_override);
+    }
+    let handle = runner.run_stream(nenjo::AgentRun::chat(input)).await?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let registry_token = Uuid::new_v4();
 
@@ -118,12 +112,17 @@ where
     } else {
         request.message.clone()
     };
-    if effective_content.trim().is_empty() {
+    if effective_content.trim().is_empty() && request.artifacts.is_empty() {
         return Ok(false);
     }
 
+    let artifacts = user_artifact_inputs(&request.artifacts);
     turn_input
-        .send_user_message(request.input_message_id, effective_content.clone())
+        .send_user_message_with_artifacts(
+            request.input_message_id,
+            effective_content.clone(),
+            artifacts,
+        )
         .map_err(|error| {
             crate::HarnessError::Other(anyhow!("failed to queue chat message: {error}"))
         })?;
@@ -144,7 +143,8 @@ struct PreparedChatExecution {
     effective_domain_session_id: Option<Uuid>,
     hook_scopes: Vec<ActiveHookScope>,
     hook_transcript_dir: Option<std::path::PathBuf>,
-    history: Vec<ChatMessage>,
+    history: Vec<ConversationMessage>,
+    artifacts: Vec<ArtifactRef>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
     lease: SessionLeaseGrant,
@@ -170,6 +170,7 @@ where
         template_override,
         hook_scopes,
         hook_transcript_dir,
+        artifacts,
     } = request;
 
     let sessions = harness.sessions();
@@ -347,6 +348,7 @@ where
                 effective_domain_session_id,
                 hook_scopes,
                 hook_transcript_dir,
+                artifacts,
                 transcript_events,
                 events_tx,
                 worker_id,
@@ -370,6 +372,7 @@ where
             effective_domain_session_id,
             hook_scopes,
             hook_transcript_dir,
+            artifacts,
             transcript_events,
             events_tx,
             worker_id,
@@ -392,6 +395,7 @@ struct PreparedChatInput {
     hook_scopes: Vec<ActiveHookScope>,
     hook_transcript_dir: Option<std::path::PathBuf>,
     transcript_events: Vec<nenjo_sessions::SessionTranscriptEvent>,
+    artifacts: Vec<ArtifactRef>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
 }
@@ -418,17 +422,21 @@ where
         hook_scopes,
         hook_transcript_dir,
         transcript_events,
+        artifacts,
         events_tx,
         worker_id,
     } = input;
-    let history: Vec<ChatMessage> = replay_transcript_history(&transcript_events);
+    let history = replay_transcript_history(&transcript_events);
     sessions.record_events(
         lease.clone(),
         vec![SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
             session_id,
             turn_id: Some(turn_id),
-            payload: SessionTranscriptEventPayload::ChatMessage {
-                message: chat_message_to_transcript(&ChatMessage::user(effective_content.clone())),
+            payload: SessionTranscriptEventPayload::ConversationMessage {
+                message: ConversationMessage::chat(
+                    ChatMessage::user(effective_content.clone())
+                        .with_artifacts(user_artifact_inputs(&artifacts)),
+                ),
             },
         })],
     );
@@ -461,10 +469,19 @@ where
         hook_scopes,
         hook_transcript_dir,
         history,
+        artifacts,
         events_tx,
         worker_id,
         lease,
     })
+}
+
+fn user_artifact_inputs(artifacts: &[ArtifactRef]) -> Vec<ArtifactInput> {
+    artifacts
+        .iter()
+        .cloned()
+        .map(|artifact| ArtifactInput::new(artifact, ArtifactInputSource::UserAttachment))
+        .collect()
 }
 
 async fn build_chat_runner<P, SessionRt>(

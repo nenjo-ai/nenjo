@@ -508,7 +508,7 @@ where
                 if args.body.trim().is_empty() {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: String::new().into(),
                         error: Some("body is required".into()),
                     });
                 }
@@ -564,7 +564,7 @@ where
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&output)?,
+            output: serde_json::to_string_pretty(&output)?.into(),
             error: None,
         })
     }
@@ -646,7 +646,7 @@ impl Tool for ManifestContractTool {
             ManifestMcpContract::dispatch(self.backend.as_ref(), &self.spec.name, args).await?;
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&value)?,
+            output: serde_json::to_string_pretty(&value)?.into(),
             error: None,
         })
     }

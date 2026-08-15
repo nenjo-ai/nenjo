@@ -6,7 +6,9 @@
 
 use anyhow::Result;
 use derive_builder::Builder;
-use nenjo_models::{MediaOperation, NativeModelToolId};
+use nenjo_models::{
+    MediaOperation, ModelCapabilityId, ModelExecutionMode, ModelModality, NativeModelToolId,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -710,6 +712,18 @@ pub struct ModelManifest {
     /// Provider-native tools enabled for this model configuration.
     #[serde(default)]
     pub native_tools: Vec<NativeModelToolId>,
+    /// Assignable operations declared for this configured model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<ModelCapabilityId>,
+    /// Modalities accepted by this configured model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<ModelModality>,
+    /// Modalities produced by this configured model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_modalities: Vec<ModelModality>,
+    /// Execution styles supported by this configured model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_modes: Vec<ModelExecutionMode>,
 }
 
 impl_manifest_identity!(ModelManifest);

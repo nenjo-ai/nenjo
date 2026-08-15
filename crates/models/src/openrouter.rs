@@ -6,8 +6,13 @@ use crate::native::{
     MediaInputAsset, NativeMediaRequest, NativeMediaResponse, TranscribeAudioRequest,
     TranscriptSegment,
 };
+use crate::openai_multimodal::{
+    ChatArtifactDialect, ChatCompletionsContent, artifact_content, chat_artifact_transport,
+};
 use crate::openai_tools::{ProviderToolSpec, convert_tools};
-use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
+use crate::traits::{
+    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
+};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use reqwest::Client;
@@ -51,7 +56,7 @@ struct NativeProviderRouting {
 struct NativeMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<ChatCompletionsContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -197,66 +202,87 @@ impl OpenRouterProvider {
         convert_tools(tools, crate::sanitize_tool_name).filter(|items| !items.is_empty())
     }
 
-    fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
-        messages
-            .iter()
-            .map(|m| {
-                if m.role == "assistant"
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
-                    && let Some(tool_calls_value) = value.get("tool_calls")
-                    && let Ok(parsed_calls) =
-                        serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
-                {
-                    let tool_calls = parsed_calls
-                        .into_iter()
-                        .map(|tc| NativeToolCall {
-                            id: Some(tc.id),
-                            kind: Some("function".to_string()),
-                            function: NativeFunctionCall {
-                                name: tc.name,
-                                arguments: tc.arguments,
-                            },
-                        })
-                        .collect::<Vec<_>>();
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    return NativeMessage {
+    fn convert_messages(request: &ChatRequest<'_>) -> anyhow::Result<Vec<NativeMessage>> {
+        let mut native = Vec::new();
+        for message in request.messages {
+            match message {
+                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                    native.push(NativeMessage {
                         role: "assistant".to_string(),
-                        content,
+                        content: text.clone().map(ChatCompletionsContent::text),
                         tool_call_id: None,
-                        tool_calls: Some(tool_calls),
-                    };
+                        tool_calls: Some(
+                            tool_calls
+                                .iter()
+                                .map(|tc| NativeToolCall {
+                                    id: Some(tc.id.clone()),
+                                    kind: Some("function".to_string()),
+                                    function: NativeFunctionCall {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.clone(),
+                                    },
+                                })
+                                .collect(),
+                        ),
+                    });
                 }
-
-                if m.role == "tool"
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
-                {
-                    let tool_call_id = value
-                        .get("tool_call_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    return NativeMessage {
-                        role: "tool".to_string(),
-                        content,
-                        tool_call_id,
-                        tool_calls: None,
-                    };
+                ConversationMessage::ToolResults(results) => {
+                    for result in results {
+                        native.push(NativeMessage {
+                            role: "tool".to_string(),
+                            content: Some(ChatCompletionsContent::text(
+                                result.output.text_content(),
+                            )),
+                            tool_call_id: Some(result.tool_call_id.clone()),
+                            tool_calls: None,
+                        });
+                    }
+                    let references = results.iter().flat_map(|result| {
+                        result.output.parts().iter().filter_map(|part| match part {
+                            crate::ToolOutputPart::Artifact(reference) => Some((reference, None)),
+                            crate::ToolOutputPart::Text(_) => None,
+                        })
+                    });
+                    let content = artifact_content(
+                        "Inspect the attached artifact.",
+                        references,
+                        request.prepared_artifacts,
+                        ChatArtifactDialect::OpenRouter,
+                    )?;
+                    if content.has_media() {
+                        native.push(NativeMessage {
+                            role: "user".to_string(),
+                            content: Some(content),
+                            tool_call_id: None,
+                            tool_calls: None,
+                        });
+                    }
                 }
-
-                NativeMessage {
-                    role: m.role.clone(),
-                    content: Some(m.content.clone()),
+                ConversationMessage::Chat(message) => native.push(NativeMessage {
+                    role: message.role.to_string(),
+                    content: Some(artifact_content(
+                        &message.content,
+                        message.artifacts.iter().map(|input| {
+                            (
+                                input.artifact(),
+                                input.instruction().map(|value| value.as_str()),
+                            )
+                        }),
+                        request.prepared_artifacts,
+                        ChatArtifactDialect::OpenRouter,
+                    )?),
                     tool_call_id: None,
                     tool_calls: None,
-                }
-            })
-            .collect()
+                }),
+                ConversationMessage::ArtifactAnalysis(analysis) => native.push(NativeMessage {
+                    role: "user".to_string(),
+                    content: Some(ChatCompletionsContent::text(analysis.model_context())),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }),
+            }
+        }
+        Ok(native)
     }
 
     fn parse_native_response(message: NativeResponseMessage) -> ChatResponse {
@@ -397,6 +423,28 @@ impl OpenRouterProvider {
     }
 }
 
+fn supports_openrouter_transcription_media_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "audio/wav"
+            | "audio/wave"
+            | "audio/x-wav"
+            | "audio/mpeg"
+            | "audio/mp3"
+            | "audio/webm"
+            | "audio/mp4"
+            | "audio/m4a"
+            | "audio/x-m4a"
+            | "audio/aac"
+            | "audio/ogg"
+            | "audio/flac"
+            | "audio/aiff"
+            | "audio/x-aiff"
+            | "audio/pcm"
+            | "audio/l16"
+    )
+}
+
 fn openrouter_audio_input(asset: &MediaInputAsset) -> anyhow::Result<OpenRouterAudioInput> {
     let MediaInputAsset::DataUri { data_uri } = asset else {
         anyhow::bail!(
@@ -471,6 +519,7 @@ impl ModelProvider for OpenRouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        request.ensure_artifacts_prepared()?;
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!("OpenRouter API key not set. Set OPENROUTER_API_KEY env var.")
         })?;
@@ -489,12 +538,17 @@ impl ModelProvider for OpenRouterProvider {
                 allow_fallbacks: true,
             });
 
-        let messages = Self::convert_messages(request.messages);
+        let messages = Self::convert_messages(&request)?;
 
         // Log estimated request size so context-too-large issues are visible
         let estimated_chars: usize = messages
             .iter()
-            .map(|m| m.content.as_deref().unwrap_or("").len())
+            .map(|message| {
+                message
+                    .content
+                    .as_ref()
+                    .map_or(0, ChatCompletionsContent::estimated_text_len)
+            })
             .sum();
         let estimated_tokens = estimated_chars / 4;
         tracing::info!(
@@ -691,6 +745,41 @@ impl ModelProvider for OpenRouterProvider {
                 || m.contains("/gpt-4.1"))
     }
 
+    fn artifact_input_transport(
+        &self,
+        _model: &str,
+        capability: crate::ModelCapabilityId,
+        media_type: &crate::MediaType,
+    ) -> crate::ArtifactInputTransport {
+        const MAX_INLINE_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+        match capability {
+            crate::ModelCapabilityId::Chat
+            | crate::ModelCapabilityId::AnalyzeImage
+            | crate::ModelCapabilityId::AnalyzeVideo
+            | crate::ModelCapabilityId::AnalyzeDocument => {
+                chat_artifact_transport(ChatArtifactDialect::OpenRouter, media_type.essence_str())
+            }
+            crate::ModelCapabilityId::TranscribeAudio => {
+                if supports_openrouter_transcription_media_type(media_type.essence_str()) {
+                    crate::ArtifactInputTransport::Inline {
+                        max_bytes: std::num::NonZeroU64::new(MAX_INLINE_ARTIFACT_BYTES)
+                            .expect("inline artifact limit is non-zero"),
+                    }
+                } else {
+                    crate::ArtifactInputTransport::Unsupported
+                }
+            }
+            crate::ModelCapabilityId::GenerateSpeech
+            | crate::ModelCapabilityId::GenerateImage
+            | crate::ModelCapabilityId::EditImage
+            | crate::ModelCapabilityId::GenerateVideo
+            | crate::ModelCapabilityId::EditVideo
+            | crate::ModelCapabilityId::ImageToVideo
+            | crate::ModelCapabilityId::ReferenceToVideo
+            | crate::ModelCapabilityId::ExtendVideo => crate::ArtifactInputTransport::Unsupported,
+        }
+    }
+
     async fn submit_media(
         &self,
         request: NativeMediaRequest,
@@ -709,7 +798,7 @@ impl ModelProvider for OpenRouterProvider {
 mod tests {
     use super::*;
     use crate::native::{MediaInputAsset, TranscribeAudioRequest};
-    use crate::traits::{ChatMessage, ChatRequest, ModelProvider};
+    use crate::traits::{ChatRequest, ConversationMessage, ModelProvider};
 
     #[test]
     fn creates_with_key() {
@@ -891,11 +980,15 @@ mod tests {
     #[tokio::test]
     async fn chat_fails_without_key() {
         let provider = OpenRouterProvider::new(None);
-        let messages = vec![ChatMessage::system("system"), ChatMessage::user("hello")];
+        let messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::user("hello"),
+        ];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = provider.chat(request, "openai/gpt-4o", 0.2).await;
 
@@ -907,13 +1000,14 @@ mod tests {
     async fn chat_with_history_fails_without_key() {
         let provider = OpenRouterProvider::new(None);
         let messages = vec![
-            ChatMessage::system("be concise"),
-            ChatMessage::user("hello"),
+            ConversationMessage::system("be concise"),
+            ConversationMessage::user("hello"),
         ];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = provider
             .chat(request, "anthropic/claude-sonnet-4", 0.7)
@@ -921,5 +1015,58 @@ mod tests {
 
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("API key not set"));
+    }
+
+    #[test]
+    fn artifact_transport_matches_openrouter_multimodal_parts() {
+        let provider = OpenRouterProvider::new(None);
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "anthropic/claude-sonnet-4",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("image/webp").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "anthropic/claude-sonnet-4",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("video/mp4").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "google/gemini-2.5-pro",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("application/pdf").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "google/gemini-2.5-pro",
+                crate::ModelCapabilityId::AnalyzeDocument,
+                &crate::MediaType::parse("text/markdown").unwrap()
+            ),
+            crate::ArtifactInputTransport::InlineText { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "openai/gpt-audio",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("audio/flac").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "openai/whisper-1",
+                crate::ModelCapabilityId::TranscribeAudio,
+                &crate::MediaType::parse("audio/webm").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
     }
 }

@@ -18,7 +18,7 @@ use nenjo::routines::RoutineEvent;
 use nenjo::{ProjectLocation, RoutineRun, Slug, TaskInput};
 use nenjo::{Tool, ToolCategory, ToolResult};
 use nenjo_models::traits::{
-    ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall,
+    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
 };
 
 // ---------------------------------------------------------------------------
@@ -92,7 +92,7 @@ impl ModelProviderFactory for MockFactory {
 struct SequentialResponseMockLlm {
     responses: Arc<Vec<ChatResponse>>,
     call_index: Arc<AtomicUsize>,
-    seen_messages: Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>>,
+    seen_messages: Option<Arc<Mutex<Vec<Vec<ConversationMessage>>>>>,
 }
 
 #[async_trait::async_trait]
@@ -134,7 +134,7 @@ impl ModelProvider for SequentialResponseMockLlm {
 struct SequentialResponseMockFactory {
     responses: Arc<Vec<ChatResponse>>,
     call_index: Arc<AtomicUsize>,
-    seen_messages: Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>>,
+    seen_messages: Option<Arc<Mutex<Vec<Vec<ConversationMessage>>>>>,
 }
 
 impl SequentialResponseMockFactory {
@@ -154,7 +154,7 @@ impl SequentialResponseMockFactory {
         }
     }
 
-    fn seen_messages(&self) -> Option<Arc<Mutex<Vec<Vec<ChatMessage>>>>> {
+    fn seen_messages(&self) -> Option<Arc<Mutex<Vec<Vec<ConversationMessage>>>>> {
         self.seen_messages.clone()
     }
 }
@@ -291,7 +291,7 @@ impl ModelProviderFactory for RecordingToolsMockFactory {
 
 struct RecordingMessagesMockLlm {
     response: ChatResponse,
-    seen_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+    seen_messages: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
 }
 
 #[async_trait::async_trait]
@@ -324,7 +324,7 @@ impl ModelProvider for RecordingMessagesMockLlm {
 
 struct RecordingMessagesMockFactory {
     response: ChatResponse,
-    seen_messages: Arc<Mutex<Vec<Vec<ChatMessage>>>>,
+    seen_messages: Arc<Mutex<Vec<Vec<ConversationMessage>>>>,
 }
 
 impl RecordingMessagesMockFactory {
@@ -335,7 +335,7 @@ impl RecordingMessagesMockFactory {
         }
     }
 
-    fn seen_messages(&self) -> Arc<Mutex<Vec<Vec<ChatMessage>>>> {
+    fn seen_messages(&self) -> Arc<Mutex<Vec<Vec<ConversationMessage>>>> {
         self.seen_messages.clone()
     }
 }
@@ -458,6 +458,10 @@ fn model(_id: Uuid) -> ModelManifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     }
 }
 
@@ -491,11 +495,20 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
     }
 }
 
-fn messages_contain(messages: &[Vec<ChatMessage>], needle: &str) -> bool {
-    messages
-        .iter()
-        .flatten()
-        .any(|message| message.content.contains(needle))
+fn messages_contain(messages: &[Vec<ConversationMessage>], needle: &str) -> bool {
+    messages.iter().flatten().any(|message| match message {
+        ConversationMessage::Chat(chat) => chat.content.contains(needle),
+        ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+            text.as_deref().is_some_and(|text| text.contains(needle))
+                || tool_calls
+                    .iter()
+                    .any(|call| call.arguments.contains(needle))
+        }
+        ConversationMessage::ToolResults(results) => {
+            results.iter().any(|result| result.output.contains(needle))
+        }
+        ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.contains(needle),
+    })
 }
 
 fn project() -> ProjectManifest {

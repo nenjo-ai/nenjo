@@ -76,6 +76,7 @@ pub async fn execute_council_chat<P>(
     council: Slug,
     project: Option<Slug>,
     message: String,
+    artifacts: Vec<nenjo_models::ArtifactRef>,
     session_id: Uuid,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult>
@@ -89,8 +90,9 @@ where
         .with_step_type(crate::manifest::RoutineStepType::Council)
         .with_council(council)
         .build()?;
-    let mut input =
-        RoutineInput::new("Council chat", message).with_session_binding(SessionBinding {
+    let mut input = RoutineInput::new("Council chat", message)
+        .with_artifacts(artifacts)
+        .with_session_binding(SessionBinding {
             session_id,
             memory_namespace: None,
         });
@@ -229,7 +231,7 @@ where
 #[derive(Debug, Clone)]
 enum CouncilInvocation {
     Chat {
-        history: Vec<nenjo_models::ChatMessage>,
+        history: Vec<nenjo_models::ConversationMessage>,
     },
     Task,
 }
@@ -246,6 +248,7 @@ impl CouncilInvocation {
                 history: history.clone(),
                 project: state.input.project.clone(),
                 template_override: None,
+                artifacts: state.input.artifacts.clone(),
             }),
             CouncilInvocation::Task => {
                 AgentRun::task(task_input_for_instruction(state, instruction.into()))
@@ -306,6 +309,7 @@ fn task_input_for_instruction(state: &RoutineState, description: String) -> Task
         status: state.input.status.clone(),
         priority: state.input.priority.clone(),
         slug: state.input.slug.clone(),
+        artifacts: state.input.artifacts.clone(),
     }
 }
 

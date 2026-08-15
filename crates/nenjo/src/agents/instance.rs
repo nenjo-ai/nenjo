@@ -69,7 +69,6 @@ pub(crate) struct AgentPromptState {
     pub(crate) context: PromptContext,
     pub(crate) renderer: ContextRenderer,
     pub(crate) memory_vars: HashMap<String, String>,
-    pub(crate) artifact_vars: HashMap<String, String>,
 }
 
 /// Runtime resources attached to an agent instance.
@@ -314,7 +313,7 @@ impl<P: ProviderRuntime> AgentInstance<P> {
     /// (from the DB) are rendered first, then merged into the vars so
     /// `{{ context.* }}` references resolve in the final prompts.
     pub fn build_prompts(&self, run: &AgentRun) -> anyhow::Result<BuiltPrompts> {
-        self.build_prompts_with_vars(run, None, None)
+        self.build_prompts_with_vars(run, None)
     }
 
     /// Fallible prompt builder used by the execution path so missing/conflicting
@@ -327,7 +326,6 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         &self,
         run: &AgentRun,
         memory_vars: Option<&HashMap<String, String>>,
-        artifact_vars: Option<&HashMap<String, String>>,
     ) -> anyhow::Result<BuiltPrompts> {
         // 1. Build the render context from the run input + extras
         let mut ctx = render_context_from_agent_run(run);
@@ -387,13 +385,10 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             },
         };
 
-        // Memories and artifacts
+        // Memories
         ctx.memory_vars = memory_vars
             .cloned()
             .unwrap_or_else(|| self.prompt.memory_vars.clone());
-        ctx.artifact_vars = artifact_vars
-            .cloned()
-            .unwrap_or_else(|| self.prompt.artifact_vars.clone());
         ctx.knowledge_vars = ex.knowledge_vars.clone();
 
         // 3. Build the vars HashMap once

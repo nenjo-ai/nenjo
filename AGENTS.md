@@ -213,6 +213,14 @@ Use `#[serde(default)]` on optional struct fields that should default when deser
 
 ### Traits for Dependency Injection
 
+- Prefer generic parameters, associated types, or concrete types when the implementation is known
+  at assembly time. Shared ownership through `Arc<T>` is not a reason to erase `T`.
+- Use `dyn Trait` only when runtime type erasure is required, such as heterogeneous collections,
+  plugin boundaries, or provider selection whose concrete implementation is not known to the
+  caller.
+- When a public type would otherwise expose worker-private implementation details, keep a concrete
+  public facade around an internal generic implementation instead of falling back to trait objects.
+
 ```rust
 pub trait ModelProviderFactory: Send + Sync {
     fn create(&self, provider_name: &str) -> Result<Arc<dyn ModelProvider>>;
@@ -272,11 +280,14 @@ The core LLM loop in `agents/runner/turn_loop.rs` handles:
 
 ### Memory System
 
-- `Memory` trait defines the interface
+- `Memory` trait defines the persistent-fact interface
 - `MarkdownMemory` is the file-based backend
 - Three-tier scoping: project, core, shared
-- Artifact storage is separate from memory facts and uses project/workspace artifact scopes
-- Memory and artifact tools auto-added when memory is configured
+- Memory tools are auto-added when memory is configured
+- Organization artifacts are platform-backed immutable revisions exposed through
+  `list_artifacts`, `read_artifact`, and `upload_artifact`
+- Decrypted artifact content may be cached under the trusted worker state directory;
+  do not add artifact persistence back to the `Memory` abstraction
 
 ### Context Blocks
 
@@ -286,7 +297,7 @@ template variable system as prompts.
 
 Common variables include `{{ self }}`, `{{ chat.message }}`, `{{ task }}`,
 `{{ project }}`, `{{ available_agents }}`, `{{ available_abilities }}`,
-`{{ available_domains }}`, `{{ memories }}`, `{{ artifacts }}`,
+`{{ available_domains }}`, `{{ memories }}`,
 `{{ routine }}`, `{{ gate.criteria }}`, and `{{ global.timestamp }}`.
 
 ### Platform Worker Flow

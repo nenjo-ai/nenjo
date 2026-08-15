@@ -1147,6 +1147,7 @@ fn build_task(state: &RoutineState, description: String) -> Result<TaskInput> {
         status: state.input.status.clone(),
         priority: state.input.priority.clone(),
         slug: state.input.slug.clone(),
+        artifacts: state.input.artifacts.clone(),
     })
 }
 

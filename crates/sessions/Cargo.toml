@@ -11,6 +11,7 @@ description = "Shared session contracts for Nenjo runtime, worker, and future se
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true, features = ["serde"] }
+nenjo-models = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 uuid = { workspace = true, features = ["serde", "v4"] }

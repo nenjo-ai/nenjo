@@ -103,17 +103,11 @@ pub enum TranscriptState {
     MidTurn,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct SessionTranscriptChatMessage {
-    pub role: String,
-    pub content: String,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SessionTranscriptEventPayload {
-    ChatMessage {
-        message: SessionTranscriptChatMessage,
+    ConversationMessage {
+        message: nenjo_models::ConversationMessage,
     },
     DomainActivated {
         domain_session_id: Uuid,
@@ -202,7 +196,7 @@ pub struct SessionCheckpoint {
     /// Versioned subsystem-owned state. The session runtime persists this
     /// value opaquely so resumable executors can survive process restarts.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub opaque_state: Option<serde_json::Value>,
+    pub state: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

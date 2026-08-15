@@ -13,6 +13,8 @@
 pub mod api_client;
 /// Agent-facing immutable artifact publication and catalog tools.
 pub mod artifact_tools;
+/// Authenticated artifact access, plaintext caching, and materialization.
+pub mod artifacts;
 /// Platform-backed manifest backend implementations and payload encoding hooks.
 pub mod backend;
 /// Thin HTTP client for the platform manifest API.

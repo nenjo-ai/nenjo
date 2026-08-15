@@ -74,7 +74,7 @@ impl Tool for FileReadTool {
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: too many actions in the last hour".into()),
             });
         }
@@ -83,7 +83,7 @@ impl Tool for FileReadTool {
         if !self.security.is_path_allowed(path) {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Path not allowed by security policy: {path}")),
             });
         }
@@ -94,7 +94,7 @@ impl Tool for FileReadTool {
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
@@ -107,7 +107,7 @@ impl Tool for FileReadTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Failed to resolve file path: {e}")),
                 });
             }
@@ -116,7 +116,7 @@ impl Tool for FileReadTool {
         if !self.security.is_resolved_path_allowed(&resolved_path) {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "Resolved path escapes workspace: {}",
                     resolved_path.display()
@@ -130,7 +130,7 @@ impl Tool for FileReadTool {
                 if meta.len() > MAX_FILE_SIZE_BYTES {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: String::new().into(),
                         error: Some(format!(
                             "File too large: {} bytes (limit: {MAX_FILE_SIZE_BYTES} bytes)",
                             meta.len()
@@ -141,7 +141,7 @@ impl Tool for FileReadTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Failed to read file metadata: {e}")),
                 });
             }
@@ -151,18 +151,18 @@ impl Tool for FileReadTool {
             Ok(contents) => match render_line_range(&contents, start_line, line_count) {
                 Ok(output) => Ok(ToolResult {
                     success: true,
-                    output,
+                    output: output.into(),
                     error: None,
                 }),
                 Err(error) => Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(error),
                 }),
             },
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Failed to read file: {e}")),
             }),
         }

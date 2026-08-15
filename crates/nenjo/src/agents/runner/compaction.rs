@@ -4,7 +4,7 @@ use anyhow::Result;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use nenjo_models::{ChatMessage, ChatRequest, ModelProvider};
+use nenjo_models::{ChatRequest, ChatRole, ConversationMessage, ModelProvider, ToolOutputPart};
 
 use super::types::TurnEvent;
 
@@ -16,8 +16,21 @@ const PAYLOAD_TOOL_RESULT_MAX_CHARS: usize = 4_000;
 const PAYLOAD_MESSAGE_MAX_CHARS: usize = 8_000;
 
 /// Estimate total token count across all messages using the chars/4 heuristic.
-pub(crate) fn estimate_tokens(messages: &[ChatMessage]) -> usize {
-    messages.iter().map(|m| m.content.len() / 4).sum()
+pub(crate) fn estimate_tokens(messages: &[ConversationMessage]) -> usize {
+    messages.iter().map(estimate_message_tokens).sum()
+}
+
+fn estimate_message_tokens(message: &ConversationMessage) -> usize {
+    match message {
+        ConversationMessage::Chat(chat) => {
+            (chat.content.len() + estimate_serialized_bytes(&chat.artifacts)) / 4
+        }
+        ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+            (text.as_deref().map_or(0, str::len) + estimate_serialized_bytes(tool_calls)) / 4
+        }
+        ConversationMessage::ToolResults(results) => estimate_serialized_bytes(results) / 4,
+        ConversationMessage::ArtifactAnalysis(analysis) => estimate_serialized_bytes(analysis) / 4,
+    }
 }
 
 pub(crate) fn estimate_serialized_bytes<T>(value: &T) -> usize
@@ -27,23 +40,20 @@ where
     serde_json::to_vec(value).map_or(0, |bytes| bytes.len())
 }
 
-pub(crate) fn estimate_serialized_messages_bytes(messages: &[ChatMessage]) -> usize {
+pub(crate) fn estimate_serialized_messages_bytes(messages: &[ConversationMessage]) -> usize {
     let serialized = estimate_serialized_bytes(messages);
     if serialized > 0 {
         return serialized;
     }
 
-    messages
-        .iter()
-        .map(|message| message.role.len() + message.content.len() + 32)
-        .sum()
+    messages.iter().map(estimate_serialized_bytes).sum()
 }
 
 pub(crate) async fn compact_messages_with_summary<P>(
     provider: &P,
     model: &str,
     temperature: f64,
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut Vec<ConversationMessage>,
     max_tokens: usize,
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
 ) -> Result<()>
@@ -102,14 +112,14 @@ where
 /// 5. Phase 3: Summarize old completed turn groups into one assistant summary.
 /// 6. Phase 4: Drop oldest non-system messages until under budget (keep last 4).
 #[cfg(test)]
-fn compact_messages(messages: &mut Vec<ChatMessage>, max_tokens: usize) {
+fn compact_messages(messages: &mut Vec<ConversationMessage>, max_tokens: usize) {
     compact_messages_without_drop(messages, max_tokens);
     if estimate_tokens(messages) > max_tokens {
         drop_oldest_messages(messages, max_tokens);
     }
 }
 
-fn compact_messages_without_drop(messages: &mut [ChatMessage], max_tokens: usize) {
+fn compact_messages_without_drop(messages: &mut [ConversationMessage], max_tokens: usize) {
     if estimate_tokens(messages) <= max_tokens {
         return;
     }
@@ -119,33 +129,10 @@ fn compact_messages_without_drop(messages: &mut [ChatMessage], max_tokens: usize
     let compactable_end = len - protect_tail;
 
     for i in 1..compactable_end {
-        if messages[i].role != "tool" {
+        let ConversationMessage::ToolResults(results) = &mut messages[i] else {
             continue;
-        }
-        if messages[i].content.len() <= 500 {
-            continue;
-        }
-        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&messages[i].content) {
-            if let Some(obj) = parsed.as_object_mut()
-                && let Some(content) = obj.get("content").and_then(|v| v.as_str())
-            {
-                let preview = truncate(content, 200);
-                obj.insert(
-                    "content".to_string(),
-                    serde_json::Value::String(format!(
-                        "{preview}\n[compacted — {} chars total]",
-                        content.len()
-                    )),
-                );
-                messages[i].content = serde_json::to_string(obj).unwrap_or_default();
-            }
-        } else {
-            let original_len = messages[i].content.len();
-            messages[i].content = format!(
-                "{}\n[compacted — {original_len} chars total]",
-                truncate(&messages[i].content, 200)
-            );
-        }
+        };
+        compact_tool_results(results, 200, "compacted");
 
         if estimate_tokens(messages) <= max_tokens {
             return;
@@ -153,47 +140,28 @@ fn compact_messages_without_drop(messages: &mut [ChatMessage], max_tokens: usize
     }
 
     for i in 1..compactable_end {
-        if messages[i].role != "assistant" {
+        let ConversationMessage::AssistantToolCalls { tool_calls, .. } = &mut messages[i] else {
             continue;
+        };
+        for call in tool_calls {
+            call.arguments = "{}".to_string();
         }
-        if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&messages[i].content)
-            && let Some(calls) = parsed.get("tool_calls").and_then(|v| v.as_array()).cloned()
-        {
-            if calls.is_empty() {
-                continue;
-            }
-            let summarized_calls: Vec<serde_json::Value> = calls
-                .into_iter()
-                .map(|mut c| {
-                    if let Some(obj) = c.as_object_mut() {
-                        obj.insert("arguments".to_string(), serde_json::json!("{}"));
-                    }
-                    c
-                })
-                .collect();
-            parsed["tool_calls"] = serde_json::Value::Array(summarized_calls);
-            messages[i].content = parsed.to_string();
-
-            if estimate_tokens(messages) <= max_tokens {
-                return;
-            }
+        if estimate_tokens(messages) <= max_tokens {
+            return;
         }
     }
 
     for i in 1..compactable_end {
-        if messages[i].role != "assistant" {
+        let Some(chat) = messages[i].as_chat_mut() else {
+            continue;
+        };
+        if chat.role != ChatRole::Assistant || chat.content.len() <= 600 {
             continue;
         }
-        if messages[i].content.starts_with('{') {
-            continue;
-        }
-        if messages[i].content.len() <= 600 {
-            continue;
-        }
-        let original_len = messages[i].content.len();
-        messages[i].content = format!(
+        let original_len = chat.content.len();
+        chat.content = format!(
             "{}\n[compacted — {original_len} chars total]",
-            truncate(&messages[i].content, 300)
+            truncate(&chat.content, 300)
         );
         if estimate_tokens(messages) <= max_tokens {
             return;
@@ -201,12 +169,26 @@ fn compact_messages_without_drop(messages: &mut [ChatMessage], max_tokens: usize
     }
 }
 
-fn drop_oldest_messages(messages: &mut Vec<ChatMessage>, max_tokens: usize) {
+fn drop_oldest_messages(messages: &mut Vec<ConversationMessage>, max_tokens: usize) {
     let min_keep = 5;
     while messages.len() > min_keep && estimate_tokens(messages) > max_tokens {
+        let group = message_group_range(messages, 1, messages.len());
+        if messages[group.clone()]
+            .iter()
+            .any(ConversationMessage::has_artifact_references)
+        {
+            // Artifact inputs are durable user/tool intent. Leave the request
+            // oversized so the explicit input-preparation guard reports it;
+            // silently dropping a reference would change the conversation.
+            break;
+        }
         let removed = messages.remove(1);
-        if removed.role == "assistant" {
-            while messages.len() > min_keep && messages.get(1).is_some_and(|m| m.role == "tool") {
+        if matches!(removed, ConversationMessage::AssistantToolCalls { .. }) {
+            while messages.len() > min_keep
+                && messages
+                    .get(1)
+                    .is_some_and(|message| matches!(message, ConversationMessage::ToolResults(_)))
+            {
                 messages.remove(1);
             }
         }
@@ -214,7 +196,7 @@ fn drop_oldest_messages(messages: &mut Vec<ChatMessage>, max_tokens: usize) {
 }
 
 pub(crate) fn compact_messages_for_payload(
-    messages: &mut [ChatMessage],
+    messages: &mut [ConversationMessage],
     max_payload_bytes: usize,
 ) -> bool {
     let original_size = estimate_serialized_messages_bytes(messages);
@@ -222,10 +204,12 @@ pub(crate) fn compact_messages_for_payload(
         return false;
     }
 
-    let latest_user_index = messages.iter().rposition(|message| message.role == "user");
+    let latest_user_index = messages
+        .iter()
+        .rposition(|message| message.is_role(ChatRole::User));
 
     for index in (1..messages.len()).rev() {
-        if messages[index].role != "tool" {
+        if !matches!(messages[index], ConversationMessage::ToolResults(_)) {
             continue;
         }
         compact_tool_result_message(&mut messages[index], PAYLOAD_TOOL_RESULT_MAX_CHARS);
@@ -235,7 +219,10 @@ pub(crate) fn compact_messages_for_payload(
     }
 
     for index in 1..messages.len() {
-        if messages[index].role != "assistant" {
+        if !matches!(
+            messages[index],
+            ConversationMessage::AssistantToolCalls { .. }
+        ) {
             continue;
         }
         if compact_assistant_tool_arguments(&mut messages[index])
@@ -246,7 +233,7 @@ pub(crate) fn compact_messages_for_payload(
     }
 
     for index in (1..messages.len()).rev() {
-        if messages[index].role == "system" || latest_user_index == Some(index) {
+        if messages[index].is_role(ChatRole::System) || latest_user_index == Some(index) {
             continue;
         }
         compact_payload_message(&mut messages[index], PAYLOAD_MESSAGE_MAX_CHARS);
@@ -256,7 +243,7 @@ pub(crate) fn compact_messages_for_payload(
     }
 
     for index in (1..messages.len()).rev() {
-        if messages[index].role == "system" {
+        if messages[index].is_role(ChatRole::System) {
             continue;
         }
         compact_payload_message(&mut messages[index], PAYLOAD_MESSAGE_MAX_CHARS);
@@ -268,110 +255,84 @@ pub(crate) fn compact_messages_for_payload(
     estimate_serialized_messages_bytes(messages) < original_size
 }
 
-fn compact_assistant_tool_arguments(message: &mut ChatMessage) -> bool {
-    let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&message.content) else {
+fn compact_assistant_tool_arguments(message: &mut ConversationMessage) -> bool {
+    let ConversationMessage::AssistantToolCalls { tool_calls, .. } = message else {
         return false;
     };
-    let Some(calls) = parsed
-        .get("tool_calls")
-        .and_then(|value| value.as_array())
-        .cloned()
-    else {
-        return false;
-    };
-
     let mut changed = false;
-    let compacted_calls = calls
-        .iter()
-        .map(|call| {
-            let name = call
-                .get("name")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            let arguments = call
-                .get("arguments")
-                .and_then(|value| value.as_str())
-                .unwrap_or("");
-            let compacted_arguments = truncate_tool_arguments(name, arguments);
-            changed |= compacted_arguments != arguments;
-
-            let mut compacted_call = call.clone();
-            if let Some(obj) = compacted_call.as_object_mut() {
-                obj.insert(
-                    "arguments".to_string(),
-                    serde_json::Value::String(compacted_arguments),
-                );
-            }
-            compacted_call
-        })
-        .collect::<Vec<_>>();
-
-    if !changed {
-        return false;
-    }
-
-    if let Some(obj) = parsed.as_object_mut() {
-        obj.insert(
-            "tool_calls".to_string(),
-            serde_json::Value::Array(compacted_calls),
-        );
-        message.content = serde_json::to_string(obj).unwrap_or_else(|_| message.content.clone());
-    }
-
-    true
-}
-
-fn compact_tool_result_message(message: &mut ChatMessage, max_content_chars: usize) {
-    if message.content.len() <= max_content_chars {
-        return;
-    }
-
-    if let Ok(mut parsed) = serde_json::from_str::<serde_json::Value>(&message.content) {
-        if let Some(obj) = parsed.as_object_mut()
-            && let Some(content) = obj.get("content").and_then(|v| v.as_str())
-            && content.len() > max_content_chars
-        {
-            let original_len = content.len();
-            obj.insert(
-                "content".to_string(),
-                serde_json::Value::String(format!(
-                    "{}\n[payload compacted — {original_len} chars total]",
-                    truncate(content, max_content_chars)
-                )),
-            );
-            message.content = serde_json::to_string(obj).unwrap_or_default();
+    for call in tool_calls {
+        let compacted = truncate_tool_arguments(&call.name, &call.arguments);
+        if compacted != call.arguments {
+            call.arguments = compacted;
+            changed = true;
         }
-        return;
     }
-
-    let original_len = message.content.len();
-    message.content = format!(
-        "{}\n[payload compacted — {original_len} chars total]",
-        truncate(&message.content, max_content_chars)
-    );
+    changed
 }
 
-fn compact_payload_message(message: &mut ChatMessage, max_content_chars: usize) {
-    if message.content.len() <= max_content_chars {
+fn compact_tool_result_message(message: &mut ConversationMessage, max_content_chars: usize) {
+    let ConversationMessage::ToolResults(results) = message else {
+        return;
+    };
+    compact_tool_results(results, max_content_chars, "payload compacted");
+}
+
+fn compact_payload_message(message: &mut ConversationMessage, max_content_chars: usize) {
+    match message {
+        ConversationMessage::Chat(chat) => {
+            compact_text(&mut chat.content, max_content_chars, "payload compacted")
+        }
+        ConversationMessage::AssistantToolCalls { text, .. } => {
+            if let Some(text) = text {
+                compact_text(text, max_content_chars, "payload compacted");
+            }
+        }
+        ConversationMessage::ToolResults(results) => {
+            compact_tool_results(results, max_content_chars, "payload compacted");
+        }
+        ConversationMessage::ArtifactAnalysis(analysis) => {
+            compact_text(&mut analysis.text, max_content_chars, "payload compacted");
+        }
+    }
+}
+
+fn compact_tool_results(
+    results: &mut [nenjo_models::ToolResultMessage],
+    max_content_chars: usize,
+    marker: &str,
+) {
+    for result in results {
+        for part in result.output.parts_mut() {
+            if let ToolOutputPart::Text(text) = part {
+                compact_text(text, max_content_chars, marker);
+            }
+        }
+    }
+}
+
+fn compact_text(text: &mut String, max_content_chars: usize, marker: &str) {
+    if text.len() <= max_content_chars {
         return;
     }
-
-    let original_len = message.content.len();
-    message.content = format!(
-        "{}\n[payload compacted — {original_len} chars total]",
-        truncate(&message.content, max_content_chars)
+    let original_len = text.len();
+    *text = format!(
+        "{}\n[{marker} — {original_len} chars total]",
+        truncate(text, max_content_chars)
     );
 }
 
 fn replace_range_with_summary(
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut Vec<ConversationMessage>,
     range: Range<usize>,
-    summary: ChatMessage,
+    summary: ConversationMessage,
 ) {
     messages.splice(range, [summary]);
 }
 
-fn find_phase3_candidate(messages: &[ChatMessage], max_tokens: usize) -> Option<Range<usize>> {
+fn find_phase3_candidate(
+    messages: &[ConversationMessage],
+    max_tokens: usize,
+) -> Option<Range<usize>> {
     if messages.len() < 8 {
         return None;
     }
@@ -413,9 +374,11 @@ fn find_phase3_candidate(messages: &[ChatMessage], max_tokens: usize) -> Option<
 
     let candidate = &messages[start..end];
     let candidate_tokens = estimate_tokens(candidate);
-    let has_dialogue = candidate
-        .iter()
-        .any(|msg| matches!(msg.role.as_str(), "user" | "assistant"));
+    let has_dialogue = candidate.iter().any(|message| {
+        message.is_role(ChatRole::User)
+            || message.is_role(ChatRole::Assistant)
+            || matches!(message, ConversationMessage::AssistantToolCalls { .. })
+    });
     if !has_dialogue || candidate_tokens < max_tokens / 10 {
         return None;
     }
@@ -424,7 +387,7 @@ fn find_phase3_candidate(messages: &[ChatMessage], max_tokens: usize) -> Option<
 }
 
 fn message_group_range(
-    messages: &[ChatMessage],
+    messages: &[ConversationMessage],
     start: usize,
     compactable_end: usize,
 ) -> Range<usize> {
@@ -432,9 +395,13 @@ fn message_group_range(
         return start..start;
     };
 
-    if message.role == "assistant" && parse_assistant_tool_calls(message).is_some() {
+    if matches!(message, ConversationMessage::AssistantToolCalls { .. }) {
         let mut end = start + 1;
-        while end < compactable_end && messages.get(end).is_some_and(|msg| msg.role == "tool") {
+        while end < compactable_end
+            && messages
+                .get(end)
+                .is_some_and(|message| matches!(message, ConversationMessage::ToolResults(_)))
+        {
             end += 1;
         }
         return start..end;
@@ -443,20 +410,21 @@ fn message_group_range(
     start..(start + 1).min(compactable_end)
 }
 
-fn is_summary_message(message: &ChatMessage) -> bool {
-    message.role == "assistant"
-        && message
-            .content
-            .trim_start()
-            .starts_with(HISTORY_SUMMARY_MARKER)
+fn is_summary_message(message: &ConversationMessage) -> bool {
+    matches!(
+        message,
+        ConversationMessage::Chat(chat)
+            if chat.role == ChatRole::Assistant
+                && chat.content.trim_start().starts_with(HISTORY_SUMMARY_MARKER)
+    )
 }
 
 async fn summarize_message_span<P>(
     provider: &P,
     model: &str,
     temperature: f64,
-    candidate: &[ChatMessage],
-) -> Result<Option<ChatMessage>>
+    candidate: &[ConversationMessage],
+) -> Result<Option<ConversationMessage>>
 where
     P: ModelProvider + ?Sized,
 {
@@ -485,10 +453,10 @@ Keep the answer under {PHASE4_MAX_CHARS} characters.\n\
 Conversation:\n{rendered}"
     );
     let messages = vec![
-        ChatMessage::system(
+        ConversationMessage::system(
             "You compress old conversation context into a concise continuation summary.",
         ),
-        ChatMessage::user(prompt),
+        ConversationMessage::user(prompt),
     ];
     let mut response = provider
         .chat(
@@ -496,6 +464,7 @@ Conversation:\n{rendered}"
                 messages: &messages,
                 tools: None,
                 native_tools: None,
+                prepared_artifacts: None,
             },
             model,
             temperature,
@@ -524,51 +493,54 @@ Conversation:\n{rendered}"
         return Ok(None);
     }
 
-    Ok(Some(ChatMessage::assistant(summary)))
+    Ok(Some(ConversationMessage::assistant(summary)))
 }
 
-fn render_messages_for_summary(messages: &[ChatMessage]) -> String {
+fn render_messages_for_summary(messages: &[ConversationMessage]) -> String {
     let mut rendered = String::new();
     for message in messages {
-        match message.role.as_str() {
-            "assistant" => {
-                if let Some((content, calls)) = parse_assistant_tool_calls(message) {
-                    if !content.is_empty() {
-                        rendered.push_str("assistant: ");
-                        rendered.push_str(&truncate(&content, 500));
-                        rendered.push('\n');
-                    }
-                    for call in calls {
-                        rendered.push_str("assistant_tool_call: ");
-                        rendered.push_str(&call.name);
-                        if !call.arguments.trim().is_empty() {
-                            rendered.push_str(" args=");
-                            rendered.push_str(&truncate(&call.arguments, 240));
-                        }
-                        rendered.push('\n');
-                    }
-                } else {
+        match message {
+            ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                if let Some(content) = text.as_deref().filter(|text| !text.is_empty()) {
                     rendered.push_str("assistant: ");
-                    rendered.push_str(&truncate(&message.content, 700));
+                    rendered.push_str(&truncate(content, 500));
+                    rendered.push('\n');
+                }
+                for call in tool_calls {
+                    rendered.push_str("assistant_tool_call: ");
+                    rendered.push_str(&call.name);
+                    if !call.arguments.trim().is_empty() {
+                        rendered.push_str(" args=");
+                        rendered.push_str(&truncate(&call.arguments, 240));
+                    }
                     rendered.push('\n');
                 }
             }
-            "tool" => {
-                let tool_content = parse_tool_result_content(message)
-                    .unwrap_or_else(|| truncate(&message.content, 600));
-                rendered.push_str("tool: ");
-                rendered.push_str(&truncate(&tool_content, 600));
-                rendered.push('\n');
+            ConversationMessage::ToolResults(results) => {
+                for result in results {
+                    rendered.push_str("tool_result: id=");
+                    rendered.push_str(&result.tool_call_id);
+                    rendered.push_str(" content=");
+                    rendered.push_str(&truncate(&result.output.text_content(), 600));
+                    rendered.push('\n');
+                    render_tool_artifact_markers(&result.output, &mut rendered);
+                }
             }
-            "user" => {
-                rendered.push_str("user: ");
-                rendered.push_str(&truncate(&message.content, 700));
-                rendered.push('\n');
-            }
-            role => {
-                rendered.push_str(role);
+            ConversationMessage::Chat(chat) => {
+                rendered.push_str(chat.role.as_str());
                 rendered.push_str(": ");
-                rendered.push_str(&truncate(&message.content, 500));
+                let max_chars = if chat.role == ChatRole::User {
+                    700
+                } else {
+                    500
+                };
+                rendered.push_str(&truncate(&chat.content, max_chars));
+                rendered.push('\n');
+                render_artifact_markers(chat, &mut rendered);
+            }
+            ConversationMessage::ArtifactAnalysis(analysis) => {
+                rendered.push_str("artifact_analysis: ");
+                rendered.push_str(&truncate(&analysis.model_context(), 700));
                 rendered.push('\n');
             }
         }
@@ -576,39 +548,51 @@ fn render_messages_for_summary(messages: &[ChatMessage]) -> String {
     rendered
 }
 
-fn parse_assistant_tool_calls(
-    message: &ChatMessage,
-) -> Option<(String, Vec<nenjo_models::ToolCall>)> {
-    if message.role != "assistant" {
-        return None;
+fn render_artifact_markers(message: &nenjo_models::ChatMessage, rendered: &mut String) {
+    for input in &message.artifacts {
+        let artifact = input.artifact();
+        rendered.push_str("artifact_ref: id=");
+        rendered.push_str(&artifact.id().to_string());
+        rendered.push_str(" digest=");
+        rendered.push_str(artifact.digest().as_str());
+        rendered.push_str(" media_type=");
+        rendered.push_str(artifact.media_type().essence_str());
+        rendered.push_str(" bytes=");
+        rendered.push_str(&artifact.size().bytes().to_string());
+        rendered.push_str(" source=");
+        rendered.push_str(match input.source() {
+            nenjo_models::ArtifactInputSource::UserAttachment => "user_attachment",
+            nenjo_models::ArtifactInputSource::TaskInput => "task_input",
+            nenjo_models::ArtifactInputSource::ToolResult => "tool_result",
+            nenjo_models::ArtifactInputSource::SessionContext => "session_context",
+        });
+        if let Some(instruction) = input.instruction() {
+            rendered.push_str(" instruction=");
+            rendered.push_str(&truncate(instruction.as_str(), 240));
+        }
+        rendered.push('\n');
     }
-    let parsed = serde_json::from_str::<serde_json::Value>(&message.content).ok()?;
-    let calls = parsed.get("tool_calls")?.as_array()?.clone();
-    let calls: Vec<nenjo_models::ToolCall> = calls
-        .into_iter()
-        .filter_map(|call| serde_json::from_value(call).ok())
-        .collect();
-    let content = parsed
-        .get("content")
-        .and_then(|value| value.as_str())
-        .unwrap_or_default()
-        .to_string();
-    Some((content, calls))
 }
 
-fn parse_tool_result_content(message: &ChatMessage) -> Option<String> {
-    if message.role != "tool" {
-        return None;
+fn render_tool_artifact_markers(output: &nenjo_models::ToolOutput, rendered: &mut String) {
+    for part in output.parts() {
+        let ToolOutputPart::Artifact(artifact) = part else {
+            continue;
+        };
+        rendered.push_str("artifact_ref: id=");
+        rendered.push_str(&artifact.id().to_string());
+        rendered.push_str(" digest=");
+        rendered.push_str(artifact.digest().as_str());
+        rendered.push_str(" media_type=");
+        rendered.push_str(artifact.media_type().essence_str());
+        rendered.push_str(" bytes=");
+        rendered.push_str(&artifact.size().bytes().to_string());
+        rendered.push_str(" source=tool_result\n");
     }
-    let parsed = serde_json::from_str::<serde_json::Value>(&message.content).ok()?;
-    parsed
-        .get("content")
-        .and_then(|value| value.as_str())
-        .map(str::to_string)
 }
 
 pub(crate) fn truncate_old_tool_arguments(
-    messages: &mut [ChatMessage],
+    messages: &mut [ConversationMessage],
     max_tokens: usize,
     trigger_percent: u8,
 ) {
@@ -624,46 +608,12 @@ pub(crate) fn truncate_old_tool_arguments(
     let protect_tail = PROTECT_TAIL.min(len.saturating_sub(1));
     let compactable_end = len - protect_tail;
 
-    for msg in messages[1..compactable_end].iter_mut() {
-        if msg.role != "assistant" {
+    for message in messages[1..compactable_end].iter_mut() {
+        let ConversationMessage::AssistantToolCalls { tool_calls, .. } = message else {
             continue;
-        }
-        let mut parsed = match serde_json::from_str::<serde_json::Value>(&msg.content) {
-            Ok(v) => v,
-            Err(_) => continue,
         };
-        let calls = match parsed.get("tool_calls").and_then(|v| v.as_array()).cloned() {
-            Some(c) => c,
-            None => continue,
-        };
-
-        let mut changed = false;
-        let mut new_calls = Vec::new();
-        for call in &calls {
-            let name = call.get("name").and_then(|n| n.as_str()).unwrap_or("");
-            let args_str = call.get("arguments").and_then(|a| a.as_str()).unwrap_or("");
-
-            let truncated = truncate_tool_arguments(name, args_str);
-            if truncated != args_str {
-                changed = true;
-            }
-
-            let mut new_call = call.clone();
-            if let Some(obj) = new_call.as_object_mut() {
-                obj.insert(
-                    "arguments".to_string(),
-                    serde_json::Value::String(truncated),
-                );
-            }
-            new_calls.push(new_call);
-        }
-
-        if changed && let Some(obj) = parsed.as_object_mut() {
-            obj.insert(
-                "tool_calls".to_string(),
-                serde_json::Value::Array(new_calls),
-            );
-            msg.content = serde_json::to_string(obj).unwrap_or_default();
+        for call in tool_calls {
+            call.arguments = truncate_tool_arguments(&call.name, &call.arguments);
         }
     }
 }
@@ -748,6 +698,10 @@ pub(crate) fn truncate(s: &str, max_len: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nenjo_models::{
+        ArtifactId, ArtifactInput, ArtifactInputSource, ArtifactRef, ArtifactSize, MediaType,
+        Sha256Digest, ToolCall, ToolResultMessage,
+    };
     use nenjo_models::{ChatResponse, TokenUsage};
 
     #[test]
@@ -764,36 +718,29 @@ mod tests {
     }
 
     #[test]
-    fn tool_call_assistant_message_has_structured_json() {
-        let tool_calls = vec![serde_json::json!({
-            "id": "call_123",
-            "name": "spawn_sub_agents",
-            "arguments": r#"{"agents":[{"agent":"Dev","task":{"description":"fix bug","goal":"bug fixed"}}]}"#,
-        })];
-        let assistant_content = serde_json::json!({
-            "content": "I'll delegate this.",
-            "tool_calls": tool_calls,
-        });
-        let msg = ChatMessage::assistant(assistant_content.to_string());
+    fn tool_call_assistant_message_is_semantic() {
+        let msg = assistant_tool_call(
+            "call_123",
+            "spawn_sub_agents",
+            r#"{"agents":[{"agent":"Dev"}]}"#,
+        );
 
-        let parsed: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
-        assert_eq!(parsed["content"], "I'll delegate this.");
-        assert!(parsed["tool_calls"].is_array());
-        assert_eq!(parsed["tool_calls"][0]["id"], "call_123");
-        assert_eq!(parsed["tool_calls"][0]["name"], "spawn_sub_agents");
+        let ConversationMessage::AssistantToolCalls { text, tool_calls } = msg else {
+            panic!("expected assistant tool calls");
+        };
+        assert_eq!(text.as_deref(), Some("Let me use a tool."));
+        assert_eq!(tool_calls[0].id, "call_123");
+        assert_eq!(tool_calls[0].name, "spawn_sub_agents");
     }
 
     #[test]
     fn tool_result_message_has_tool_call_id() {
-        let tool_content = serde_json::json!({
-            "tool_call_id": "call_123",
-            "content": "Task completed successfully",
-        });
-        let msg = ChatMessage::tool(tool_content.to_string());
-
-        let parsed: serde_json::Value = serde_json::from_str(&msg.content).unwrap();
-        assert_eq!(parsed["tool_call_id"], "call_123");
-        assert_eq!(parsed["content"], "Task completed successfully");
+        let msg = tool_result("call_123", "Task completed successfully");
+        let ConversationMessage::ToolResults(results) = msg else {
+            panic!("expected tool results");
+        };
+        assert_eq!(results[0].tool_call_id, "call_123");
+        assert_eq!(results[0].output, "Task completed successfully");
     }
 
     #[test]
@@ -846,63 +793,130 @@ mod tests {
     #[test]
     fn estimate_tokens_basic() {
         let msgs = vec![
-            ChatMessage::system("a]".repeat(200).as_str()),
-            ChatMessage::user("b".repeat(400).as_str()),
+            ConversationMessage::system("a]".repeat(200).as_str()),
+            ConversationMessage::user("b".repeat(400).as_str()),
         ];
         let est = estimate_tokens(&msgs);
         assert_eq!(est, 200);
     }
 
+    fn artifact_input() -> ArtifactInput {
+        ArtifactInput::new(
+            ArtifactRef::new(
+                ArtifactId::parse(uuid::Uuid::new_v4()).unwrap(),
+                Sha256Digest::parse(&format!("sha256:{}", "f".repeat(64))).unwrap(),
+                MediaType::parse("image/png").unwrap(),
+                ArtifactSize::new(42),
+            ),
+            ArtifactInputSource::ToolResult,
+        )
+    }
+
+    fn artifact_ref() -> ArtifactRef {
+        artifact_input().artifact().clone()
+    }
+
+    fn tool_result(id: &str, content: impl Into<String>) -> ConversationMessage {
+        ConversationMessage::tool_result(ToolResultMessage::text(id, content))
+    }
+
+    fn assistant_tool_call(
+        id: &str,
+        name: &str,
+        arguments: impl Into<String>,
+    ) -> ConversationMessage {
+        ConversationMessage::assistant_tool_calls(
+            Some("Let me use a tool.".to_string()),
+            vec![ToolCall {
+                id: id.to_string(),
+                name: name.to_string(),
+                arguments: arguments.into(),
+            }],
+        )
+    }
+
+    fn chat_content(message: &ConversationMessage) -> &str {
+        &message.as_chat().expect("expected chat message").content
+    }
+
+    fn tool_text(message: &ConversationMessage) -> String {
+        let ConversationMessage::ToolResults(results) = message else {
+            panic!("expected tool results");
+        };
+        results
+            .iter()
+            .map(|result| result.output.text_content())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn payload_compaction_preserves_artifact_references() {
+        let artifact = artifact_ref();
+        let mut messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::tool_result(
+                ToolResultMessage::text("call_1", "x".repeat(10_000))
+                    .with_artifact(artifact.clone()),
+            ),
+        ];
+
+        assert!(compact_messages_for_payload(&mut messages, 2_000));
+        let ConversationMessage::ToolResults(results) = &messages[1] else {
+            panic!("expected tool result");
+        };
+        assert!(results[0].output.contains("payload compacted"));
+        assert!(
+            results[0]
+                .output
+                .parts()
+                .iter()
+                .any(|part| matches!(part, ToolOutputPart::Artifact(found) if found == &artifact))
+        );
+    }
+
+    #[test]
+    fn summary_render_uses_artifact_metadata_not_bytes() {
+        let rendered = render_messages_for_summary(&[ConversationMessage::tool_result(
+            ToolResultMessage::text("call_1", "result").with_artifact(artifact_ref()),
+        )]);
+
+        assert!(rendered.contains("artifact_ref: id="));
+        assert!(rendered.contains("media_type=image/png"));
+        assert!(!rendered.contains("base64"));
+    }
+
     #[test]
     fn compact_messages_noop_when_under_budget() {
         let mut msgs = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("hi"),
-            ChatMessage::assistant("hello"),
+            ConversationMessage::system("sys"),
+            ConversationMessage::user("hi"),
+            ConversationMessage::assistant("hello"),
         ];
         let before = msgs.clone();
         compact_messages(&mut msgs, 100_000);
         assert_eq!(msgs.len(), before.len());
-        assert_eq!(msgs[0].content, before[0].content);
+        assert_eq!(msgs, before);
     }
 
-    fn build_large_conversation() -> Vec<ChatMessage> {
+    fn build_large_conversation() -> Vec<ConversationMessage> {
         let big_result = "x".repeat(4000);
-        let tool_result = |id: &str, content: &str| -> ChatMessage {
-            let json = serde_json::json!({
-                "tool_call_id": id,
-                "content": content,
-            });
-            ChatMessage::tool(json.to_string())
-        };
-        let assistant_tool_call = |id: &str, name: &str| -> ChatMessage {
-            let json = serde_json::json!({
-                "content": "Let me use a tool.",
-                "tool_calls": [{
-                    "id": id,
-                    "name": name,
-                    "arguments": r#"{"path":"src/main.rs"}"#,
-                }],
-            });
-            ChatMessage::assistant(json.to_string())
-        };
-
         vec![
-            ChatMessage::system("system prompt"),
-            ChatMessage::user("do task 1"),
-            assistant_tool_call("c1", "read"),
+            ConversationMessage::system("system prompt"),
+            ConversationMessage::user("do task 1"),
+            assistant_tool_call("c1", "read", r#"{"path":"src/main.rs"}"#),
             tool_result("c1", &big_result),
-            assistant_tool_call("c2", "file_write"),
+            assistant_tool_call("c2", "file_write", r#"{"path":"src/main.rs"}"#),
             tool_result("c2", &big_result),
-            assistant_tool_call("c3", "shell"),
+            assistant_tool_call("c3", "shell", r#"{"path":"src/main.rs"}"#),
             tool_result("c3", &big_result),
-            ChatMessage::assistant("done with old work"),
-            ChatMessage::user("do task 2"),
-            assistant_tool_call("c4", "read"),
+            ConversationMessage::assistant("done with old work"),
+            ConversationMessage::user("do task 2"),
+            assistant_tool_call("c4", "read", r#"{"path":"src/main.rs"}"#),
             tool_result("c4", &big_result),
-            ChatMessage::assistant("here is the result"),
-            ChatMessage::user("thanks"),
-            ChatMessage::assistant("you're welcome"),
+            ConversationMessage::assistant("here is the result"),
+            ConversationMessage::user("thanks"),
+            ConversationMessage::assistant("you're welcome"),
         ]
     }
 
@@ -915,70 +929,50 @@ mod tests {
         compact_messages(&mut msgs, budget);
 
         assert_eq!(msgs.len(), original_len);
-        assert!(msgs[3].content.contains("compacted"));
-        assert!(msgs[5].content.contains("compacted"));
-        assert!(!msgs[11].content.contains("compacted"));
+        assert!(tool_text(&msgs[3]).contains("compacted"));
+        assert!(tool_text(&msgs[5]).contains("compacted"));
+        assert!(!tool_text(&msgs[11]).contains("compacted"));
     }
 
     #[test]
     fn compact_messages_phase2_summarizes_assistant_tool_calls() {
-        let small_result = |id: &str| -> ChatMessage {
-            let json = serde_json::json!({
-                "tool_call_id": id,
-                "content": "ok",
-            });
-            ChatMessage::tool(json.to_string())
-        };
-        let big_assistant = |id: &str, name: &str| -> ChatMessage {
+        let small_result = |id: &str| tool_result(id, "ok");
+        let big_assistant = |id: &str, name: &str| -> ConversationMessage {
             let big_args = "a".repeat(3000);
-            let json = serde_json::json!({
-                "content": "Let me use a tool.",
-                "tool_calls": [{
-                    "id": id,
-                    "name": name,
-                    "arguments": big_args,
-                }],
-            });
-            ChatMessage::assistant(json.to_string())
+            assistant_tool_call(id, name, big_args)
         };
 
         let mut msgs = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("task"),
+            ConversationMessage::system("sys"),
+            ConversationMessage::user("task"),
             big_assistant("c1", "file_write"),
             small_result("c1"),
             big_assistant("c2", "shell"),
             small_result("c2"),
             big_assistant("c3", "read"),
             small_result("c3"),
-            ChatMessage::assistant("old summary"),
-            ChatMessage::user("next task"),
+            ConversationMessage::assistant("old summary"),
+            ConversationMessage::user("next task"),
             big_assistant("c4", "read"),
             small_result("c4"),
-            ChatMessage::assistant("recent result"),
-            ChatMessage::user("thanks"),
-            ChatMessage::assistant("welcome"),
+            ConversationMessage::assistant("recent result"),
+            ConversationMessage::user("thanks"),
+            ConversationMessage::assistant("welcome"),
         ];
 
         let tokens_before = estimate_tokens(&msgs);
         let budget = tokens_before * 2 / 5;
         compact_messages(&mut msgs, budget);
 
-        let has_summarized = msgs.iter().any(|m| {
-            if m.role != "assistant" {
-                return false;
-            }
-            if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&m.content)
-                && let Some(calls) = parsed.get("tool_calls").and_then(|v| v.as_array())
-            {
-                return calls
-                    .iter()
-                    .any(|c| c.get("arguments").and_then(|a| a.as_str()) == Some("{}"));
-            }
-            false
+        let has_summarized = msgs.iter().any(|message| {
+            matches!(
+                message,
+                ConversationMessage::AssistantToolCalls { tool_calls, .. }
+                    if tool_calls.iter().any(|call| call.arguments == "{}")
+            )
         });
         assert!(has_summarized);
-        assert_eq!(msgs[0].role, "system");
+        assert!(msgs[0].is_role(ChatRole::System));
     }
 
     #[test]
@@ -986,116 +980,102 @@ mod tests {
         let mut msgs = build_large_conversation();
         compact_messages(&mut msgs, 50);
 
-        assert_eq!(msgs[0].role, "system");
+        assert!(msgs[0].is_role(ChatRole::System));
         assert!(msgs.len() >= 5);
-        assert_eq!(msgs.last().unwrap().content, "you're welcome");
+        assert_eq!(chat_content(msgs.last().unwrap()), "you're welcome");
     }
 
     #[test]
     fn compact_messages_preserves_system_and_recent() {
         let mut msgs = build_large_conversation();
-        let last_content = msgs.last().unwrap().content.clone();
-        let system_content = msgs[0].content.clone();
+        let last_content = msgs.last().cloned().unwrap();
+        let system_content = msgs[0].clone();
 
         compact_messages(&mut msgs, 100);
 
-        assert_eq!(msgs[0].content, system_content);
-        assert_eq!(msgs.last().unwrap().content, last_content);
+        assert_eq!(msgs[0], system_content);
+        assert_eq!(msgs.last(), Some(&last_content));
     }
 
     #[test]
     fn compact_messages_for_payload_truncates_recent_tool_results() {
         let huge_result = "x".repeat(600_000);
-        let tool_result = |id: &str, content: &str| -> ChatMessage {
-            let json = serde_json::json!({
-                "tool_call_id": id,
-                "content": content,
-            });
-            ChatMessage::tool(json.to_string())
-        };
-        let assistant_tool_call = |id: &str, name: &str| -> ChatMessage {
-            let json = serde_json::json!({
-                "content": "Running a tool.",
-                "tool_calls": [{
-                    "id": id,
-                    "name": name,
-                    "arguments": r#"{"cmd":"large output"}"#,
-                }],
-            });
-            ChatMessage::assistant(json.to_string())
-        };
-
         let mut msgs = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("old request"),
-            ChatMessage::assistant("old answer"),
-            ChatMessage::user("older request"),
-            ChatMessage::assistant("older answer"),
-            assistant_tool_call("c1", "shell"),
+            ConversationMessage::system("sys"),
+            ConversationMessage::user("old request"),
+            ConversationMessage::assistant("old answer"),
+            ConversationMessage::user("older request"),
+            ConversationMessage::assistant("older answer"),
+            assistant_tool_call("c1", "shell", r#"{"cmd":"large output"}"#),
             tool_result("c1", &huge_result),
-            assistant_tool_call("c2", "read"),
+            assistant_tool_call("c2", "read", r#"{"cmd":"large output"}"#),
             tool_result("c2", &huge_result),
-            ChatMessage::user("continue"),
+            ConversationMessage::user("continue"),
         ];
 
         let budget = estimate_serialized_messages_bytes(&msgs) / 3;
         assert!(compact_messages_for_payload(&mut msgs, budget));
 
         assert!(estimate_serialized_messages_bytes(&msgs) <= budget);
-        assert!(
-            msgs.iter()
-                .any(|msg| msg.role == "tool" && msg.content.contains("payload compacted"))
-        );
+        assert!(msgs.iter().any(|message| matches!(message,
+            ConversationMessage::ToolResults(_)
+                if tool_text(message).contains("payload compacted")
+        )));
     }
 
     #[test]
     fn compact_messages_does_not_payload_compact_for_token_budget() {
         let huge_result = "x".repeat(600_000);
-        let tool_result = serde_json::json!({
-            "tool_call_id": "c1",
-            "content": huge_result,
-        });
         let mut msgs = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("old request"),
-            ChatMessage::assistant("old answer"),
-            ChatMessage::tool(tool_result.to_string()),
-            ChatMessage::user("continue"),
+            ConversationMessage::system("sys"),
+            ConversationMessage::user("old request"),
+            ConversationMessage::assistant("old answer"),
+            tool_result("c1", huge_result),
+            ConversationMessage::user("continue"),
         ];
 
         compact_messages(&mut msgs, 20_000);
 
-        assert!(
-            !msgs
-                .iter()
-                .any(|msg| msg.content.contains("payload compacted"))
-        );
+        assert!(!msgs.iter().any(|message| {
+            match message {
+                ConversationMessage::Chat(chat) => chat.content.contains("payload compacted"),
+                ConversationMessage::AssistantToolCalls { text, .. } => text
+                    .as_deref()
+                    .is_some_and(|text| text.contains("payload compacted")),
+                ConversationMessage::ToolResults(_) => {
+                    tool_text(message).contains("payload compacted")
+                }
+                ConversationMessage::ArtifactAnalysis(analysis) => {
+                    analysis.text.contains("payload compacted")
+                }
+            }
+        }));
     }
 
     #[test]
     fn compact_messages_phase2_5_truncates_large_assistant_text() {
         let big_text = "This is a large artifact document. ".repeat(200);
         let mut msgs = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("create a PRD"),
-            ChatMessage::assistant(&big_text),
-            ChatMessage::user("update section 2"),
-            ChatMessage::assistant(&big_text),
-            ChatMessage::user("looks good"),
-            ChatMessage::assistant("Great, glad you like it."),
-            ChatMessage::user("any more changes?"),
-            ChatMessage::assistant("No, we're done."),
-            ChatMessage::user("thanks"),
-            ChatMessage::assistant("You're welcome!"),
+            ConversationMessage::system("sys"),
+            ConversationMessage::user("create a PRD"),
+            ConversationMessage::assistant(&big_text),
+            ConversationMessage::user("update section 2"),
+            ConversationMessage::assistant(&big_text),
+            ConversationMessage::user("looks good"),
+            ConversationMessage::assistant("Great, glad you like it."),
+            ConversationMessage::user("any more changes?"),
+            ConversationMessage::assistant("No, we're done."),
+            ConversationMessage::user("thanks"),
+            ConversationMessage::assistant("You're welcome!"),
         ];
 
         let tokens_before = estimate_tokens(&msgs);
         let budget = tokens_before * 2 / 5;
         compact_messages(&mut msgs, budget);
 
-        assert!(msgs[2].content.contains("compacted"));
-        assert!(msgs[4].content.contains("compacted"));
-        assert!(!msgs.last().unwrap().content.contains("compacted"));
+        assert!(chat_content(&msgs[2]).contains("compacted"));
+        assert!(chat_content(&msgs[4]).contains("compacted"));
+        assert!(!chat_content(msgs.last().unwrap()).contains("compacted"));
     }
 
     #[test]
@@ -1137,19 +1117,19 @@ mod tests {
         let big_assistant =
             "I reviewed the repository and drafted the migration plan. ".repeat(180);
         let mut msgs = vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user(&big_user),
-            ChatMessage::assistant(&big_assistant),
-            ChatMessage::user(&big_user),
-            ChatMessage::assistant(&big_assistant),
-            ChatMessage::user("recent request"),
-            ChatMessage::assistant("recent acknowledgement"),
-            ChatMessage::user("recent follow-up"),
-            ChatMessage::assistant("recent answer"),
-            ChatMessage::user("thanks"),
-            ChatMessage::assistant("welcome"),
+            ConversationMessage::system("sys"),
+            ConversationMessage::user(&big_user),
+            ConversationMessage::assistant(&big_assistant),
+            ConversationMessage::user(&big_user),
+            ConversationMessage::assistant(&big_assistant),
+            ConversationMessage::user("recent request"),
+            ConversationMessage::assistant("recent acknowledgement"),
+            ConversationMessage::user("recent follow-up"),
+            ConversationMessage::assistant("recent answer"),
+            ConversationMessage::user("thanks"),
+            ConversationMessage::assistant("welcome"),
         ];
-        let original_last = msgs.last().unwrap().content.clone();
+        let original_last = msgs.last().cloned().unwrap();
         let provider = SummaryProvider;
         let (tx, mut rx) = mpsc::unbounded_channel();
         let budget = estimate_tokens(&msgs) / 3;
@@ -1159,21 +1139,21 @@ mod tests {
             .unwrap();
 
         assert!(msgs.iter().any(is_summary_message));
-        assert_eq!(msgs.last().unwrap().content, original_last);
+        assert_eq!(msgs.last(), Some(&original_last));
         assert!(
             estimate_tokens(&msgs)
                 < estimate_tokens(&[
-                    ChatMessage::system("sys"),
-                    ChatMessage::user(&big_user),
-                    ChatMessage::assistant(&big_assistant),
-                    ChatMessage::user(&big_user),
-                    ChatMessage::assistant(&big_assistant),
-                    ChatMessage::user("recent request"),
-                    ChatMessage::assistant("recent acknowledgement"),
-                    ChatMessage::user("recent follow-up"),
-                    ChatMessage::assistant("recent answer"),
-                    ChatMessage::user("thanks"),
-                    ChatMessage::assistant("welcome"),
+                    ConversationMessage::system("sys"),
+                    ConversationMessage::user(&big_user),
+                    ConversationMessage::assistant(&big_assistant),
+                    ConversationMessage::user(&big_user),
+                    ConversationMessage::assistant(&big_assistant),
+                    ConversationMessage::user("recent request"),
+                    ConversationMessage::assistant("recent acknowledgement"),
+                    ConversationMessage::user("recent follow-up"),
+                    ConversationMessage::assistant("recent answer"),
+                    ConversationMessage::user("thanks"),
+                    ConversationMessage::assistant("welcome"),
                 ])
         );
 
@@ -1187,43 +1167,28 @@ mod tests {
         }
     }
 
-    fn build_conversation_near_limit(_budget: usize) -> Vec<ChatMessage> {
+    fn build_conversation_near_limit(_budget: usize) -> Vec<ConversationMessage> {
         let big_content = "x".repeat(2000);
-        let assistant_write = |id: &str, content: &str| -> ChatMessage {
+        let assistant_write = |id: &str, content: &str| -> ConversationMessage {
             let args = serde_json::json!({
                 "path": format!("src/{id}.rs"),
                 "content": content,
             });
-            let json = serde_json::json!({
-                "content": "",
-                "tool_calls": [{
-                    "id": id,
-                    "name": "file_write",
-                    "arguments": args.to_string(),
-                }],
-            });
-            ChatMessage::assistant(json.to_string())
-        };
-        let tool_result = |id: &str| -> ChatMessage {
-            let json = serde_json::json!({
-                "tool_call_id": id,
-                "content": "ok",
-            });
-            ChatMessage::tool(json.to_string())
+            assistant_tool_call(id, "file_write", args.to_string())
         };
 
         vec![
-            ChatMessage::system("sys"),
-            ChatMessage::user("task"),
+            ConversationMessage::system("sys"),
+            ConversationMessage::user("task"),
             assistant_write("c1", &big_content),
-            tool_result("c1"),
+            tool_result("c1", "ok"),
             assistant_write("c2", &big_content),
-            tool_result("c2"),
+            tool_result("c2", "ok"),
             assistant_write("c3", &big_content),
-            tool_result("c3"),
-            ChatMessage::assistant("recent result"),
-            ChatMessage::user("thanks"),
-            ChatMessage::assistant("welcome"),
+            tool_result("c3", "ok"),
+            ConversationMessage::assistant("recent result"),
+            ConversationMessage::user("thanks"),
+            ConversationMessage::assistant("welcome"),
         ]
     }
 
@@ -1233,10 +1198,7 @@ mod tests {
         let before = msgs.clone();
         truncate_old_tool_arguments(&mut msgs, 1_000_000, 60);
         assert_eq!(msgs.len(), before.len());
-        assert!(msgs
-            .iter()
-            .zip(before.iter())
-            .all(|(after, before)| after.role == before.role && after.content == before.content));
+        assert_eq!(msgs, before);
     }
 
     #[test]
@@ -1246,9 +1208,10 @@ mod tests {
         let budget = tokens * 5 / 4;
         truncate_old_tool_arguments(&mut msgs, budget, 60);
 
-        let recent = &msgs[6];
-        let parsed: serde_json::Value = serde_json::from_str(&recent.content).unwrap();
-        let args = parsed["tool_calls"][0]["arguments"].as_str().unwrap();
+        let ConversationMessage::AssistantToolCalls { tool_calls, .. } = &msgs[6] else {
+            panic!("expected recent assistant tool call");
+        };
+        let args = &tool_calls[0].arguments;
         assert!(args.contains("\"content\""));
         assert!(args.contains("xxxxxxxx"));
     }

@@ -125,6 +125,7 @@ fn task_content(payload: nenjo_events::TaskExecuteContent) -> TaskContent {
         labels: payload.labels,
         status: payload.status,
         priority: payload.priority,
+        artifacts: payload.artifacts,
     }
 }
 
@@ -240,6 +241,7 @@ impl WorkerTaskExecutor {
                     labels: &submission.content.labels,
                     status: submission.content.status.as_deref(),
                     priority: submission.content.priority.as_deref(),
+                    artifacts: &submission.content.artifacts,
                     cancellation,
                 },
             )
@@ -324,6 +326,7 @@ mod tests {
                 labels: Vec::new(),
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             }),
             encrypted_payload: None,
         }
@@ -352,6 +355,7 @@ mod tests {
                 labels: vec!["ops".to_string()],
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             }),
             encrypted_payload: None,
             runnable: true,
@@ -376,6 +380,7 @@ mod tests {
                         labels: Vec::new(),
                         status: None,
                         priority: None,
+                        artifacts: Vec::new(),
                     },
                     trigger: TaskTrigger::Manual,
                 },

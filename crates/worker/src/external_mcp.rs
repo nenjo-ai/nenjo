@@ -458,7 +458,6 @@ impl ConnectedServer {
         debug!(
             server = %def.name,
             transport = %def.transport,
-            url = ?def.url,
             credential_keys = ?credentials.keys().collect::<Vec<_>>(),
             has_api_key = credentials.contains_key("api_key"),
             "Connecting to external MCP server"
@@ -1037,14 +1036,14 @@ impl Tool for ExternalMcpTool {
         {
             Ok(output) => Ok(ToolResult {
                 success: true,
-                output,
+                output: output.into(),
                 error: None,
             }),
             Err(e) => {
                 error!(tool = %self.mcp_tool_name, error = %e, "MCP tool call failed");
                 Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(e.to_string()),
                 })
             }
@@ -1493,7 +1492,7 @@ mod tests {
         assert!(result.success);
         let expected_cwd = tokio::fs::canonicalize(&plugin_dir).await.unwrap();
         assert_eq!(
-            result.output,
+            result.output.text_content(),
             format!("cwd={};mode=local;sentinel=present", expected_cwd.display())
         );
     }

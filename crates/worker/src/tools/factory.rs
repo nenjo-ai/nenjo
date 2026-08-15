@@ -315,13 +315,17 @@ where
             .platform_client
             .as_ref()
             .zip(self.platform.payload_encoder.as_ref())
-            .map(|(client, encoder)| PlatformArtifactToolsBackend {
-                client: Arc::clone(client),
-                payload_encoder: encoder.clone(),
-                cached_org_id: self.platform.cached_org_id,
-                workspace_root: security.workspace_dir.clone(),
-            });
-        add_artifact_tools(&mut tools, artifact_backend);
+            .zip(self.platform.artifact_materializer.as_ref())
+            .map(
+                |((client, encoder), materializer)| PlatformArtifactToolsBackend {
+                    client: Arc::clone(client),
+                    payload_encoder: encoder.clone(),
+                    cached_org_id: self.platform.cached_org_id,
+                    workspace_root: security.workspace_dir.clone(),
+                    materializer: Arc::clone(materializer),
+                },
+            );
+        add_artifact_tools(&mut tools, artifact_backend, &policy);
         if policy.can_read_resource(ScopeResource::Tasks) {
             tools.push(Arc::new(WatchExecutionRunTool::new(
                 self.local_execution_watcher.clone(),
@@ -407,7 +411,7 @@ where
         // Agent native media tools come from model_assignments only.
         // Org defaults apply only during resolve of a declared capability — they
         // do not invent tools for agents with no assignment declaration.
-        let declared: Vec<nenjo_models::MediaOperation> = resolver.assigned_capabilities(resource);
+        let declared = resolver.assigned_capabilities(resource);
         if declared.is_empty() {
             return;
         }
@@ -415,7 +419,10 @@ where
         let mut tool_names = std::collections::HashSet::new();
 
         for capability in declared {
-            let Some(name) = tool_name(capability) else {
+            let Ok(media_operation) = nenjo_models::MediaOperation::try_from(capability) else {
+                continue;
+            };
+            let Some(name) = tool_name(media_operation) else {
                 tracing::warn!(
                     capability = ?capability,
                     agent = %agent.slug,
@@ -434,10 +441,10 @@ where
 
             match resolver.resolve(resource, capability) {
                 Ok(endpoint) => {
-                    if let Some(tool) = NativeMediaTool::new(
-                        endpoint.to_media_provider(),
-                        self.provider_registry.clone(),
-                    ) {
+                    if let Some(media_provider) = endpoint.to_media_provider()
+                        && let Some(tool) =
+                            NativeMediaTool::new(media_provider, self.provider_registry.clone())
+                    {
                         tools.push(Arc::new(tool));
                     }
                 }

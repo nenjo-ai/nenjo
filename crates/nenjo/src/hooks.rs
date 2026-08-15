@@ -8,7 +8,7 @@ use std::sync::{Arc, RwLock};
 use std::time::Duration;
 
 use anyhow::{Context, Result};
-use nenjo_models::ChatMessage;
+use nenjo_models::{ConversationMessage, ToolOutputPart};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
@@ -513,7 +513,7 @@ impl HookRuntime {
 
     async fn write_transcript(
         &self,
-        messages: &[ChatMessage],
+        messages: &[ConversationMessage],
         final_text: &str,
     ) -> Result<PathBuf> {
         let transcript_dir = self.transcript_dir.clone();
@@ -523,15 +523,21 @@ impl HookRuntime {
         let transcript_path = transcript_dir.join(format!("{}.jsonl", self.session_id));
         let mut lines = Vec::with_capacity(messages.len() + 1);
         for message in messages {
-            lines.push(claude_transcript_line(&message.role, &message.content));
+            lines.push(claude_transcript_line(message));
         }
         if !final_text.trim().is_empty()
-            && !messages
-                .iter()
-                .rev()
-                .any(|message| message.role == "assistant" && message.content == final_text)
+            && !messages.iter().rev().any(|message| {
+                matches!(
+                    message,
+                    ConversationMessage::Chat(chat)
+                        if chat.role == nenjo_models::ChatRole::Assistant
+                            && chat.content == final_text
+                )
+            })
         {
-            lines.push(claude_transcript_line("assistant", final_text));
+            lines.push(claude_transcript_line(&ConversationMessage::assistant(
+                final_text,
+            )));
         }
         tokio::fs::write(&transcript_path, lines.join("\n"))
             .await
@@ -562,7 +568,7 @@ fn same_active_hook(left: &ActiveHook, right: &ActiveHook) -> bool {
 pub enum HookRuntimeEvent<'a> {
     UserPromptSubmit {
         prompt: &'a str,
-        messages: &'a [ChatMessage],
+        messages: &'a [ConversationMessage],
     },
     PreToolUse {
         tool_name: &'a str,
@@ -576,7 +582,7 @@ pub enum HookRuntimeEvent<'a> {
         tool_use_id: Option<&'a str>,
     },
     Stop {
-        messages: &'a [ChatMessage],
+        messages: &'a [ConversationMessage],
         final_text: &'a str,
     },
 }
@@ -812,19 +818,49 @@ fn truncate_output(output: &mut String) {
     output.push_str("\n... [hook output truncated]");
 }
 
-fn claude_transcript_line(role: &str, content: &str) -> String {
-    json!({
-        "type": role,
-        "message": {
-            "role": role,
-            "content": [
-                {
-                    "type": "text",
-                    "text": content
-                }
-            ]
-        }
-    })
+fn claude_transcript_line(message: &ConversationMessage) -> String {
+    match message {
+        ConversationMessage::Chat(chat) => json!({
+            "type": chat.role.as_str(),
+            "message": {
+                "role": chat.role.as_str(),
+                "content": [{ "type": "text", "text": chat.content }]
+            }
+        }),
+        ConversationMessage::AssistantToolCalls { text, tool_calls } => json!({
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": text,
+                "tool_calls": tool_calls,
+            }
+        }),
+        ConversationMessage::ToolResults(results) => json!({
+            "type": "tool_results",
+            "message": {
+                "role": "user",
+                "content": results.iter().map(|result| json!({
+                    "type": "tool_result",
+                    "tool_use_id": result.tool_call_id,
+                    "content": result.output.parts().iter().map(|part| match part {
+                        ToolOutputPart::Text(text) => json!({"type": "text", "text": text}),
+                        ToolOutputPart::Artifact(artifact) => json!({
+                            "type": "artifact_ref",
+                            "artifact": artifact,
+                        }),
+                    }).collect::<Vec<_>>(),
+                })).collect::<Vec<_>>()
+            }
+        }),
+        ConversationMessage::ArtifactAnalysis(analysis) => json!({
+            "type": "artifact_analysis",
+            "message": {
+                "role": "user",
+                "content": [{ "type": "text", "text": analysis.model_context() }],
+                "artifact_analysis": analysis,
+            }
+        }),
+    }
     .to_string()
 }
 
@@ -890,7 +926,7 @@ printf '{"decision":"block","reason":"continue please","systemMessage":"again"}'
             .into_iter()
             .next()
             .unwrap();
-        let messages = vec![ChatMessage::assistant("done".to_string())];
+        let messages = vec![ConversationMessage::assistant("done".to_string())];
         let execution = runtime
             .execute(
                 &active,
@@ -963,7 +999,7 @@ printf '{"decision":"request_next_turn","prompt":"revise before stopping","syste
             .into_iter()
             .next()
             .unwrap();
-        let messages = vec![ChatMessage::assistant("done".to_string())];
+        let messages = vec![ConversationMessage::assistant("done".to_string())];
         let execution = runtime
             .execute(
                 &active,
@@ -1039,7 +1075,7 @@ printf '{"hookSpecificOutput":{"additionalContext":"review checklist"}}'
             .into_iter()
             .next()
             .unwrap();
-        let messages = vec![ChatMessage::user("review this".to_string())];
+        let messages = vec![ConversationMessage::user("review this".to_string())];
         let execution = runtime
             .execute(
                 &active,

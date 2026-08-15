@@ -284,7 +284,7 @@ pub struct SessionCheckpointUpdate {
     pub phase: ExecutionPhase,
     pub worktree: CheckpointPatch<WorktreeSnapshot>,
     pub active_tool_name: CheckpointPatch<String>,
-    pub opaque_state: CheckpointPatch<serde_json::Value>,
+    pub state: CheckpointPatch<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]

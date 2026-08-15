@@ -639,6 +639,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 id,
                 content: _,
                 encrypted_content: Some(payload),
+                artifacts,
                 hidden,
                 project,
                 routine,
@@ -654,6 +655,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         id,
                         content,
                         encrypted_content: None,
+                        artifacts,
                         hidden,
                         project,
                         routine,
@@ -680,6 +682,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 command,
                 content: _,
                 encrypted_content: Some(payload),
+                artifacts,
                 project,
                 agent,
                 target_type,
@@ -694,6 +697,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         command,
                         content,
                         encrypted_content: None,
+                        artifacts,
                         project,
                         agent,
                         target_type,
@@ -963,11 +967,6 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                     ExecutionEventPayload::TaskArtifacts(artifacts) => {
                         ExecutionEventPayload::TaskArtifacts(artifacts)
                     }
-                    ExecutionEventPayload::HumanRequest(request) => {
-                        // Human-review subjects and checkpoints are already
-                        // encrypted by the execution host before transport.
-                        ExecutionEventPayload::HumanRequest(request)
-                    }
                 };
 
                 Ok(Some(Response::ExecutionEvent {
@@ -1117,6 +1116,7 @@ mod tests {
                     id: Some("actor-confusion".into()),
                     content: String::new(),
                     encrypted_content: Some(encrypted_payload.clone()),
+                    artifacts: Vec::new(),
                     hidden: false,
                     project: None,
                     routine: None,
@@ -1145,6 +1145,7 @@ mod tests {
                     id: Some("actor-confusion".into()),
                     content: String::new(),
                     encrypted_content: Some(encrypted_payload),
+                    artifacts: Vec::new(),
                     hidden: false,
                     project: None,
                     routine: None,
@@ -1189,6 +1190,7 @@ mod tests {
                     id: Some("plain".into()),
                     content: "plaintext prompt".into(),
                     encrypted_content: None,
+                    artifacts: Vec::new(),
                     hidden: false,
                     project: None,
                     routine: None,
@@ -1226,6 +1228,7 @@ mod tests {
                     id: Some("plain".into()),
                     content: "plaintext prompt".into(),
                     encrypted_content: None,
+                    artifacts: Vec::new(),
                     hidden: false,
                     project: None,
                     routine: None,
@@ -1279,6 +1282,7 @@ mod tests {
                         labels: Vec::new(),
                         status: None,
                         priority: None,
+                        artifacts: Vec::new(),
                     }),
                     encrypted_payload: None,
                 },

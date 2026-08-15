@@ -453,4 +453,37 @@ mod tests {
                 .contains("either condition or outcome")
         );
     }
+
+    #[test]
+    fn canonical_validation_rejects_missing_or_misplaced_human_request() {
+        let missing = package(json!({
+            "entry_steps": ["review"],
+            "steps": [{"ref": "review", "type": "human"}],
+            "edges": []
+        }));
+        let error = validate_routine_graph(&package_routine_graph(&missing).unwrap())
+            .expect_err("human step without request must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("must define a valid request contract")
+        );
+
+        let misplaced = package(json!({
+            "entry_steps": ["done"],
+            "steps": [{
+                "ref": "done",
+                "type": "terminal",
+                "request": {"title": "Review"}
+            }],
+            "edges": []
+        }));
+        let error = validate_routine_graph(&package_routine_graph(&misplaced).unwrap())
+            .expect_err("non-human step with request must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("may not define a human request contract")
+        );
+    }
 }

@@ -48,8 +48,14 @@ fn cached_model(
             context_window: None,
             base_url: base_url.map(str::to_owned),
             native_tools: Vec::new(),
+            capabilities: capabilities
+                .into_iter()
+                .map(|capability| capability.parse().expect("valid capability fixture"))
+                .collect(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         },
-        capabilities,
     }
 }
 
@@ -114,13 +120,18 @@ fn test_platform_services(
         .map(Arc::new)
         .ok();
     PlatformToolServices::new(
-        manifest_store,
-        platform_client,
-        PlatformPayloadEncoder::new(auth_provider),
-        None,
-        config.workspace_dir.clone(),
-        config.config_dir.join("library"),
-        None,
+        super::platform_services::PlatformToolServiceDependencies {
+            manifest_store,
+            platform_client,
+            payload_encoder: PlatformPayloadEncoder::new(auth_provider),
+        },
+        super::platform_services::PlatformToolServiceConfig {
+            cached_org_id: None,
+            workspace_dir: config.workspace_dir.clone(),
+            library_dir: config.config_dir.join("library"),
+            state_dir: config.state_dir.clone(),
+            read_only_manifest: None,
+        },
     )
 }
 
@@ -320,7 +331,7 @@ async fn worker_factory_scopes_shell_tool_to_requested_workspace() {
         .unwrap();
     assert!(pwd.success);
     assert_eq!(
-        std::fs::canonicalize(pwd.output.trim()).unwrap(),
+        std::fs::canonicalize(pwd.output.text_content().trim()).unwrap(),
         std::fs::canonicalize(&worktree).unwrap()
     );
 
@@ -329,7 +340,7 @@ async fn worker_factory_scopes_shell_tool_to_requested_workspace() {
         .await
         .unwrap();
     assert!(relative_read.success);
-    assert_eq!(relative_read.output.trim(), "factory scoped");
+    assert_eq!(relative_read.output.text_content().trim(), "factory scoped");
 }
 
 #[tokio::test]
@@ -1031,7 +1042,7 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
 }
 
 #[tokio::test]
-async fn worker_factory_exposes_task_tools_under_task_write_scope() {
+async fn worker_factory_isolates_task_and_artifact_tools_by_scope() {
     let temp = tempdir().unwrap();
     let root = temp.path();
 
@@ -1078,18 +1089,47 @@ async fn worker_factory_exposes_task_tools_under_task_write_scope() {
     assert!(names.iter().any(|name| name == "cancel_execution_run"));
     assert!(names.iter().any(|name| name == "retry_execution_run"));
     assert!(names.iter().any(|name| name == "watch_execution_run"));
-    assert!(names.iter().any(|name| name == "view_artifacts"));
-    assert!(names.iter().any(|name| name == "upload_artifact"));
+    assert!(!names.iter().any(|name| name == "list_artifacts"));
+    assert!(!names.iter().any(|name| name == "read_artifact"));
+    assert!(!names.iter().any(|name| name == "upload_artifact"));
     assert!(!names.iter().any(|name| name == "start_project_execution"));
+
+    let artifact_writer = AgentManifest {
+        platform_scopes: vec!["artifacts:write".into()],
+        ..agent
+    };
+    let artifact_write_tools = factory.create_tools(&artifact_writer).await;
+    let artifact_write_names: Vec<_> = artifact_write_tools
+        .iter()
+        .map(|tool| tool.name())
+        .collect();
+    assert!(artifact_write_names.contains(&"list_artifacts"));
+    assert!(artifact_write_names.contains(&"read_artifact"));
+    assert!(artifact_write_names.contains(&"upload_artifact"));
+    assert!(!artifact_write_names.contains(&"configure_task"));
+    assert!(!artifact_write_names.contains(&"delete_task"));
 
     let unscoped_agent = AgentManifest {
         platform_scopes: Vec::new(),
-        ..agent
+        ..artifact_writer
     };
     let unscoped_tools = factory.create_tools(&unscoped_agent).await;
     let unscoped_names: Vec<_> = unscoped_tools.iter().map(|tool| tool.name()).collect();
-    assert!(unscoped_names.contains(&"view_artifacts"));
-    assert!(unscoped_names.contains(&"upload_artifact"));
+    assert!(!unscoped_names.contains(&"list_artifacts"));
+    assert!(!unscoped_names.contains(&"read_artifact"));
+    assert!(!unscoped_names.contains(&"upload_artifact"));
+
+    let read_only_agent = AgentManifest {
+        platform_scopes: vec!["artifacts:read".into()],
+        ..unscoped_agent
+    };
+    let read_only_tools = factory.create_tools(&read_only_agent).await;
+    let read_only_names: Vec<_> = read_only_tools.iter().map(|tool| tool.name()).collect();
+    assert!(read_only_names.contains(&"list_artifacts"));
+    assert!(read_only_names.contains(&"read_artifact"));
+    assert!(!read_only_names.contains(&"upload_artifact"));
+    assert!(!read_only_names.contains(&"list_tasks"));
+    assert!(!read_only_names.contains(&"watch_execution_run"));
 }
 
 #[tokio::test]
@@ -1495,6 +1535,10 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
     let package_council = CouncilManifest {
         slug: Slug::derive("package-council"),

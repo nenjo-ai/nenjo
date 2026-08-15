@@ -335,7 +335,13 @@ async fn model_change_applies_its_inline_snapshot_to_the_bootstrap_cache() {
     let models = load_cached_model_runtime(&cache.manifests_dir);
     assert_eq!(models.len(), 1);
     assert_eq!(models[0].id, model_id);
-    assert_eq!(models[0].capabilities, ["chat", "transcribe_audio"]);
+    assert_eq!(
+        models[0].capabilities,
+        [
+            nenjo_models::ModelCapabilityId::Chat,
+            nenjo_models::ModelCapabilityId::TranscribeAudio,
+        ]
+    );
 }
 
 #[tokio::test]
@@ -504,6 +510,10 @@ fn model(_id: Uuid, name: &str) -> ModelManifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     }
 }
 

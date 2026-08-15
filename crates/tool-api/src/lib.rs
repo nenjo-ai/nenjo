@@ -50,16 +50,18 @@
 //!     }
 //!
 //!     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
-//!         Ok(ToolResult {
-//!             success: true,
-//!             output: args["message"].as_str().unwrap_or_default().to_string(),
-//!             error: None,
-//!         })
+//!         Ok(ToolResult::success(
+//!             args["message"].as_str().unwrap_or_default(),
+//!         ))
 //!     }
 //! }
 //! ```
 
 use async_trait::async_trait;
+pub use nenjo_content::{
+    ArtifactId, ArtifactInput, ArtifactInputSource, ArtifactInstruction, ArtifactRef, ArtifactSize,
+    MediaType, Sha256Digest,
+};
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
 use std::path::PathBuf;
@@ -126,7 +128,7 @@ pub struct ToolSpec {
 }
 
 /// A tool call requested by the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolCall {
     pub id: String,
     pub name: String,
@@ -140,18 +142,197 @@ impl Display for ToolCall {
 }
 
 /// A tool result to feed back to the LLM.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolResultMessage {
     pub tool_call_id: String,
-    pub content: String,
+    pub output: ToolOutput,
+}
+
+impl ToolResultMessage {
+    pub fn text(tool_call_id: impl Into<String>, content: impl Into<String>) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            output: ToolOutput::text(content),
+        }
+    }
+
+    pub fn new(tool_call_id: impl Into<String>, output: ToolOutput) -> Self {
+        Self {
+            tool_call_id: tool_call_id.into(),
+            output,
+        }
+    }
+
+    pub fn with_artifact(mut self, artifact: ArtifactRef) -> Self {
+        self.output.push_artifact(artifact);
+        self
+    }
+}
+
+/// One ordered part of a tool's durable output.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "snake_case")]
+pub enum ToolOutputPart {
+    Text(String),
+    Artifact(ArtifactRef),
+}
+
+/// Ordered, serializable tool output without decrypted bytes or host paths.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct ToolOutput(Vec<ToolOutputPart>);
+
+impl ToolOutput {
+    pub fn empty() -> Self {
+        Self::default()
+    }
+
+    pub fn text(value: impl Into<String>) -> Self {
+        Self(vec![ToolOutputPart::Text(value.into())])
+    }
+
+    pub fn from_parts(parts: Vec<ToolOutputPart>) -> Self {
+        Self(parts)
+    }
+
+    pub fn parts(&self) -> &[ToolOutputPart] {
+        &self.0
+    }
+
+    pub fn parts_mut(&mut self) -> &mut [ToolOutputPart] {
+        &mut self.0
+    }
+
+    pub fn push_text(&mut self, value: impl Into<String>) {
+        self.0.push(ToolOutputPart::Text(value.into()));
+    }
+
+    pub fn push_artifact(&mut self, artifact: ArtifactRef) {
+        self.0.push(ToolOutputPart::Artifact(artifact));
+    }
+
+    /// Retain artifact parts selected for an ephemeral model request.
+    /// Text parts are always preserved.
+    pub fn retain_artifacts(&mut self, mut retain: impl FnMut(&ArtifactRef) -> bool) {
+        self.0.retain(|part| match part {
+            ToolOutputPart::Text(_) => true,
+            ToolOutputPart::Artifact(artifact) => retain(artifact),
+        });
+    }
+
+    pub fn has_artifacts(&self) -> bool {
+        self.0
+            .iter()
+            .any(|part| matches!(part, ToolOutputPart::Artifact(_)))
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+            || self.0.iter().all(|part| match part {
+                ToolOutputPart::Text(text) => text.is_empty(),
+                ToolOutputPart::Artifact(_) => false,
+            })
+    }
+
+    pub fn clear(&mut self) {
+        self.0.clear();
+    }
+
+    pub fn contains(&self, pattern: &str) -> bool {
+        self.text_content().contains(pattern)
+    }
+
+    /// Concatenate textual parts for logs, previews, and text-only UI surfaces.
+    pub fn text_content(&self) -> String {
+        self.0
+            .iter()
+            .filter_map(|part| match part {
+                ToolOutputPart::Text(text) => Some(text.as_str()),
+                ToolOutputPart::Artifact(_) => None,
+            })
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    /// Borrow the sole text part without allocating.
+    pub fn as_text(&self) -> Option<&str> {
+        match self.0.as_slice() {
+            [ToolOutputPart::Text(text)] => Some(text),
+            [] | [ToolOutputPart::Artifact(_)] | [_, _, ..] => None,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.text_content().len()
+    }
+}
+
+impl From<String> for ToolOutput {
+    fn from(value: String) -> Self {
+        Self::text(value)
+    }
+}
+
+impl From<&str> for ToolOutput {
+    fn from(value: &str) -> Self {
+        Self::text(value)
+    }
+}
+
+impl Display for ToolOutput {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.text_content())
+    }
+}
+
+impl PartialEq<&str> for ToolOutput {
+    fn eq(&self, other: &&str) -> bool {
+        self.text_content() == *other
+    }
+}
+
+impl PartialEq<ToolOutput> for &str {
+    fn eq(&self, other: &ToolOutput) -> bool {
+        other == self
+    }
 }
 
 /// Result of a tool execution.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ToolResult {
     pub success: bool,
-    pub output: String,
+    pub output: ToolOutput,
     pub error: Option<String>,
+}
+
+impl ToolResult {
+    pub fn success(output: impl Into<String>) -> Self {
+        Self {
+            success: true,
+            output: ToolOutput::text(output),
+            error: None,
+        }
+    }
+
+    pub fn failure(error: impl Into<String>) -> Self {
+        Self {
+            success: false,
+            output: ToolOutput::empty(),
+            error: Some(error.into()),
+        }
+    }
+
+    pub fn with_artifact(mut self, artifact: ArtifactRef) -> Self {
+        self.output.push_artifact(artifact);
+        self
+    }
+
+    pub fn with_artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
+        for artifact in artifacts {
+            self.output.push_artifact(artifact);
+        }
+        self
+    }
 }
 
 /// Runtime ownership surface for a tool.
@@ -328,7 +509,11 @@ mod tests {
         async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
             Ok(ToolResult {
                 success: true,
-                output: args["value"].as_str().unwrap_or_default().to_string(),
+                output: args["value"]
+                    .as_str()
+                    .unwrap_or_default()
+                    .to_string()
+                    .into(),
                 error: None,
             })
         }
@@ -348,19 +533,38 @@ mod tests {
             .await
             .unwrap();
         assert!(result.success);
-        assert_eq!(result.output, "hello");
+        assert_eq!(result.output.text_content(), "hello");
     }
 
     #[test]
     fn tool_result_roundtrip() {
         let result = ToolResult {
             success: false,
-            output: String::new(),
+            output: String::new().into(),
             error: Some("boom".into()),
         };
         let json = serde_json::to_string(&result).unwrap();
         let parsed: ToolResult = serde_json::from_str(&json).unwrap();
         assert_eq!(parsed.error.as_deref(), Some("boom"));
+    }
+
+    #[test]
+    fn tool_result_artifacts_are_immutable_refs_without_input_provenance() {
+        let artifact = ArtifactRef::new(
+            nenjo_content::ArtifactId::parse(uuid::Uuid::new_v4()).unwrap(),
+            nenjo_content::Sha256Digest::parse(&format!("sha256:{}", "a".repeat(64))).unwrap(),
+            nenjo_content::MediaType::parse("image/png").unwrap(),
+            nenjo_content::ArtifactSize::new(12),
+        );
+        let encoded =
+            serde_json::to_value(ToolResult::success("image ready").with_artifact(artifact))
+                .unwrap();
+
+        let artifact = &encoded["output"][1]["value"];
+        assert_eq!(artifact["media_type"], "image/png");
+        assert!(artifact.get("source").is_none());
+        assert!(artifact.get("bytes").is_none());
+        assert!(artifact.get("path").is_none());
     }
 
     #[test]

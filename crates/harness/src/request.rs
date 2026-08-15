@@ -2,6 +2,7 @@
 
 use nenjo::hooks::ActiveHookScope;
 use nenjo::{IntoSlug, Slug};
+use nenjo_models::ArtifactRef;
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -38,6 +39,7 @@ pub struct ChatRequest {
     pub template_override: Option<String>,
     pub hook_scopes: Vec<ActiveHookScope>,
     pub hook_transcript_dir: Option<PathBuf>,
+    pub artifacts: Vec<ArtifactRef>,
 }
 
 impl ChatRequest {
@@ -54,6 +56,7 @@ impl ChatRequest {
             template_override: None,
             hook_scopes: Vec::new(),
             hook_transcript_dir: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -108,6 +111,12 @@ impl ChatRequest {
         self.hook_transcript_dir = Some(dir.into());
         self
     }
+
+    /// Attach immutable artifact revisions to this chat turn.
+    pub fn with_artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
+        self.artifacts = artifacts;
+        self
+    }
 }
 
 /// Session-aware task request for the harness API.
@@ -125,6 +134,7 @@ pub struct TaskRequest {
     pub status: Option<String>,
     pub priority: Option<String>,
     pub project_location: Option<ProjectLocation>,
+    pub artifacts: Vec<ArtifactRef>,
 }
 
 impl TaskRequest {
@@ -143,6 +153,7 @@ impl TaskRequest {
             status: None,
             priority: None,
             project_location: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -167,6 +178,7 @@ impl TaskRequest {
             status: task.status.clone(),
             priority: task.priority.clone(),
             project_location: None,
+            artifacts: task.artifacts.clone(),
         }
     }
 
@@ -221,6 +233,12 @@ impl TaskRequest {
     /// Set the local project location used for this task execution.
     pub fn with_project_location(mut self, location: ProjectLocation) -> Self {
         self.project_location = Some(location);
+        self
+    }
+
+    /// Attach immutable artifact revisions to this task execution.
+    pub fn with_artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
+        self.artifacts = artifacts;
         self
     }
 }

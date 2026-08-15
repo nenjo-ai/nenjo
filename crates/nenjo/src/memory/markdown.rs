@@ -1,23 +1,12 @@
 //! File-based markdown memory backend.
 //!
 //! Stores memory categories as markdown files with YAML frontmatter.
-//! Artifacts are stored as plain files with a `manifest.json` index.
-//!
-//! Both memories and artifacts live under `~/.nenjo/state/` so that all
-//! agent-generated state can be backed up from a single directory. The
-//! state dir is resolved as an absolute path, so it remains accessible
-//! regardless of the current working directory (including git worktrees).
 //!
 //! Directory layout:
 //! ```text
-//! {state}/
-//! ├── memory/
-//! │   └── {namespace}/
-//! │       ├── {category}.md      # memory category file
-//! │       └── ...
-//! └── {ns}/artifacts/
-//!     ├── manifest.json          # artifact index
-//!     ├── {file}                 # artifact file
+//! {memory_root}/
+//! └── {namespace}/
+//!     ├── {category}.md
 //!     └── ...
 //! ```
 
@@ -26,34 +15,24 @@ use std::path::{Path, PathBuf};
 use anyhow::{Context, Result};
 
 use super::Memory;
-use super::types::{ArtifactEntry, MemoryCategory, MemoryFact};
+use super::types::{MemoryCategory, MemoryFact};
 
 /// File-based markdown memory backend.
 pub struct MarkdownMemory {
     /// Root for memory categories (e.g. `~/.nenjo/state/memory/`).
     root: PathBuf,
-    /// Root for artifacts (e.g. `~/.nenjo/state/`).
-    artifact_root: PathBuf,
 }
 
 impl MarkdownMemory {
-    /// Create a new markdown memory with memory and artifact roots.
-    ///
-    /// Memory categories are stored under `memory_root/`.
-    /// Artifacts are stored under `artifact_root/{ns}/`.
-    pub fn new(memory_root: impl Into<PathBuf>, artifact_root: impl Into<PathBuf>) -> Self {
+    /// Create a new markdown memory rooted at `memory_root`.
+    pub fn new(memory_root: impl Into<PathBuf>) -> Self {
         Self {
             root: memory_root.into(),
-            artifact_root: artifact_root.into(),
         }
     }
 
     fn ns_dir(&self, ns: &str) -> PathBuf {
         self.root.join(ns)
-    }
-
-    fn artifact_dir(&self, ns: &str) -> PathBuf {
-        self.artifact_root.join(ns)
     }
 
     fn category_path(&self, ns: &str, category: &str) -> PathBuf {
@@ -153,77 +132,6 @@ impl Memory for MarkdownMemory {
         }
         Ok(true)
     }
-
-    async fn save_artifact(
-        &self,
-        ns: &str,
-        filename: &str,
-        description: &str,
-        created_by: &str,
-        content: &str,
-    ) -> Result<()> {
-        let dir = self.artifact_dir(ns);
-        tokio::fs::create_dir_all(&dir).await?;
-
-        // Write the file
-        let file_path = dir.join(filename);
-        tokio::fs::write(&file_path, content).await?;
-
-        // Update manifest
-        let manifest_path = dir.join("manifest.json");
-        let mut entries = read_manifest(&manifest_path).await;
-
-        // Remove existing entry with same filename (update)
-        entries.retain(|e| e.filename != filename);
-
-        let size_bytes = content.len() as i64;
-        entries.push(ArtifactEntry {
-            filename: filename.to_string(),
-            description: description.to_string(),
-            created_by: created_by.to_string(),
-            size_bytes,
-        });
-
-        let json = serde_json::to_string_pretty(&entries)?;
-        tokio::fs::write(&manifest_path, json).await?;
-        Ok(())
-    }
-
-    async fn list_artifacts(&self, ns: &str) -> Result<Vec<ArtifactEntry>> {
-        let manifest_path = self.artifact_dir(ns).join("manifest.json");
-        Ok(read_manifest(&manifest_path).await)
-    }
-
-    async fn read_artifact(&self, ns: &str, filename: &str) -> Result<Option<String>> {
-        let path = self.artifact_dir(ns).join(filename);
-        if !tokio::fs::try_exists(&path).await? {
-            return Ok(None);
-        }
-        tokio::fs::read_to_string(&path)
-            .await
-            .map(Some)
-            .map_err(Into::into)
-    }
-
-    async fn delete_artifact(&self, ns: &str, filename: &str) -> Result<bool> {
-        let dir = self.artifact_dir(ns);
-        let file_path = dir.join(filename);
-        if !tokio::fs::try_exists(&file_path).await? {
-            return Ok(false);
-        }
-        tokio::fs::remove_file(&file_path).await?;
-
-        // Update manifest
-        let manifest_path = dir.join("manifest.json");
-        let mut entries = read_manifest(&manifest_path).await;
-        let before = entries.len();
-        entries.retain(|e| e.filename != filename);
-        if entries.len() != before {
-            let json = serde_json::to_string_pretty(&entries)?;
-            tokio::fs::write(&manifest_path, json).await?;
-        }
-        Ok(true)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -251,14 +159,6 @@ async fn parse_category(path: &Path) -> Result<MemoryCategory> {
         facts,
         updated_at,
     })
-}
-
-async fn read_manifest(path: &Path) -> Vec<ArtifactEntry> {
-    tokio::fs::read_to_string(path)
-        .await
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok())
-        .unwrap_or_default()
 }
 
 fn split_frontmatter(content: &str) -> Result<(String, String)> {
@@ -296,16 +196,15 @@ fn extract_field(frontmatter: &str, key: &str) -> Result<String> {
 mod tests {
     use super::*;
 
-    fn temp_memory() -> (tempfile::TempDir, tempfile::TempDir, MarkdownMemory) {
+    fn temp_memory() -> (tempfile::TempDir, MarkdownMemory) {
         let mem_dir = tempfile::tempdir().unwrap();
-        let res_dir = tempfile::tempdir().unwrap();
-        let memory = MarkdownMemory::new(mem_dir.path(), res_dir.path());
-        (mem_dir, res_dir, memory)
+        let memory = MarkdownMemory::new(mem_dir.path());
+        (mem_dir, memory)
     }
 
     #[tokio::test]
     async fn append_and_list() {
-        let (_md, _wd, mem) = temp_memory();
+        let (_md, mem) = temp_memory();
         let ns = "agent_test_core";
 
         mem.append(ns, "preferences", "User prefers Rust")
@@ -329,7 +228,7 @@ mod tests {
 
     #[tokio::test]
     async fn read_category() {
-        let (_md, _wd, mem) = temp_memory();
+        let (_md, mem) = temp_memory();
         let ns = "agent_test_core";
 
         assert!(mem.read_category(ns, "prefs").await.unwrap().is_none());
@@ -342,7 +241,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_fact() {
-        let (_md, _wd, mem) = temp_memory();
+        let (_md, mem) = temp_memory();
         let ns = "agent_test_core";
 
         mem.append(ns, "prefs", "Likes Rust").await.unwrap();
@@ -358,7 +257,7 @@ mod tests {
 
     #[tokio::test]
     async fn delete_last_fact_removes_file() {
-        let (_md, _wd, mem) = temp_memory();
+        let (_md, mem) = temp_memory();
         let ns = "agent_test_core";
 
         mem.append(ns, "temp", "only fact").await.unwrap();
@@ -368,74 +267,16 @@ mod tests {
 
     #[tokio::test]
     async fn empty_namespace() {
-        let (_md, _wd, mem) = temp_memory();
+        let (_md, mem) = temp_memory();
         let cats = mem.list_categories("nonexistent").await.unwrap();
         assert!(cats.is_empty());
-    }
-
-    #[tokio::test]
-    async fn artifact_crud() {
-        let (_md, _wd, mem) = temp_memory();
-        let ns = "workspace/artifacts";
-
-        // Save
-        mem.save_artifact(
-            ns,
-            "design.md",
-            "System design doc",
-            "architect",
-            "# Design\nHere it is.",
-        )
-        .await
-        .unwrap();
-
-        // List
-        let entries = mem.list_artifacts(ns).await.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].filename, "design.md");
-        assert_eq!(entries[0].description, "System design doc");
-        assert_eq!(entries[0].created_by, "architect");
-
-        // Read
-        let content = mem.read_artifact(ns, "design.md").await.unwrap().unwrap();
-        assert!(content.contains("# Design"));
-
-        // Update (overwrite)
-        mem.save_artifact(
-            ns,
-            "design.md",
-            "Updated design",
-            "architect",
-            "# Design v2",
-        )
-        .await
-        .unwrap();
-        let entries = mem.list_artifacts(ns).await.unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].description, "Updated design");
-
-        // Delete
-        assert!(mem.delete_artifact(ns, "design.md").await.unwrap());
-        assert!(!mem.delete_artifact(ns, "design.md").await.unwrap());
-        assert!(mem.list_artifacts(ns).await.unwrap().is_empty());
-    }
-
-    #[tokio::test]
-    async fn artifact_not_found() {
-        let (_md, _wd, mem) = temp_memory();
-        assert!(
-            mem.read_artifact("artifacts", "nope.md")
-                .await
-                .unwrap()
-                .is_none()
-        );
     }
 
     // -- Scoping tests --
 
     #[tokio::test]
     async fn memory_scope_isolation_project_agent() {
-        let (_md, _wd, mem) = temp_memory();
+        let (_md, mem) = temp_memory();
         let scope = super::super::types::MemoryScope::new("coder", Some("myapp"));
 
         // Each tier writes to a different namespace
@@ -465,7 +306,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_scope_system_agent_collapses() {
-        let (_md, _wd, mem) = temp_memory();
+        let (_md, mem) = temp_memory();
         let scope = super::super::types::MemoryScope::new("nenji", None);
 
         // Project and core resolve to the same namespace
@@ -495,7 +336,7 @@ mod tests {
 
     #[tokio::test]
     async fn memory_scope_shared_visible_across_agents() {
-        let (_md, _wd, mem) = temp_memory();
+        let (_md, mem) = temp_memory();
         let scope_a = super::super::types::MemoryScope::new("coder", Some("myapp"));
         let scope_b = super::super::types::MemoryScope::new("reviewer", Some("myapp"));
 
@@ -510,60 +351,5 @@ mod tests {
         let cats = mem.list_categories(&scope_b.shared).await.unwrap();
         assert_eq!(cats.len(), 1);
         assert_eq!(cats[0].facts[0].text, "Use Rust");
-    }
-
-    #[tokio::test]
-    async fn artifact_scope_project_under_state() {
-        let (_md, rd, mem) = temp_memory();
-        let scope = super::super::types::MemoryScope::new("architect", Some("myapp"));
-
-        assert_eq!(scope.artifacts_project, "myapp/artifacts");
-        assert_eq!(scope.artifacts_global, "artifacts");
-
-        // Project artifact goes under {state}/myapp/artifacts/
-        mem.save_artifact(
-            &scope.artifacts_project,
-            "prd.md",
-            "Product requirements",
-            "architect",
-            "# PRD",
-        )
-        .await
-        .unwrap();
-
-        // Global artifact goes under {state}/artifacts/
-        mem.save_artifact(
-            &scope.artifacts_global,
-            "standards.md",
-            "Coding standards",
-            "system",
-            "# Standards",
-        )
-        .await
-        .unwrap();
-
-        // Verify files are in the artifact dir, not memory dir
-        assert!(rd.path().join("myapp/artifacts/prd.md").exists());
-        assert!(rd.path().join("artifacts/standards.md").exists());
-
-        // Another agent on the same project sees the same artifacts
-        let scope_b = super::super::types::MemoryScope::new("coder", Some("myapp"));
-        assert_eq!(scope_b.artifacts_project, scope.artifacts_project);
-
-        let entries = mem
-            .list_artifacts(&scope_b.artifacts_project)
-            .await
-            .unwrap();
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].filename, "prd.md");
-    }
-
-    #[tokio::test]
-    async fn artifact_scope_system_agent_global_only() {
-        let scope = super::super::types::MemoryScope::new("nenji", None);
-
-        // Both project and global resolve to the same "artifacts" path
-        assert_eq!(scope.artifacts_project, "artifacts");
-        assert_eq!(scope.artifacts_global, "artifacts");
     }
 }

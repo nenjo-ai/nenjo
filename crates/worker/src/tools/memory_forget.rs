@@ -102,7 +102,7 @@ impl Tool for MemoryForgetTool {
         if namespaces.is_empty() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("No namespace available for the requested scope.".into()),
             });
         }
@@ -119,7 +119,7 @@ impl Tool for MemoryForgetTool {
             if all_items.is_empty() {
                 return Ok(ToolResult {
                     success: true,
-                    output: format!("No memories found matching '{query}'."),
+                    output: format!("No memories found matching '{query}'.").into(),
                     error: None,
                 });
             }
@@ -173,7 +173,8 @@ impl Tool for MemoryForgetTool {
                 success: true,
                 output: format!(
                     "Deleted {deleted} memory item(s) matching '{query}':\n  - {facts_list}"
-                ),
+                )
+                .into(),
                 error: None,
             });
         }
@@ -183,17 +184,17 @@ impl Tool for MemoryForgetTool {
             return match self.memory.delete_item(id).await {
                 Ok(true) => Ok(ToolResult {
                     success: true,
-                    output: format!("Deleted memory item: {id}"),
+                    output: format!("Deleted memory item: {id}").into(),
                     error: None,
                 }),
                 Ok(false) => Ok(ToolResult {
                     success: true,
-                    output: format!("No memory item found with id: {id}"),
+                    output: format!("No memory item found with id: {id}").into(),
                     error: None,
                 }),
                 Err(e) => Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Failed to delete memory: {e}")),
                 }),
             };
@@ -211,14 +212,14 @@ impl Tool for MemoryForgetTool {
             }
             return Ok(ToolResult {
                 success: true,
-                output: format!("Pruned {total} stale memory items older than {days} days"),
+                output: format!("Pruned {total} stale memory items older than {days} days").into(),
                 error: None,
             });
         }
 
         Ok(ToolResult {
             success: false,
-            output: String::new(),
+            output: String::new().into(),
             error: Some("Provide 'query' to search and delete, 'id' to delete a specific item, or 'prune_older_than_days' to prune old items.".into()),
         })
     }

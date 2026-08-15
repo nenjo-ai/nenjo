@@ -269,21 +269,6 @@ pub fn template_var_groups() -> Vec<TemplateVarGroup> {
                     description: "Knowledge to store in shared scope for other agents",
                     group: "Memory",
                 },
-                TemplateVarDef {
-                    name: "artifacts",
-                    description: "Index of available artifacts (project + workspace)",
-                    group: "Memory",
-                },
-                TemplateVarDef {
-                    name: "artifacts.project",
-                    description: "Project-scoped artifact index",
-                    group: "Memory",
-                },
-                TemplateVarDef {
-                    name: "artifacts.workspace",
-                    description: "Workspace-global artifact index",
-                    group: "Memory",
-                },
             ],
         },
         TemplateVarGroup {

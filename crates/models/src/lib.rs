@@ -10,6 +10,7 @@
 //! - Reliability wrappers: [`ReliableProvider`] (retry/fallback), [`RouterProvider`] (model routing)
 
 pub mod anthropic;
+pub mod artifact_input;
 mod audio_data_uri;
 pub mod capabilities;
 pub mod compatible;
@@ -17,6 +18,7 @@ pub mod gemini;
 pub mod native;
 pub mod ollama;
 pub mod openai;
+mod openai_multimodal;
 mod openai_tools;
 pub mod openrouter;
 pub mod reliable;
@@ -25,6 +27,9 @@ pub mod traits;
 pub mod xai;
 
 // Re-export core types at crate root.
+pub use artifact_input::{
+    ArtifactInputTransport, PreparedArtifact, PreparedArtifactError, PreparedArtifactInputs,
+};
 pub use capabilities::{
     ASSIGNABLE_OPERATION_CAPABILITIES, CapabilityModalityHints, ModelCapabilityId,
     ModelExecutionMode, ModelModality, assignable_operation_modality_hints,
@@ -41,9 +46,13 @@ pub use native::{
 };
 pub use nenjo_tool_api::{sanitize_tool_name, sanitize_tool_name_lenient};
 pub use traits::{
-    ChatMessage, ChatRequest, ChatResponse, ConversationMessage, ModelProvider,
-    ProviderStreamEvent, ProviderToolTrace, TokenUsage, ToolCall, ToolCategory, ToolResultMessage,
-    ToolSpec, one_shot,
+    ArtifactAnalysisAssignmentSource, ArtifactAnalysisAssignmentSourceParseError,
+    ArtifactAnalysisMessage, ArtifactAnalyzerProvenance, ArtifactId, ArtifactInput,
+    ArtifactInputSource, ArtifactInstruction, ArtifactRef, ArtifactSize, ChatMessage, ChatRequest,
+    ChatResponse, ChatRole, ChatRoleParseError, ConversationMessage, MediaType, ModelProvider,
+    ProviderStreamEvent, ProviderToolTrace, Sha256Digest, TokenUsage, ToolCall, ToolCategory,
+    ToolOutput, ToolOutputPart, ToolResultMessage, ToolSpec, UnresolvedArtifactInputError,
+    one_shot,
 };
 
 // Re-export provider implementations.

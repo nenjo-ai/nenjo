@@ -154,11 +154,27 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             messages_before,
             messages_after,
         } => format!("message_compacted({messages_before}->{messages_after})"),
-        nenjo::TurnEvent::TranscriptMessage { message } => format!(
-            "transcript_message(role={}, content_len={})",
-            message.role,
-            message.content.len()
-        ),
+        nenjo::TurnEvent::TranscriptMessage { message } => match message {
+            nenjo_models::ConversationMessage::Chat(chat) => format!(
+                "transcript_message(kind=chat, role={}, content_len={})",
+                chat.role,
+                chat.content.len()
+            ),
+            nenjo_models::ConversationMessage::AssistantToolCalls { text, tool_calls } => format!(
+                "transcript_message(kind=assistant_tool_calls, text_len={}, tool_calls={})",
+                text.as_deref().map_or(0, str::len),
+                tool_calls.len()
+            ),
+            nenjo_models::ConversationMessage::ToolResults(results) => format!(
+                "transcript_message(kind=tool_results, results={})",
+                results.len()
+            ),
+            nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => format!(
+                "transcript_message(kind=artifact_analysis, sources={}, content_len={})",
+                analysis.source_inputs.len(),
+                analysis.text.len()
+            ),
+        },
         nenjo::TurnEvent::Paused => "paused".to_string(),
         nenjo::TurnEvent::Resumed => "resumed".to_string(),
         nenjo::TurnEvent::Done { output } => format!(

@@ -220,7 +220,7 @@ impl Tool for WebSearchTool {
             anyhow::bail!("Search query cannot be empty");
         }
 
-        tracing::info!("Searching web for: {}", query);
+        tracing::info!(query_len = query.len(), "Searching web");
 
         let result = match self.provider.as_str() {
             "duckduckgo" | "ddg" => self.search_duckduckgo(query).await?,
@@ -233,7 +233,7 @@ impl Tool for WebSearchTool {
 
         Ok(ToolResult {
             success: true,
-            output: result,
+            output: result.into(),
             error: None,
         })
     }

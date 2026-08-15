@@ -321,7 +321,7 @@ impl FileSessionRuntime {
                 current_phase: None,
                 active_tool_name: None,
                 worktree: None,
-                opaque_state: None,
+                state: None,
             });
 
         let checkpoint = SessionCheckpoint {
@@ -331,7 +331,7 @@ impl FileSessionRuntime {
             current_phase: Some(update.phase),
             active_tool_name: update.active_tool_name.apply(base.active_tool_name),
             worktree: update.worktree.apply(base.worktree),
-            opaque_state: update.opaque_state.apply(base.opaque_state),
+            state: update.state.apply(base.state),
         };
 
         self.checkpoints.save(checkpoint).await?;
@@ -379,7 +379,7 @@ impl FileSessionRuntime {
                     phase,
                     worktree: nenjo_sessions::CheckpointPatch::Preserve,
                     active_tool_name: nenjo_sessions::CheckpointPatch::Preserve,
-                    opaque_state: if Self::is_terminal_status(transition.status) {
+                    state: if Self::is_terminal_status(transition.status) {
                         nenjo_sessions::CheckpointPatch::Clear
                     } else {
                         nenjo_sessions::CheckpointPatch::Preserve
@@ -655,9 +655,8 @@ mod tests {
         CheckpointStore, ExecutionPhase, SessionCheckpointUpdate, SessionKind, SessionLeaseRequest,
         SessionOwnerKind, SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent,
         SessionStatus, SessionStore, SessionSummary, SessionTranscriptAppend,
-        SessionTranscriptChatMessage, SessionTranscriptEventPayload, SessionTransition,
-        SessionUpsert, TokenUsage, TraceEvent, TracePhase, TranscriptQuery, TranscriptState,
-        WorktreeSnapshot,
+        SessionTranscriptEventPayload, SessionTransition, SessionUpsert, TokenUsage, TraceEvent,
+        TracePhase, TranscriptQuery, TranscriptState, WorktreeSnapshot,
     };
     use tempfile::tempdir;
     use uuid::Uuid;
@@ -869,7 +868,7 @@ mod tests {
                         phase: ExecutionPhase::Preparing,
                         active_tool_name: nenjo_sessions::CheckpointPatch::Preserve,
                         worktree: nenjo_sessions::CheckpointPatch::Preserve,
-                        opaque_state: nenjo_sessions::CheckpointPatch::Preserve,
+                        state: nenjo_sessions::CheckpointPatch::Preserve,
                     },
                 )],
             )
@@ -891,7 +890,7 @@ mod tests {
                         phase: ExecutionPhase::Finalizing,
                         active_tool_name: nenjo_sessions::CheckpointPatch::Preserve,
                         worktree: nenjo_sessions::CheckpointPatch::Replace(worktree.clone()),
-                        opaque_state: nenjo_sessions::CheckpointPatch::Preserve,
+                        state: nenjo_sessions::CheckpointPatch::Preserve,
                     },
                 )],
             )
@@ -974,7 +973,7 @@ mod tests {
                 current_phase: Some(ExecutionPhase::ExecutingTools),
                 active_tool_name: None,
                 worktree: None,
-                opaque_state: None,
+                state: None,
             })
             .await
             .unwrap();
@@ -1020,22 +1019,16 @@ mod tests {
                     SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
                         session_id,
                         turn_id: None,
-                        payload: SessionTranscriptEventPayload::ChatMessage {
-                            message: SessionTranscriptChatMessage {
-                                role: "user".to_string(),
-                                content: "first".to_string(),
-                            },
+                        payload: SessionTranscriptEventPayload::ConversationMessage {
+                            message: nenjo_models::ConversationMessage::user("first"),
                         },
                         transcript_state: TranscriptState::MidTurn,
                     }),
                     SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
                         session_id,
                         turn_id: None,
-                        payload: SessionTranscriptEventPayload::ChatMessage {
-                            message: SessionTranscriptChatMessage {
-                                role: "assistant".to_string(),
-                                content: "second".to_string(),
-                            },
+                        payload: SessionTranscriptEventPayload::ConversationMessage {
+                            message: nenjo_models::ConversationMessage::assistant("second"),
                         },
                         transcript_state: TranscriptState::Clean,
                     }),

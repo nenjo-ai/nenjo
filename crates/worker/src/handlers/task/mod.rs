@@ -14,6 +14,7 @@ use uuid::Uuid;
 
 use nenjo::{ProjectLocation, Slug, TaskInput};
 use nenjo_events::{Response, StepAgent};
+use nenjo_models::ArtifactRef;
 
 use nenjo_harness::events::HarnessEvent;
 use nenjo_harness::registry::{ActiveExecution, ExecutionKind, ExecutionRegistry};
@@ -67,6 +68,7 @@ pub struct TaskExecuteRequest<'a> {
     pub labels: &'a [String],
     pub status: Option<&'a str>,
     pub priority: Option<&'a str>,
+    pub artifacts: &'a [ArtifactRef],
     pub cancellation: CancellationToken,
 }
 
@@ -209,6 +211,7 @@ where
         labels,
         status,
         priority,
+        artifacts,
         cancellation,
     } = request;
     let (routine, agent) = match target {
@@ -512,6 +515,7 @@ where
         status: status.map(ToOwned::to_owned),
         priority: priority.map(ToOwned::to_owned),
         slug: Some(task_slug.to_string()),
+        artifacts: artifacts.to_vec(),
     };
     let mut request = TaskRequest::from_task_input(&task).with_execution_run(execution_run_id);
     if let Some(location) = git_ctx.clone().map(ProjectLocation::from_git) {
@@ -899,23 +903,17 @@ where
     {
         bail!("platform review response identity does not match the continuation");
     }
-    let encrypted_checkpoint = match wire.checkpoint_payload_id {
-        Some(payload_id) => {
-            let payload = ctx
-                .platform_api
-                .fetch_execution_payload(payload_id)
-                .await
-                .map_err(|error| anyhow!("failed to fetch checkpoint payload: {error}"))?;
-            if payload.execution_id != execution_run_id || payload.kind != "checkpoint" {
-                bail!("checkpoint payload identity does not match the continuation");
-            }
-            payload.encrypted
-        }
-        None => wire
-            .encrypted_checkpoint
-            .clone()
-            .ok_or_else(|| anyhow!("platform review response is missing its checkpoint payload"))?,
-    };
+    let checkpoint_payload = ctx
+        .platform_api
+        .fetch_execution_payload(wire.checkpoint_payload_id)
+        .await
+        .map_err(|error| anyhow!("failed to fetch checkpoint payload: {error}"))?;
+    if checkpoint_payload.execution_id != execution_run_id
+        || checkpoint_payload.kind != "checkpoint"
+    {
+        bail!("checkpoint payload identity does not match the continuation");
+    }
+    let encrypted_checkpoint = checkpoint_payload.encrypted;
     let encrypted_checkpoint: nenjo_events::EncryptedPayload =
         serde_json::from_value(encrypted_checkpoint)
             .context("platform returned an invalid encrypted checkpoint envelope")?;
@@ -942,11 +940,12 @@ where
             .sessions()
             .latest_checkpoint(session.session_id, Default::default())
             .await?
-            .and_then(|checkpoint| checkpoint.opaque_state)
+            .and_then(|checkpoint| checkpoint.state)
             .and_then(|state| {
-                serde_json::from_value::<nenjo_harness::task_session::TaskOpaqueState>(state).ok()
+                serde_json::from_value::<nenjo_harness::task_session::TaskCheckpointState>(state)
+                    .ok()
             })
-            .map(nenjo_harness::task_session::TaskOpaqueState::into_routine_checkpoint)
+            .map(nenjo_harness::task_session::TaskCheckpointState::into_routine_checkpoint)
             .filter(|local| local.execution_run_id == execution_run_id);
         local.unwrap_or(remote_checkpoint)
     } else {
@@ -1083,6 +1082,7 @@ where
         status: input.status.clone(),
         priority: input.priority.clone(),
         project_location: input.git.clone().map(ProjectLocation::from_git),
+        artifacts: input.artifacts.clone(),
     };
     let outcome = execute_resumable_human_routine(ResumableRoutineTaskExecution {
         harness,
@@ -1448,6 +1448,7 @@ where
         status: request.status.clone(),
         priority: request.priority.clone(),
         slug: request.slug.clone(),
+        artifacts: request.artifacts.clone(),
     };
     let mut run = nenjo::RoutineRun::task(task_input).execution_run(execution_run_id);
     if let Some(location) = request.project_location.clone() {

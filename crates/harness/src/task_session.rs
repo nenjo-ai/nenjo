@@ -19,12 +19,12 @@ use crate::{Harness, ProviderRuntime};
 /// Namespaced execution-owned payload stored in a generic session checkpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", content = "state", rename_all = "snake_case")]
-pub enum TaskOpaqueState {
+pub enum TaskCheckpointState {
     /// Human-capable routine scheduler checkpoint.
     RoutineCheckpointV1(RoutineCheckpoint),
 }
 
-impl TaskOpaqueState {
+impl TaskCheckpointState {
     /// Return the enclosed routine checkpoint.
     pub fn into_routine_checkpoint(self) -> RoutineCheckpoint {
         match self {
@@ -234,7 +234,7 @@ pub async fn update_task_checkpoint<P, SessionRt>(
             } else {
                 CheckpointPatch::Preserve
             },
-            opaque_state: if phase == ExecutionPhase::Preparing {
+            state: if phase == ExecutionPhase::Preparing {
                 CheckpointPatch::Clear
             } else {
                 CheckpointPatch::Preserve
@@ -258,7 +258,7 @@ where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
 {
-    let state = serde_json::to_value(TaskOpaqueState::RoutineCheckpointV1(state.clone()))?;
+    let state = serde_json::to_value(TaskCheckpointState::RoutineCheckpointV1(state.clone()))?;
     harness
         .sessions()
         .update_checkpoint(SessionCheckpointUpdate {
@@ -266,7 +266,7 @@ where
             phase: ExecutionPhase::Waiting,
             worktree: CheckpointPatch::Preserve,
             active_tool_name: CheckpointPatch::Preserve,
-            opaque_state: CheckpointPatch::Replace(state),
+            state: CheckpointPatch::Replace(state),
         })
         .await
         .map(|_| ())

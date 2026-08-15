@@ -257,6 +257,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         Command::ChatMessage {
             id,
             content,
+            artifacts,
             project,
             agent,
             target_type,
@@ -272,6 +273,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     ChatCommandRequest {
                         message_id: id.as_deref(),
                         content: &content,
+                        artifacts: &artifacts,
                         project: project.as_deref(),
                         agent: agent.as_deref(),
                         target_type: target_type.as_deref(),
@@ -290,6 +292,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             id,
             command,
             content,
+            artifacts,
             project,
             agent,
             target_type,
@@ -306,6 +309,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         message_id: id.as_deref(),
                         command: &command,
                         content: &content,
+                        artifacts: &artifacts,
                         project: project.as_deref(),
                         agent: agent.as_deref(),
                         target_type: target_type.as_deref(),
@@ -402,6 +406,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         labels: &payload.labels,
                         status: payload.status.as_deref(),
                         priority: payload.priority.as_deref(),
+                        artifacts: &payload.artifacts,
                         cancellation: tokio_util::sync::CancellationToken::new(),
                     },
                 )

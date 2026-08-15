@@ -23,8 +23,8 @@ use crate::native::{
     ReferenceToVideoRequest, TranscribeAudioRequest, TranscriptSegment, media_input_schema,
 };
 use crate::traits::{
-    ChatMessage, ChatRequest, ChatResponse, ModelProvider, ProviderStreamEvent, ProviderToolTrace,
-    TokenUsage, ToolCall,
+    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, ProviderStreamEvent,
+    ProviderToolTrace, TokenUsage, ToolCall,
 };
 
 pub const XAI_DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
@@ -708,61 +708,44 @@ fn native_responses_tools(
     Ok(tools)
 }
 
-fn responses_input(messages: &[ChatMessage]) -> Vec<ResponsesInput> {
+fn responses_input(messages: &[ConversationMessage]) -> Vec<ResponsesInput> {
     let mut input = Vec::with_capacity(messages.len());
 
     for message in messages {
-        if message.role == "assistant"
-            && let Ok(value) = serde_json::from_str::<Value>(&message.content)
-            && let Some(tool_calls_value) = value.get("tool_calls")
-            && let Ok(tool_calls) =
-                serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
-        {
-            if let Some(content) = value
-                .get("content")
-                .and_then(Value::as_str)
-                .and_then(|text| first_nonempty(Some(text)))
-            {
+        match message {
+            ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                if let Some(content) = text.as_deref().and_then(|text| first_nonempty(Some(text))) {
+                    input.push(ResponsesInput::Message {
+                        role: "assistant".to_string(),
+                        content,
+                    });
+                }
+
+                input.extend(tool_calls.iter().map(|call| ResponsesInput::FunctionCall {
+                    kind: "function_call",
+                    call_id: call.id.clone(),
+                    name: call.name.clone(),
+                    arguments: call.arguments.clone(),
+                }));
+            }
+            ConversationMessage::ToolResults(results) => input.extend(results.iter().map(
+                |result| ResponsesInput::FunctionCallOutput {
+                    kind: "function_call_output",
+                    call_id: result.tool_call_id.clone(),
+                    output: result.output.text_content(),
+                },
+            )),
+            ConversationMessage::Chat(message) => input.push(ResponsesInput::Message {
+                role: message.role.to_string(),
+                content: message.content.clone(),
+            }),
+            ConversationMessage::ArtifactAnalysis(analysis) => {
                 input.push(ResponsesInput::Message {
-                    role: "assistant".to_string(),
-                    content,
+                    role: "user".to_string(),
+                    content: analysis.model_context(),
                 });
             }
-
-            input.extend(
-                tool_calls
-                    .into_iter()
-                    .map(|call| ResponsesInput::FunctionCall {
-                        kind: "function_call",
-                        call_id: call.id,
-                        name: call.name,
-                        arguments: call.arguments,
-                    }),
-            );
-            continue;
         }
-
-        if message.role == "tool"
-            && let Ok(value) = serde_json::from_str::<Value>(&message.content)
-            && let Some(call_id) = value.get("tool_call_id").and_then(Value::as_str)
-        {
-            let output = value
-                .get("content")
-                .and_then(Value::as_str)
-                .unwrap_or_default()
-                .to_string();
-            input.push(ResponsesInput::FunctionCallOutput {
-                kind: "function_call_output",
-                call_id: call_id.to_string(),
-                output,
-            });
-            continue;
-        }
-
-        input.push(ResponsesInput::Message {
-            role: message.role.clone(),
-            content: message.content.clone(),
-        });
     }
 
     input
@@ -1663,6 +1646,7 @@ impl ModelProvider for XAiProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        request.reject_artifact_inputs()?;
         if let Some(native_tools) = request.native_tools
             && !native_tools.is_empty()
         {
@@ -1680,6 +1664,7 @@ impl ModelProvider for XAiProvider {
         temperature: f64,
         events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
     ) -> anyhow::Result<ChatResponse> {
+        request.reject_artifact_inputs()?;
         if let Some(native_tools) = request.native_tools
             && !native_tools.is_empty()
         {

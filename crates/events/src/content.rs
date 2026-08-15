@@ -1,3 +1,4 @@
+use nenjo_content::ArtifactRef;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -55,6 +56,9 @@ pub struct TaskExecuteContent {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
+    /// Immutable artifact revisions supplied as task inputs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
 }
 
 /// One task schedule distributed to every worker as control-plane state.
@@ -92,7 +96,19 @@ pub struct TaskEncryptedContent {
 
 #[cfg(test)]
 mod tests {
+    use nenjo_content::{ArtifactId, ArtifactRef, ArtifactSize, MediaType, Sha256Digest};
+    use uuid::Uuid;
+
     use super::{TaskEncryptedContent, TaskExecuteContent, TaskExecutionTarget};
+
+    fn artifact() -> ArtifactRef {
+        ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).expect("non-nil artifact id"),
+            Sha256Digest::parse(&format!("sha256:{}", "a".repeat(64))).expect("valid digest"),
+            MediaType::parse("image/png").expect("valid media type"),
+            ArtifactSize::new(4),
+        )
+    }
 
     #[test]
     fn routine_target_is_slug_only() {
@@ -125,10 +141,12 @@ mod tests {
 
     #[test]
     fn task_execute_content_round_trips() {
+        let reference = artifact();
         let content: TaskExecuteContent = serde_json::from_value(serde_json::json!({
             "title": "Current",
             "instructions": "current instructions",
-            "labels": ["bug"]
+            "labels": ["bug"],
+            "artifacts": [reference]
         }))
         .unwrap();
 
@@ -137,9 +155,11 @@ mod tests {
             Some("current instructions")
         );
         assert_eq!(content.labels, ["bug"]);
+        assert_eq!(content.artifacts.len(), 1);
         let serialized = serde_json::to_value(content).unwrap();
         assert_eq!(serialized["instructions"], "current instructions");
         assert_eq!(serialized["labels"], serde_json::json!(["bug"]));
+        assert_eq!(serialized["artifacts"].as_array().map(Vec::len), Some(1));
     }
 
     #[test]

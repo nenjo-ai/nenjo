@@ -8,6 +8,7 @@ repository.workspace = true
 description = "Nenjo platform-backed manifest and REST API operations"
 
 [dependencies]
+nenjo-content = { workspace = true }
 nenjo-knowledge = { workspace = true }
 nenjo = { workspace = true }
 nenjo-events = { workspace = true }
@@ -17,6 +18,7 @@ async-trait = { workspace = true }
 base64 = { workspace = true }
 cap-std = { workspace = true }
 chrono = { workspace = true }
+dashmap = { workspace = true }
 derive_builder = { workspace = true }
 reqwest = { workspace = true, features = ["json", "multipart"] }
 serde = { workspace = true, features = ["derive"] }
@@ -24,7 +26,7 @@ serde_json = { workspace = true }
 sha2 = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["fs", "rt", "sync", "time"] }
 uuid = { workspace = true, features = ["serde"] }
 
 [dev-dependencies]

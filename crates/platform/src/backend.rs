@@ -1,5 +1,6 @@
 //! Platform-backed manifest backend implementations.
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -24,6 +25,7 @@ use crate::library_knowledge::{
 };
 use crate::manifest_contract::{
     AgentRecord, DomainPromptRecord, KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord,
+    RoutineRecord,
 };
 use crate::manifest_kinds::{ContentScope, SensitiveContentKind};
 use crate::manifest_mcp::*;
@@ -134,6 +136,50 @@ fn routine_encrypted_payload_object_id(payload: Option<&serde_json::Value>) -> O
         .get("object_id")?
         .as_str()
         .and_then(|value| Uuid::parse_str(value).ok())
+}
+
+fn preserve_existing_routine_step_state(
+    graph: &mut RoutineGraphInput,
+    existing: Option<&RoutineRecord>,
+) {
+    let Some(existing) = existing else {
+        return;
+    };
+    let existing_by_slug = existing
+        .steps
+        .iter()
+        .map(|step| (step.slug.as_str(), step))
+        .collect::<HashMap<_, _>>();
+
+    for step in &mut graph.steps {
+        let Some(stored) = existing_by_slug.get(step.slug.as_str()) else {
+            continue;
+        };
+        if step.id.is_none() {
+            step.id = Some(stored.id);
+        }
+        if matches!(
+            step.step_type,
+            nenjo::manifest::RoutineStepType::Agent | nenjo::manifest::RoutineStepType::Gate
+        ) && step.encrypted_payload.is_none()
+        {
+            step.encrypted_payload = stored.encrypted_payload.clone();
+        }
+        if step.position_x.is_none() {
+            step.position_x = Some(stored.position_x);
+        }
+        if step.position_y.is_none() {
+            step.position_y = Some(stored.position_y);
+        }
+    }
+}
+
+fn decoded_routine_step_instructions(payload: serde_json::Value) -> Option<String> {
+    payload
+        .get("instructions")
+        .and_then(serde_json::Value::as_str)
+        .map(str::to_string)
+        .or_else(|| payload.as_str().map(str::to_string))
 }
 
 fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
@@ -417,42 +463,6 @@ where
         let id = Uuid::new_v4();
         self.record_platform_object_id(kind, slug, id)?;
         Ok(id)
-    }
-
-    async fn ensure_routine_object_id(&self, routine: &Slug) -> Result<Uuid> {
-        if let Some(id) =
-            self.optional_platform_object_id(PlatformResourceKind::Routine, routine)?
-        {
-            return Ok(id);
-        }
-
-        if let Some(record) = self
-            .platform_client
-            .get_routine_record_optional(routine)
-            .await?
-        {
-            let id = routine_encrypted_payload_object_id(record.encrypted_payload.as_ref())
-                .unwrap_or(record.id);
-            if id != record.id {
-                return Err(anyhow!(
-                    "routine {} encrypted_payload object_id {} does not match platform id {}",
-                    routine,
-                    id,
-                    record.id
-                ));
-            }
-            self.record_platform_object_id(
-                PlatformResourceKind::Routine,
-                &Slug::derive(&record.slug),
-                id,
-            )?;
-            if Slug::derive(&record.slug) != *routine {
-                self.record_platform_object_id(PlatformResourceKind::Routine, routine, id)?;
-            }
-            return Ok(id);
-        }
-
-        self.ensure_platform_object_id(PlatformResourceKind::Routine, routine)
     }
 
     fn record_platform_object_id(
@@ -1600,9 +1610,48 @@ where
             data.routine = Some(existing.manifest_slug().clone());
         }
 
+        let existing_record = match data.routine.as_ref() {
+            Some(routine) => {
+                self.platform_client
+                    .get_routine_record_optional(routine)
+                    .await?
+            }
+            None => None,
+        };
+
         if data.id.is_none() {
             let routine_id = match data.routine.as_ref() {
-                Some(routine) => self.ensure_routine_object_id(routine).await?,
+                Some(routine) => match existing_record.as_ref() {
+                    Some(record) => {
+                        let id =
+                            routine_encrypted_payload_object_id(record.encrypted_payload.as_ref())
+                                .unwrap_or(record.id);
+                        if id != record.id {
+                            return Err(anyhow!(
+                                "routine {} encrypted_payload object_id {} does not match platform id {}",
+                                routine,
+                                id,
+                                record.id
+                            ));
+                        }
+                        self.record_platform_object_id(
+                            PlatformResourceKind::Routine,
+                            &Slug::derive(&record.slug),
+                            id,
+                        )?;
+                        if Slug::derive(&record.slug) != *routine {
+                            self.record_platform_object_id(
+                                PlatformResourceKind::Routine,
+                                routine,
+                                id,
+                            )?;
+                        }
+                        id
+                    }
+                    None => {
+                        self.ensure_platform_object_id(PlatformResourceKind::Routine, routine)?
+                    }
+                },
                 None => {
                     let routine = configure_name_slug(
                         data.metadata
@@ -1616,8 +1665,40 @@ where
             data.id = Some(routine_id);
         }
 
-        let mut submitted_step_instructions = Vec::new();
+        let mut retained_step_instructions = HashMap::new();
+        if let Some(routine) = data.routine.as_ref()
+            && let Some(local) = self.cached_local_routine(routine).await?
+        {
+            retained_step_instructions.extend(local.steps.into_iter().filter_map(|step| {
+                step.config
+                    .get("instructions")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|instructions| (step.slug, instructions.to_string()))
+            }));
+        }
+        if let Some(existing) = existing_record.as_ref() {
+            for step in &existing.steps {
+                let step_slug = Slug::derive(&step.slug);
+                if retained_step_instructions.contains_key(&step_slug) {
+                    continue;
+                }
+                let Some(payload) = step.encrypted_payload.as_ref() else {
+                    continue;
+                };
+                if let Some(decoded) = self
+                    .sensitive_payload_encoder
+                    .decode_payload(payload)
+                    .await?
+                    && let Some(instructions) = decoded_routine_step_instructions(decoded)
+                {
+                    retained_step_instructions.insert(step_slug, instructions);
+                }
+            }
+        }
+
+        let mut submitted_step_instructions = HashMap::new();
         if let Some(graph) = data.graph.as_mut() {
+            preserve_existing_routine_step_state(graph, existing_record.as_ref());
             let org_id = self.local_manifest_org_id().await?;
             for step in &mut graph.steps {
                 let instructions = step
@@ -1631,7 +1712,7 @@ where
                 };
                 let step_id = step.id.unwrap_or_else(Uuid::new_v4);
                 step.id = Some(step_id);
-                submitted_step_instructions.push((step.slug.clone(), instructions.clone()));
+                submitted_step_instructions.insert(step.slug.clone(), instructions.clone());
                 step.config.clear_instructions();
                 let encrypted_payload = self
                     .sensitive_payload_encoder
@@ -1651,11 +1732,17 @@ where
 
         let configured = self.platform_client.configure_routine_record(&data).await?;
         let mut routine_document = configured.to_document();
-        for (step_slug, instructions) in submitted_step_instructions {
+        retained_step_instructions.extend(submitted_step_instructions);
+        for (step_slug, instructions) in retained_step_instructions {
             if let Some(step) = routine_document
                 .steps
                 .iter_mut()
                 .find(|step| step.slug == step_slug)
+                && matches!(
+                    step.step_type,
+                    nenjo::manifest::RoutineStepType::Agent
+                        | nenjo::manifest::RoutineStepType::Gate
+                )
                 && let Some(config) = step.config.as_object_mut()
             {
                 config.insert(
@@ -1741,6 +1828,10 @@ where
             context_window: created.context_window,
             base_url: created.base_url.clone(),
             native_tools: created.native_tools.clone(),
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         };
         self.local_store
             .upsert_resource(&ManifestResource::Model(local_model))
@@ -1790,6 +1881,10 @@ where
             context_window: updated.context_window,
             base_url: updated.base_url.clone(),
             native_tools: updated.native_tools.clone(),
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         };
         self.local_store
             .upsert_resource(&ManifestResource::Model(local_model))
@@ -2130,6 +2225,84 @@ mod tests {
 
         assert!(domain_matches_ref(&domain, &domain.slug));
         assert!(!domain_matches_ref(&domain, &Slug::derive(&domain.name)));
+    }
+
+    #[test]
+    fn existing_routine_step_state_is_preserved_by_slug() {
+        let now = chrono::Utc::now();
+        let org_id = Uuid::new_v4();
+        let routine_id = Uuid::new_v4();
+        let step_id = Uuid::new_v4();
+        let encrypted_payload = json!({
+            "object_id": step_id,
+            "object_type": "routine.step.instructions",
+            "ciphertext": "existing"
+        });
+        let existing = RoutineRecord {
+            id: routine_id,
+            org_id,
+            project_id: None,
+            slug: "dashboard-routine".to_string(),
+            name: "Dashboard Routine".to_string(),
+            description: None,
+            is_active: true,
+            is_default: false,
+            max_retries: 3,
+            step_count: 1,
+            metadata: json!({ "entry_steps": ["draft"] }),
+            encrypted_payload: None,
+            steps: vec![crate::manifest_contract::RoutineStepRecord {
+                id: step_id,
+                routine_id,
+                slug: "draft".to_string(),
+                routine: "dashboard-routine".to_string(),
+                name: "Draft".to_string(),
+                step_type: "agent".to_string(),
+                council_id: None,
+                council: None,
+                agent_id: None,
+                agent: Some("writer".to_string()),
+                lambda_id: None,
+                config: json!({}),
+                encrypted_payload: Some(encrypted_payload.clone()),
+                position_x: 120.0,
+                position_y: 240.0,
+                order_index: 0,
+                created_at: now,
+                updated_at: now,
+            }],
+            edges: Vec::new(),
+            last_run_at: None,
+            next_run_at: None,
+            created_by: None,
+            created_at: now,
+            updated_at: now,
+        };
+        let mut graph = RoutineGraphInput {
+            entry_steps: vec![Slug::derive("draft")],
+            steps: vec![RoutineStepInput {
+                id: None,
+                slug: Slug::derive("draft"),
+                name: "Draft".to_string(),
+                step_type: nenjo::manifest::RoutineStepType::Agent,
+                council: None,
+                agent: Some(Slug::derive("writer")),
+                config: RoutineStepConfigInput::default(),
+                encrypted_payload: None,
+                position_x: None,
+                position_y: None,
+                order_index: 0,
+            }],
+            edges: Vec::new(),
+        };
+
+        preserve_existing_routine_step_state(&mut graph, Some(&existing));
+
+        let step = &graph.steps[0];
+        assert_eq!(step.id, Some(step_id));
+        assert_eq!(step.encrypted_payload.as_ref(), Some(&encrypted_payload));
+        assert_eq!(step.position_x, Some(120.0));
+        assert_eq!(step.position_y, Some(240.0));
     }
 
     #[derive(Debug)]

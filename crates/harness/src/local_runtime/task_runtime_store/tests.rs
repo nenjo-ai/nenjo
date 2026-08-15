@@ -24,6 +24,7 @@ fn submission(task_id: Uuid, execution_run_id: Uuid) -> TaskSubmission {
             labels: Vec::new(),
             status: None,
             priority: None,
+            artifacts: Vec::new(),
         },
         trigger: TaskTrigger::Manual,
     }
@@ -56,6 +57,7 @@ fn schedule(task_id: Uuid, next_run_at: chrono::DateTime<Utc>) -> TaskSchedule {
             labels: Vec::new(),
             status: None,
             priority: None,
+            artifacts: Vec::new(),
         },
         revision: "1".to_string(),
     }

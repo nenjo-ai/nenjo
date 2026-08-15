@@ -186,7 +186,9 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
         } else {
             Ok(ToolResult {
                 success: false,
-                output: json!({ "sub_agents": spawned, "errors": failures }).to_string(),
+                output: json!({ "sub_agents": spawned, "errors": failures })
+                    .to_string()
+                    .into(),
                 error: Some("one or more sub-agents failed to spawn".into()),
             })
         }
@@ -284,7 +286,7 @@ impl<P: ProviderRuntime> Tool for AskParentAgentTool<P> {
 fn ok(value: serde_json::Value) -> ToolResult {
     ToolResult {
         success: true,
-        output: value.to_string(),
+        output: value.to_string().into(),
         error: None,
     }
 }
@@ -292,7 +294,7 @@ fn ok(value: serde_json::Value) -> ToolResult {
 fn error(message: impl Into<String>) -> ToolResult {
     ToolResult {
         success: false,
-        output: String::new(),
+        output: String::new().into(),
         error: Some(message.into()),
     }
 }

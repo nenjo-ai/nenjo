@@ -267,7 +267,7 @@ impl Tool for UpdateDelegationParentTool {
         {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("delegation operation was stopped".into()),
             });
         }
@@ -331,7 +331,7 @@ impl Tool for AskDelegationParentTool {
             Some(message) => Ok(ok(serde_json::json!({ "message": message }))),
             None => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("parent did not provide input before the operation ended".into()),
             }),
         }
@@ -674,7 +674,10 @@ async fn bridge_delegation_transcript(
                         tool: tool_name.clone(),
                         success: result.success,
                         summary: truncate(
-                            result.error.as_deref().unwrap_or(result.output.as_str()),
+                            &result
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| result.output.text_content()),
                             240,
                         ),
                     },
@@ -683,16 +686,24 @@ async fn bridge_delegation_transcript(
                 .await;
         }
         TurnEvent::TranscriptMessage { message } => {
-            let summary = truncate(&message.content, 240);
-            let transcript = match message.role.as_str() {
-                "user" => AsyncOperationTranscriptEvent::Input { summary },
-                "assistant" => AsyncOperationTranscriptEvent::AssistantMessage { summary },
-                "tool" => AsyncOperationTranscriptEvent::ToolResult {
-                    tool: "tool".into(),
-                    success: true,
-                    summary,
-                },
-                _ => return,
+            let transcript = match message {
+                nenjo_models::ConversationMessage::Chat(chat) => {
+                    let summary = truncate(&chat.content, 240);
+                    match chat.role {
+                        nenjo_models::ChatRole::User => {
+                            AsyncOperationTranscriptEvent::Input { summary }
+                        }
+                        nenjo_models::ChatRole::Assistant => {
+                            AsyncOperationTranscriptEvent::AssistantMessage { summary }
+                        }
+                        nenjo_models::ChatRole::System | nenjo_models::ChatRole::Developer => {
+                            return;
+                        }
+                    }
+                }
+                nenjo_models::ConversationMessage::AssistantToolCalls { .. }
+                | nenjo_models::ConversationMessage::ToolResults(_)
+                | nenjo_models::ConversationMessage::ArtifactAnalysis(_) => return,
             };
             handle.transcript(transcript, events_tx).await;
         }
@@ -739,7 +750,7 @@ fn agent_summary(agent: &AgentManifest) -> DelegatableAgent<'_> {
 fn ok(value: serde_json::Value) -> ToolResult {
     ToolResult {
         success: true,
-        output: value.to_string(),
+        output: value.to_string().into(),
         error: None,
     }
 }
@@ -747,7 +758,7 @@ fn ok(value: serde_json::Value) -> ToolResult {
 fn error(message: impl Into<String>) -> ToolResult {
     ToolResult {
         success: false,
-        output: String::new(),
+        output: String::new().into(),
         error: Some(message.into()),
     }
 }

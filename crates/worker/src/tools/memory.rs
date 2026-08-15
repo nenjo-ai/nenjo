@@ -3,19 +3,6 @@ use serde::{Deserialize, Serialize};
 use std::convert::Infallible;
 use std::str::FromStr;
 
-// ── Layer types (from layers.rs) ──────────────────────────────────
-
-/// Which layer of the memory hierarchy a piece of data belongs to.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum MemoryLayer {
-    /// Raw immutable conversation/event logs.
-    Artifact,
-    /// Extracted atomic facts with embeddings.
-    Item,
-    /// Evolving category summaries.
-    Summary,
-}
-
 /// Lifecycle status of a memory item.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -76,18 +63,7 @@ pub struct MemoryRelation {
     pub created_at: String,
 }
 
-/// Layer 1: Raw immutable conversation log / event record.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct MemoryArtifact {
-    pub id: String,
-    pub namespace: String,
-    pub artifact_type: String,
-    pub content: String,
-    pub metadata: serde_json::Value,
-    pub created_at: String,
-}
-
-/// Layer 2: Extracted atomic fact with optional embedding.
+/// Extracted atomic fact with optional embedding.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryItem {
     pub id: String,
@@ -97,7 +73,6 @@ pub struct MemoryItem {
     pub confidence: f32,
     #[serde(default)]
     pub status: MemoryItemStatus,
-    pub source_artifact_id: Option<String>,
     pub access_count: u32,
     pub last_accessed_at: String,
     pub created_at: String,
@@ -107,7 +82,7 @@ pub struct MemoryItem {
     pub score: Option<f64>,
 }
 
-/// Layer 3: Evolving category summary, rebuilt as items change.
+/// Evolving category summary, rebuilt as items change.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemorySummary {
     pub id: String,
@@ -122,40 +97,17 @@ pub struct MemorySummary {
 
 // ── AgentMemory trait (from traits.rs) ────────────────────────────
 
-/// Namespace-aware, three-layer memory backend.
+/// Namespace-aware fact and summary memory backend.
 ///
 /// All operations are scoped by namespace (`ns` parameter) to isolate
-/// per-role and per-project memory. The three layers are:
-///
-/// - **Artifact** (Layer 1): Raw immutable conversation/event logs.
-/// - **Item** (Layer 2): Extracted atomic facts with embeddings.
-/// - **Summary** (Layer 3): Evolving category summaries.
+/// per-role and per-project memory. Organization artifacts are provided by
+/// the platform artifact tools and are not part of this abstraction.
 #[async_trait]
 pub trait AgentMemory: Send + Sync {
     /// Backend name (e.g. "sqlite", "none").
     fn name(&self) -> &str;
 
-    // ── Artifact layer (raw immutable logs) ─────────────────────
-
-    /// Store a raw artifact (conversation log, event record).
-    /// Returns the generated artifact ID.
-    async fn store_artifact(
-        &self,
-        ns: &str,
-        artifact_type: &str,
-        content: &str,
-        metadata: serde_json::Value,
-    ) -> anyhow::Result<String>;
-
-    /// List artifacts in a namespace, optionally filtered by type.
-    async fn list_artifacts(
-        &self,
-        ns: &str,
-        artifact_type: Option<&str>,
-        limit: usize,
-    ) -> anyhow::Result<Vec<MemoryArtifact>>;
-
-    // ── Item layer (extracted atomic facts) ─────────────────────
+    // ── Extracted atomic facts ──────────────────────────────────
 
     /// Store an extracted fact. Returns the generated item ID.
     async fn store_item(
@@ -164,7 +116,6 @@ pub trait AgentMemory: Send + Sync {
         fact: &str,
         category: &str,
         confidence: f32,
-        source_artifact_id: Option<&str>,
     ) -> anyhow::Result<String>;
 
     /// Hybrid search items (FTS5 BM25 + vector cosine) scoped to namespace.

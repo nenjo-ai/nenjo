@@ -4,7 +4,10 @@ use std::str::FromStr;
 use nenjo::Slug;
 use nenjo::manifest::{AgentManifest, DomainManifest, MediaRequirement};
 use nenjo_events::{ModelAssignmentBinding, ModelCapabilityDefaultBinding};
-use nenjo_models::{MediaOperation, ProviderMediaCapabilities};
+use nenjo_models::{
+    ArtifactAnalysisAssignmentSource, MediaOperation, ModelCapabilityId, ModelExecutionMode,
+    ModelModality, ProviderMediaCapabilities,
+};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use uuid::Uuid;
@@ -31,41 +34,12 @@ pub struct ResolvedMediaProvider {
 // ---------------------------------------------------------------------------
 
 /// Source of a resolved model endpoint for a non-chat capability.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum AssignmentSource {
-    Local,
-    Package,
-    OrgDefault,
-}
-
-impl AssignmentSource {
-    pub fn as_str(self) -> &'static str {
-        match self {
-            Self::Local => "local",
-            Self::Package => "package",
-            Self::OrgDefault => "org_default",
-        }
-    }
-}
-
-impl FromStr for AssignmentSource {
-    type Err = String;
-
-    fn from_str(value: &str) -> Result<Self, Self::Err> {
-        match value.trim() {
-            "local" => Ok(Self::Local),
-            "package" => Ok(Self::Package),
-            "org_default" => Ok(Self::OrgDefault),
-            other => Err(format!("unknown assignment source '{other}'")),
-        }
-    }
-}
+pub type AssignmentSource = ArtifactAnalysisAssignmentSource;
 
 /// Runtime model inventory entry keyed by platform `model_id`.
 ///
-/// Carries capability metadata and `base_url` from bootstrap models so media
-/// routing does not depend solely on `ModelManifest`.
+/// Carries routing metadata from bootstrap models independently of the core
+/// provider configuration in `ModelManifest`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ModelRuntimeConfig {
     pub id: Uuid,
@@ -75,7 +49,13 @@ pub struct ModelRuntimeConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub base_url: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub capabilities: Vec<String>,
+    pub capabilities: Vec<ModelCapabilityId>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<ModelModality>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_modalities: Vec<ModelModality>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_modes: Vec<ModelExecutionMode>,
 }
 
 /// Agent-owned configured model assignments loaded from the canonical agent cache.
@@ -86,29 +66,35 @@ pub struct AgentModelAssignments {
     pub assignments: Vec<ModelAssignmentBinding>,
 }
 
-/// Resolved endpoint for a media / non-chat operation.
+/// Resolved endpoint for an explicitly assigned non-chat operation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedModelEndpoint {
     pub model_id: Uuid,
     pub provider: String,
     pub model: String,
     pub base_url: Option<String>,
-    pub capability: MediaOperation,
+    pub capability: ModelCapabilityId,
     pub source: AssignmentSource,
     /// Display slug when known (model slug).
     pub slug: Slug,
+    /// Modalities accepted by the assigned configured model.
+    pub input_modalities: Vec<ModelModality>,
 }
 
 impl ResolvedModelEndpoint {
-    /// Convert into the legacy tool binding shape used by media tools.
-    pub fn to_media_provider(&self) -> ResolvedMediaProvider {
-        ResolvedMediaProvider {
+    /// Convert a native operation endpoint into the binding used by media tools.
+    ///
+    /// Analysis capabilities intentionally return `None`; they are consumed by
+    /// the artifact input router instead of becoming model-visible tools.
+    pub fn to_media_provider(&self) -> Option<ResolvedMediaProvider> {
+        let capability = MediaOperation::try_from(self.capability).ok()?;
+        Some(ResolvedMediaProvider {
             slug: self.slug.clone(),
             provider: self.provider.clone(),
             model: self.model.clone(),
-            capability: self.capability,
+            capability,
             base_url: self.base_url.clone(),
-        }
+        })
     }
 }
 
@@ -134,11 +120,11 @@ impl<'a> ResourceRef<'a> {
 
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum ModelAssignmentResolveError {
-    #[error("no model assignment for capability {capability:?}")]
-    MissingAssignment { capability: MediaOperation },
-    #[error("assigned model {model_id} lacks capability {capability:?}")]
+    #[error("no model assignment for capability {capability}")]
+    MissingAssignment { capability: ModelCapabilityId },
+    #[error("assigned model {model_id} lacks capability {capability}")]
     ModelLacksCapability {
-        capability: MediaOperation,
+        capability: ModelCapabilityId,
         model_id: Uuid,
     },
     #[error("assigned model {model_id} is missing from the bootstrap model inventory")]
@@ -176,13 +162,13 @@ impl ModelAssignmentResolver {
     }
 
     /// Capabilities explicitly assigned to a resource (local + package).
-    pub fn assigned_capabilities(&self, resource: ResourceRef<'_>) -> Vec<MediaOperation> {
+    pub fn assigned_capabilities(&self, resource: ResourceRef<'_>) -> Vec<ModelCapabilityId> {
         let mut caps = Vec::new();
         let Some(agent) = self.assignment_set(resource) else {
             return caps;
         };
         for assignment in &agent.assignments {
-            if let Ok(cap) = MediaOperation::from_str(&assignment.capability)
+            if let Ok(cap) = ModelCapabilityId::from_str(&assignment.capability)
                 && !caps.contains(&cap)
             {
                 caps.push(cap);
@@ -195,7 +181,7 @@ impl ModelAssignmentResolver {
     pub fn resolve(
         &self,
         resource: ResourceRef<'_>,
-        capability: MediaOperation,
+        capability: ModelCapabilityId,
     ) -> Result<ResolvedModelEndpoint, ModelAssignmentResolveError> {
         let cap_str = capability.as_str();
 
@@ -242,16 +228,13 @@ impl ModelAssignmentResolver {
     fn endpoint_for(
         &self,
         model_id: Uuid,
-        capability: MediaOperation,
+        capability: ModelCapabilityId,
         source: AssignmentSource,
     ) -> Result<ResolvedModelEndpoint, ModelAssignmentResolveError> {
         let Some(model) = self.models_by_id.get(&model_id) else {
             return Err(ModelAssignmentResolveError::ModelNotFound { model_id });
         };
-        let has_cap = model
-            .capabilities
-            .iter()
-            .any(|c| c.trim() == capability.as_str());
+        let has_cap = model.capabilities.contains(&capability);
         if !has_cap {
             return Err(ModelAssignmentResolveError::ModelLacksCapability {
                 capability,
@@ -266,6 +249,7 @@ impl ModelAssignmentResolver {
             capability,
             source,
             slug: model.slug.clone(),
+            input_modalities: model.input_modalities.clone(),
         })
     }
 }
@@ -731,7 +715,10 @@ mod tests {
             model: "whisper-1".to_string(),
             model_provider: "openai".to_string(),
             base_url: base_url.map(str::to_string),
-            capabilities: vec![MediaOperation::TranscribeAudio.as_str().to_string()],
+            capabilities: vec![ModelCapabilityId::TranscribeAudio],
+            input_modalities: vec![ModelModality::Audio],
+            output_modalities: vec![ModelModality::Text],
+            execution_modes: vec![ModelExecutionMode::Immediate],
         }
     }
 
@@ -748,7 +735,7 @@ mod tests {
     }
 
     fn assignment(
-        capability: MediaOperation,
+        capability: ModelCapabilityId,
         model_id: Uuid,
         source: &str,
     ) -> ModelAssignmentBinding {
@@ -769,7 +756,7 @@ mod tests {
                 agent_id,
                 "voice-agent",
                 vec![assignment(
-                    MediaOperation::TranscribeAudio,
+                    ModelCapabilityId::TranscribeAudio,
                     model_id,
                     "local",
                 )],
@@ -784,7 +771,7 @@ mod tests {
                     resource_id: Some(agent_id),
                     resource_slug: Some("voice-agent"),
                 },
-                MediaOperation::TranscribeAudio,
+                ModelCapabilityId::TranscribeAudio,
             )
             .expect("assignment-only STT path should resolve");
 
@@ -796,7 +783,7 @@ mod tests {
             Some("https://stt.example.internal/v1")
         );
         assert_eq!(resolved.source, AssignmentSource::Local);
-        assert_eq!(resolved.capability, MediaOperation::TranscribeAudio);
+        assert_eq!(resolved.capability, ModelCapabilityId::TranscribeAudio);
     }
 
     #[test]
@@ -812,7 +799,10 @@ mod tests {
                 model: "gpt-image-1".to_string(),
                 model_provider: "openai".to_string(),
                 base_url: None,
-                capabilities: vec![MediaOperation::GenerateImage.as_str().to_string()],
+                capabilities: vec![ModelCapabilityId::GenerateImage],
+                input_modalities: vec![ModelModality::Text],
+                output_modalities: vec![ModelModality::Image],
+                execution_modes: vec![ModelExecutionMode::Immediate],
             },
             ModelRuntimeConfig {
                 id: package_id,
@@ -820,7 +810,10 @@ mod tests {
                 model: "grok-imagine-image".to_string(),
                 model_provider: "xai".to_string(),
                 base_url: None,
-                capabilities: vec![MediaOperation::GenerateImage.as_str().to_string()],
+                capabilities: vec![ModelCapabilityId::GenerateImage],
+                input_modalities: vec![ModelModality::Text],
+                output_modalities: vec![ModelModality::Image],
+                execution_modes: vec![ModelExecutionMode::Immediate],
             },
             ModelRuntimeConfig {
                 id: default_id,
@@ -828,7 +821,10 @@ mod tests {
                 model: "gpt-image-1".to_string(),
                 model_provider: "openai".to_string(),
                 base_url: None,
-                capabilities: vec![MediaOperation::GenerateImage.as_str().to_string()],
+                capabilities: vec![ModelCapabilityId::GenerateImage],
+                input_modalities: vec![ModelModality::Text],
+                output_modalities: vec![ModelModality::Image],
+                execution_modes: vec![ModelExecutionMode::Immediate],
             },
         ];
         let resolver = ModelAssignmentResolver::new(
@@ -837,8 +833,8 @@ mod tests {
                 agent_id,
                 "image-agent",
                 vec![
-                    assignment(MediaOperation::GenerateImage, package_id, "package"),
-                    assignment(MediaOperation::GenerateImage, local_id, "local"),
+                    assignment(ModelCapabilityId::GenerateImage, package_id, "package"),
+                    assignment(ModelCapabilityId::GenerateImage, local_id, "local"),
                 ],
             )],
             vec![ModelCapabilityDefaultBinding {
@@ -854,12 +850,51 @@ mod tests {
                     resource_id: Some(agent_id),
                     resource_slug: None,
                 },
-                MediaOperation::GenerateImage,
+                ModelCapabilityId::GenerateImage,
             )
             .unwrap();
 
         assert_eq!(resolved.model_id, local_id);
         assert_eq!(resolved.source, AssignmentSource::Local);
+    }
+
+    #[test]
+    fn analysis_assignment_resolves_without_becoming_a_native_media_provider() {
+        let model_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+        let resolver = ModelAssignmentResolver::new(
+            vec![ModelRuntimeConfig {
+                id: model_id,
+                slug: Slug::derive("image-reader"),
+                model: "vision-model".to_string(),
+                model_provider: "openrouter".to_string(),
+                base_url: None,
+                capabilities: vec![ModelCapabilityId::AnalyzeImage],
+                input_modalities: vec![ModelModality::Text, ModelModality::Image],
+                output_modalities: vec![ModelModality::Text],
+                execution_modes: vec![ModelExecutionMode::Immediate],
+            }],
+            vec![agent_assignments(
+                agent_id,
+                "reviewer",
+                vec![assignment(
+                    ModelCapabilityId::AnalyzeImage,
+                    model_id,
+                    "local",
+                )],
+            )],
+            Vec::new(),
+        );
+
+        let endpoint = resolver
+            .resolve(
+                ResourceRef::agent(Some(agent_id), Some("reviewer")),
+                ModelCapabilityId::AnalyzeImage,
+            )
+            .expect("analysis assignment should resolve");
+
+        assert_eq!(endpoint.capability, ModelCapabilityId::AnalyzeImage);
+        assert!(endpoint.to_media_provider().is_none());
     }
 
     #[test]
@@ -882,7 +917,7 @@ mod tests {
                     resource_id: Some(agent_id),
                     resource_slug: None,
                 },
-                MediaOperation::TranscribeAudio,
+                ModelCapabilityId::TranscribeAudio,
             )
             .unwrap();
 
@@ -908,14 +943,14 @@ mod tests {
                     resource_id: Some(agent_id),
                     resource_slug: None,
                 },
-                MediaOperation::TranscribeAudio,
+                ModelCapabilityId::TranscribeAudio,
             )
             .unwrap_err();
 
         assert_eq!(
             err,
             ModelAssignmentResolveError::MissingAssignment {
-                capability: MediaOperation::TranscribeAudio,
+                capability: ModelCapabilityId::TranscribeAudio,
             }
         );
     }
@@ -930,7 +965,7 @@ mod tests {
                     resource_id: Some(Uuid::new_v4()),
                     resource_slug: None,
                 },
-                MediaOperation::GenerateImage,
+                ModelCapabilityId::GenerateImage,
             )
             .unwrap_err();
         assert!(matches!(

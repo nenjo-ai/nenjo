@@ -2205,6 +2205,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nenjo-content"
+version = "0.31.0"
+dependencies = [
+ "mime",
+ "serde",
+ "serde_json",
+ "thiserror 2.0.18",
+ "uuid",
+]
+
+[[package]]
 name = "nenjo-crypto-auth"
 version = "0.31.0"
 dependencies = [
@@ -2255,6 +2266,7 @@ dependencies = [
  "chrono",
  "chrono-tz",
  "cron",
+ "nenjo-content",
  "serde",
  "serde_json",
  "thiserror 2.0.18",
@@ -2331,6 +2343,8 @@ dependencies = [
  "reqwest",
  "serde",
  "serde_json",
+ "sha2",
+ "thiserror 2.0.18",
  "tokio",
  "tracing",
  "uuid",
@@ -2386,8 +2400,10 @@ dependencies = [
  "base64",
  "cap-std",
  "chrono",
+ "dashmap",
  "derive_builder",
  "nenjo",
+ "nenjo-content",
  "nenjo-events",
  "nenjo-knowledge",
  "nenjo-models",
@@ -2431,6 +2447,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "chrono",
+ "nenjo-models",
  "serde",
  "serde_json",
  "uuid",
@@ -2442,9 +2459,11 @@ version = "0.31.0"
 dependencies = [
  "anyhow",
  "async-trait",
+ "nenjo-content",
  "serde",
  "serde_json",
  "tokio",
+ "uuid",
 ]
 
 [[package]]

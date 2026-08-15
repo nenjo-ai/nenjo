@@ -64,7 +64,7 @@ impl Tool for GetWeatherTool {
         let city = args["city"].as_str().unwrap_or("Unknown");
         Ok(ToolResult {
             success: true,
-            output: format!("{city}: 72°F, sunny with light clouds"),
+            output: format!("{city}: 72°F, sunny with light clouds").into(),
             error: None,
         })
     }
@@ -116,6 +116,10 @@ fn make_model() -> ModelManifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     }
 }
 
@@ -247,8 +251,7 @@ async fn memory_store_recall_with_real_llm() {
     };
 
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
+    let memory = MarkdownMemory::new(dir.path());
 
     let mut model = make_model();
     model.temperature = Some(0.0);
@@ -326,7 +329,7 @@ async fn memory_store_recall_with_real_llm() {
     let scope = runner
         .memory_scope()
         .expect("runner should have memory scope");
-    let backend = MarkdownMemory::new(dir.path(), ws_dir.path());
+    let backend = MarkdownMemory::new(dir.path());
 
     use nenjo::memory::Memory;
     let cats = backend.list_categories(&scope.project).await.unwrap();
@@ -497,8 +500,16 @@ async fn assigned_ability_tool_with_real_llm() {
     let ability_tool_args = output
         .messages
         .iter()
-        .filter(|message| message.role == "assistant" && message.content.contains("tool_calls"))
-        .map(|message| message.content.as_str())
+        .filter_map(|message| match message {
+            nenjo_models::ConversationMessage::AssistantToolCalls { tool_calls, .. } => Some(
+                tool_calls
+                    .iter()
+                    .map(|call| call.arguments.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("\n");
     assert!(
@@ -512,8 +523,16 @@ async fn assigned_ability_tool_with_real_llm() {
     let tool_result_text = output
         .messages
         .iter()
-        .filter(|message| message.role == "tool")
-        .map(|message| message.content.as_str())
+        .filter_map(|message| match message {
+            nenjo_models::ConversationMessage::ToolResults(results) => Some(
+                results
+                    .iter()
+                    .map(|result| result.output.text_content())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
         .collect::<Vec<_>>()
         .join("\n");
     let review_text = format!("{}\n{}", output.text, tool_result_text);

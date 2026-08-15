@@ -40,6 +40,32 @@ impl ModelProviderFactory for MockFactory {
     }
 }
 
+#[derive(Debug)]
+struct MockArtifactInputPreparer;
+
+#[async_trait::async_trait]
+impl ArtifactInputPreparer for MockArtifactInputPreparer {
+    async fn prepare(
+        &self,
+        messages: &[nenjo_models::ConversationMessage],
+        _agent: &AgentManifest,
+        _model: &ModelManifest,
+    ) -> Result<PreparedModelArtifacts> {
+        Ok(PreparedModelArtifacts::new(
+            messages,
+            Default::default(),
+            Vec::new(),
+            Default::default(),
+        ))
+    }
+}
+
+fn assert_artifact_preparer_type<P>(_provider: &P)
+where
+    P: ProviderRuntime<ArtifactPreparer = MockArtifactInputPreparer>,
+{
+}
+
 struct StaticLoader(Manifest);
 
 #[async_trait::async_trait]
@@ -60,6 +86,10 @@ fn test_manifest() -> Manifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
     let agent = AgentManifest {
         name: "agent".into(),
@@ -581,11 +611,13 @@ manifest:
         .find(|tool| tool.name() == "list_knowledge_packs")
         .unwrap();
     let packs: Vec<serde_json::Value> = serde_json::from_str(
-        &list_tool
+        list_tool
             .execute(serde_json::json!({}))
             .await
             .unwrap()
-            .output,
+            .output
+            .as_text()
+            .unwrap(),
     )
     .unwrap();
 
@@ -621,7 +653,8 @@ async fn provider_exposes_list_knowledge_packs_without_registered_packs() {
 
     let result = tools[0].execute(serde_json::json!({})).await.unwrap();
     assert!(result.success);
-    let packs: Vec<serde_json::Value> = serde_json::from_str(&result.output).unwrap();
+    let packs: Vec<serde_json::Value> =
+        serde_json::from_str(result.output.as_text().unwrap()).unwrap();
     assert!(packs.is_empty());
 }
 
@@ -676,11 +709,13 @@ async fn live_manifest_reader_refreshes_existing_knowledge_tools() {
         .clone();
 
     let packs: Vec<serde_json::Value> = serde_json::from_str(
-        &list_tool
+        list_tool
             .execute(serde_json::json!({}))
             .await
             .unwrap()
-            .output,
+            .output
+            .as_text()
+            .unwrap(),
     )
     .unwrap();
     assert!(packs.is_empty());
@@ -704,11 +739,13 @@ async fn live_manifest_reader_refreshes_existing_knowledge_tools() {
         .unwrap();
 
     let packs: Vec<serde_json::Value> = serde_json::from_str(
-        &list_tool
+        list_tool
             .execute(serde_json::json!({}))
             .await
             .unwrap()
-            .output,
+            .output
+            .as_text()
+            .unwrap(),
     )
     .unwrap();
     assert_eq!(packs[0]["selector"], "lib:live");
@@ -781,6 +818,32 @@ async fn builder_can_preserve_typed_model_factory() {
         .unwrap();
 
     assert!(provider.agent(&slug).await.is_ok());
+}
+
+#[tokio::test]
+async fn builder_preserves_concrete_artifact_input_preparer_type() {
+    let provider = Provider::builder()
+        .with_model_factory(MockFactory)
+        .with_artifact_input_preparer(MockArtifactInputPreparer)
+        .build()
+        .await
+        .unwrap();
+
+    assert_artifact_preparer_type(&provider);
+    assert!(provider.artifact_input_preparer().is_some());
+}
+
+#[tokio::test]
+async fn builder_preserves_absent_concrete_artifact_input_preparer() {
+    let provider = Provider::builder()
+        .with_model_factory(MockFactory)
+        .with_optional_artifact_input_preparer(None::<MockArtifactInputPreparer>)
+        .build()
+        .await
+        .unwrap();
+
+    assert_artifact_preparer_type(&provider);
+    assert!(provider.artifact_input_preparer().is_none());
 }
 
 #[tokio::test]
@@ -951,6 +1014,10 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
     let original_agent = AgentManifest {
         name: "agent-old".into(),
@@ -1209,8 +1276,9 @@ manifest:
         .iter()
         .find(|t| t.name() == "list_knowledge_packs")
         .unwrap();
+    let list_result = list.execute(serde_json::json!({})).await.unwrap();
     let packs: Vec<serde_json::Value> =
-        serde_json::from_str(&list.execute(serde_json::json!({})).await.unwrap().output).unwrap();
+        serde_json::from_str(list_result.output.as_text().unwrap()).unwrap();
     let matching: Vec<_> = packs
         .iter()
         .filter(|p| p["selector"] == "pkg:nenjo_ai.knowledge.core")
@@ -1227,14 +1295,15 @@ manifest:
         .find(|t| t.name() == "read_knowledge_doc")
         .unwrap();
     let result: serde_json::Value = serde_json::from_str(
-        &read
-            .execute(serde_json::json!({
-                "pack": "pkg:nenjo_ai.knowledge.core",
-                "selector": "intro"
-            }))
-            .await
-            .unwrap()
-            .output,
+        read.execute(serde_json::json!({
+            "pack": "pkg:nenjo_ai.knowledge.core",
+            "selector": "intro"
+        }))
+        .await
+        .unwrap()
+        .output
+        .as_text()
+        .unwrap(),
     )
     .unwrap();
     assert!(
@@ -1253,14 +1322,15 @@ manifest:
         .find(|t| t.name() == "read_knowledge_doc")
         .unwrap();
     let result: serde_json::Value = serde_json::from_str(
-        &read
-            .execute(serde_json::json!({
-                "pack": "pkg:nenjo_ai.knowledge.core",
-                "selector": "intro"
-            }))
-            .await
-            .unwrap()
-            .output,
+        read.execute(serde_json::json!({
+            "pack": "pkg:nenjo_ai.knowledge.core",
+            "selector": "intro"
+        }))
+        .await
+        .unwrap()
+        .output
+        .as_text()
+        .unwrap(),
     )
     .unwrap();
     assert!(

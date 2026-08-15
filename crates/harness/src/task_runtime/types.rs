@@ -1,6 +1,7 @@
 use chrono::{DateTime, Utc};
 pub use nenjo_events::TaskExecutionTarget;
 use nenjo_events::TaskScheduleDefinition;
+use nenjo_models::ArtifactRef;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -18,6 +19,8 @@ pub struct TaskContent {
     pub status: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
 }
 
 /// Why a task invocation entered the local inbox.

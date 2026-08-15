@@ -107,7 +107,7 @@ impl Tool for MemoryStoreTool {
                 } else {
                     return Ok(ToolResult {
                         success: false,
-                        output: String::new(),
+                        output: String::new().into(),
                         error: Some("No core namespace available (no role assigned). Use 'project' or 'shared' scope instead.".into()),
                     });
                 }
@@ -124,17 +124,17 @@ impl Tool for MemoryStoreTool {
 
         match self
             .memory
-            .store_item(&namespace, fact, category, confidence, None)
+            .store_item(&namespace, fact, category, confidence)
             .await
         {
             Ok(id) => Ok(ToolResult {
                 success: true,
-                output: format!("Stored {scope_label} fact in '{category}' (id: {id})"),
+                output: format!("Stored {scope_label} fact in '{category}' (id: {id})").into(),
                 error: None,
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Failed to store memory: {e}")),
             }),
         }
