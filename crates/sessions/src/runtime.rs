@@ -256,12 +256,35 @@ pub struct SessionTranscriptAppend {
     pub transcript_state: TranscriptState,
 }
 
+#[derive(Debug, Clone, Default)]
+pub enum CheckpointPatch<T> {
+    /// Retain the previously stored field.
+    #[default]
+    Preserve,
+    /// Replace the field with a new value.
+    Replace(T),
+    /// Remove the previously stored field.
+    Clear,
+}
+
+impl<T> CheckpointPatch<T> {
+    /// Apply this explicit patch to an optional stored field.
+    pub fn apply(self, current: Option<T>) -> Option<T> {
+        match self {
+            Self::Preserve => current,
+            Self::Replace(value) => Some(value),
+            Self::Clear => None,
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct SessionCheckpointUpdate {
     pub session_id: Uuid,
     pub phase: ExecutionPhase,
-    pub worktree: Option<WorktreeSnapshot>,
-    pub active_tool_name: Option<String>,
+    pub worktree: CheckpointPatch<WorktreeSnapshot>,
+    pub active_tool_name: CheckpointPatch<String>,
+    pub state: CheckpointPatch<serde_json::Value>,
 }
 
 #[derive(Debug, Clone)]

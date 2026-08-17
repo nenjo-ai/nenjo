@@ -180,7 +180,7 @@ where
             start_runtime_execution_watch(Some(&self.watcher), args.execution_run_id).await?;
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&output)?,
+            output: serde_json::to_string_pretty(&output)?.into(),
             error: None,
         })
     }

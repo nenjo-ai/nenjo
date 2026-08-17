@@ -109,6 +109,78 @@ impl ApiClient {
         &self.base_url
     }
 
+    /// Fetch one committed human-review resolution. The backend correlates
+    /// the request with the authenticated worker organization and execution.
+    pub async fn fetch_human_resolution(
+        &self,
+        execution_run_id: Uuid,
+        request_id: Uuid,
+        resolution_revision: u64,
+    ) -> Result<WorkerHumanResolutionResponse> {
+        let url = format!(
+            "{}/api/v1/reviews/{request_id}/response?execution_id={execution_run_id}&version={resolution_revision}",
+            self.base_url
+        );
+        let response = self.get(&url).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self.api_error(status, response).await);
+        }
+        response.json().await.map_err(ApiClientError::Http)
+    }
+
+    /// Persist a newer encrypted checkpoint for already-open human requests.
+    pub async fn put_execution_checkpoint(
+        &self,
+        checkpoint_id: Uuid,
+        request: &PutExecutionCheckpointRequest,
+    ) -> Result<()> {
+        let url = format!("{}/api/v1/checkpoints/{checkpoint_id}", self.base_url);
+        let response = self.put_json(&url, request).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self.api_error(status, response).await);
+        }
+        Ok(())
+    }
+
+    pub async fn put_execution_payload(
+        &self,
+        payload_id: Uuid,
+        request: &PutExecutionPayloadRequest,
+    ) -> Result<ExecutionPayloadResponse> {
+        let url = format!("{}/api/v1/payloads/{payload_id}", self.base_url);
+        let response = self.put_json(&url, request).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self.api_error(status, response).await);
+        }
+        response.json().await.map_err(ApiClientError::Http)
+    }
+
+    pub async fn fetch_execution_payload(
+        &self,
+        payload_id: Uuid,
+    ) -> Result<ExecutionPayloadResponse> {
+        let url = format!("{}/api/v1/payloads/{payload_id}", self.base_url);
+        let response = self.get(&url).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self.api_error(status, response).await);
+        }
+        response.json().await.map_err(ApiClientError::Http)
+    }
+
+    pub async fn put_review(&self, review_id: Uuid, request: &PutReviewRequest) -> Result<()> {
+        let url = format!("{}/api/v1/reviews/{review_id}", self.base_url);
+        let response = self.put_json(&url, request).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self.api_error(status, response).await);
+        }
+        Ok(())
+    }
+
     // -----------------------------------------------------------------------
     // Bootstrap
     // -----------------------------------------------------------------------
@@ -429,6 +501,20 @@ impl ApiClient {
     ) -> Result<reqwest::Response> {
         self.http
             .post(url)
+            .headers(self.auth_headers())
+            .json(body)
+            .send()
+            .await
+            .map_err(ApiClientError::Http)
+    }
+
+    async fn put_json<T: serde::Serialize>(
+        &self,
+        url: &str,
+        body: &T,
+    ) -> Result<reqwest::Response> {
+        self.http
+            .put(url)
             .headers(self.auth_headers())
             .json(body)
             .send()

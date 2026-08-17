@@ -5,7 +5,7 @@
 //! payloads used for deterministic fan-out and audit trails.
 
 use anyhow::{Context, Result, bail};
-use nenjo_models::ChatMessage;
+use nenjo_models::ConversationMessage;
 use serde_json::Value;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
@@ -56,12 +56,14 @@ pub struct RouteOption {
 
 impl RouteOption {
     fn from_edge(edge: &RoutineEdgeManifest, target: Option<&RoutineStepManifest>) -> Result<Self> {
-        let handoff_schema = edge_handoff_schema(&edge.metadata).with_context(|| {
-            format!(
-                "edge {}:{} must define a valid metadata.handoff_schema",
-                edge.source_step, edge.target_step
-            )
-        })?;
+        let handoff_schema = edge_handoff_schema(&edge.metadata)
+            .with_context(|| {
+                format!(
+                    "edge {}:{} must define a valid metadata.handoff_schema",
+                    edge.source_step, edge.target_step
+                )
+            })?
+            .clone();
         Ok(Self {
             target_step: edge.target_step.clone(),
             target_name: target
@@ -70,7 +72,7 @@ impl RouteOption {
             condition: edge.condition,
             purpose: edge_purpose(edge),
             handoff_instructions: edge_handoff_instructions(edge),
-            handoff_schema: handoff_schema.clone(),
+            handoff_schema,
         })
     }
 }
@@ -195,16 +197,19 @@ impl Tool for RouteNextStepsTool {
                 "pass" => format!(
                     "{} routing task(s) recorded for downstream routine steps.",
                     activated_routes(self.step_kind, &self.routes, verdict).len()
-                ),
+                )
+                .into(),
                 _ => match activated_routes(self.step_kind, &self.routes, verdict).len() {
                     0 => format!(
                         "{} step failure verdict recorded; downstream routing will not run.",
                         self.step_kind.label()
-                    ),
+                    )
+                    .into(),
                     count => format!(
                         "{} routing task(s) recorded for downstream routine steps.",
                         count
-                    ),
+                    )
+                    .into(),
                 },
             },
             error: None,
@@ -226,25 +231,15 @@ pub struct RouteNextStepsDecision {
 /// The most recent assistant message containing the tool must contain exactly
 /// one call. Earlier invalid attempts may remain in history after a corrective
 /// retry, but the terminal turn is always single-call.
-pub fn extract_route_next_steps(messages: &[ChatMessage]) -> Result<Option<Value>> {
-    for msg in messages.iter().rev() {
-        if msg.role != "assistant" {
-            continue;
-        }
-        let Ok(parsed) = serde_json::from_str::<Value>(&msg.content) else {
-            continue;
-        };
-        let Some(tool_calls) = parsed.get("tool_calls").and_then(|value| value.as_array()) else {
+pub fn extract_route_next_steps(messages: &[ConversationMessage]) -> Result<Option<Value>> {
+    for message in messages.iter().rev() {
+        let ConversationMessage::AssistantToolCalls { tool_calls, .. } = message else {
             continue;
         };
 
         let matching = tool_calls
             .iter()
-            .filter(|call| {
-                call.get("name")
-                    .and_then(|value| value.as_str())
-                    .is_some_and(|name| name == ROUTE_NEXT_STEPS_TOOL_NAME)
-            })
+            .filter(|call| call.name == ROUTE_NEXT_STEPS_TOOL_NAME)
             .collect::<Vec<_>>();
         if matching.is_empty() {
             continue;
@@ -252,12 +247,7 @@ pub fn extract_route_next_steps(messages: &[ChatMessage]) -> Result<Option<Value
         if matching.len() > 1 {
             bail!("Agent called {ROUTE_NEXT_STEPS_TOOL_NAME} more than once in the final turn");
         }
-        let args = matching[0]
-            .get("arguments")
-            .and_then(|value| value.as_str())
-            .ok_or_else(|| {
-                anyhow::anyhow!("{ROUTE_NEXT_STEPS_TOOL_NAME} arguments must be a JSON string")
-            })?;
+        let args = &matching[0].arguments;
         let value = serde_json::from_str::<Value>(args).with_context(|| {
             format!("{ROUTE_NEXT_STEPS_TOOL_NAME} arguments must parse as JSON")
         })?;
@@ -270,7 +260,9 @@ pub fn extract_route_next_steps(messages: &[ChatMessage]) -> Result<Option<Value
 ///
 /// This parses the terminal `route_next_steps` call into the verdict fields used
 /// by the task runtime and step result audit data.
-pub fn resolve_route_next_steps(messages: &[ChatMessage]) -> Result<RouteNextStepsDecision> {
+pub fn resolve_route_next_steps(
+    messages: &[ConversationMessage],
+) -> Result<RouteNextStepsDecision> {
     let Some(arguments) = extract_route_next_steps(messages)? else {
         bail!("Routine step did not call required route_next_steps tool");
     };
@@ -572,10 +564,17 @@ fn route_retry_instruction(step_kind: RoutingStepKind) -> &'static str {
     }
 }
 
-fn chat_history(messages: &[ChatMessage]) -> Vec<ChatMessage> {
+fn chat_history(messages: &[ConversationMessage]) -> Vec<ConversationMessage> {
     messages
         .iter()
-        .filter(|message| message.role != "system" && message.role != "developer")
+        .filter(|message| {
+            !message.as_chat().is_some_and(|chat| {
+                matches!(
+                    chat.role,
+                    nenjo_models::ChatRole::System | nenjo_models::ChatRole::Developer
+                )
+            })
+        })
         .cloned()
         .collect()
 }
@@ -781,6 +780,9 @@ fn condition_label(condition: RoutineEdgeCondition) -> &'static str {
         RoutineEdgeCondition::Always => "always",
         RoutineEdgeCondition::OnPass => "on_pass",
         RoutineEdgeCondition::OnFail => "on_fail",
+        RoutineEdgeCondition::Approved => "approved",
+        RoutineEdgeCondition::ChangesRequested => "changes_requested",
+        RoutineEdgeCondition::Rejected => "rejected",
     }
 }
 
@@ -945,5 +947,32 @@ mod tests {
                 .to_string()
                 .contains("target_step 'done' is not activated by verdict 'fail'")
         );
+    }
+
+    #[test]
+    fn human_target_uses_ordinary_edge_handoff_schema() {
+        let mut incoming = edge("review");
+        incoming.metadata = serde_json::json!({
+            "handoff_instructions": "Produce the signed plan.",
+            "handoff_schema": {
+                "type": "object",
+                "required": ["plan"],
+                "properties": {"plan": {"type": "string", "minLength": 1}},
+                "additionalProperties": false
+            }
+        });
+        let target = RoutineStepManifest {
+            slug: crate::Slug::derive("review"),
+            routine: crate::Slug::derive("routine"),
+            name: "Review".to_string(),
+            step_type: crate::manifest::RoutineStepType::Human,
+            council: None,
+            agent: None,
+            config: serde_json::json!({"request": {"title": "Review {{ task.title }}"}}),
+            order_index: 0,
+        };
+        let route = RouteOption::from_edge(&incoming, Some(&target)).unwrap();
+        assert_eq!(route.handoff_schema["properties"]["plan"]["type"], "string");
+        assert_eq!(route.handoff_instructions, "Produce the signed plan.");
     }
 }

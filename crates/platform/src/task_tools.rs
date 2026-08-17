@@ -266,7 +266,7 @@ where
         };
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&output)?,
+            output: serde_json::to_string_pretty(&output)?.into(),
             error: None,
         })
     }

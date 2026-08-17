@@ -11,7 +11,8 @@ use super::wire::PlatformRecord;
 
 /// Metadata for a project on REST, events, and worker sync.
 ///
-/// Settings ciphertext is carried separately via [`SensitiveContentKind::ProjectSettings`].
+/// Settings ciphertext is carried separately via
+/// [`crate::SensitiveContentKind::ProjectSettings`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProjectRecord {
     pub id: Uuid,

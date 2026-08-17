@@ -17,6 +17,7 @@ reqwest = { workspace = true, features = ["json", "multipart", "stream"] }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 tracing = { workspace = true }
+thiserror = { workspace = true }
 anyhow = { workspace = true }
 futures-util = { workspace = true }
 directories = { workspace = true }
@@ -24,6 +25,7 @@ base64 = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
+sha2 = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

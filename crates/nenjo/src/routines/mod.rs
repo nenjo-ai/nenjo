@@ -23,6 +23,9 @@ pub mod event;
 pub mod executor;
 pub mod graph;
 pub mod handoff_schema;
+pub mod human_materialization;
+pub mod human_review;
+pub mod human_scheduler;
 pub mod routing;
 pub mod runner;
 pub mod types;
@@ -34,7 +37,7 @@ use crate::memory::MemoryScope;
 use crate::provider::ProviderRuntime;
 
 pub use event::RoutineEvent;
-pub use runner::{RoutineExecutionHandle, RoutineRunner};
+pub use runner::{ResumableRoutineExecutionHandle, RoutineExecutionHandle, RoutineRunner};
 pub use types::{
     EdgeCondition, RoutineHandoff, RoutineInput, RoutineMetrics, SessionBinding, StepMetrics,
     StepResult, StepType,

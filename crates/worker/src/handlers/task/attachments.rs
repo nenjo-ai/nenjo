@@ -21,6 +21,7 @@ pub(super) struct TaskExecutionOutcome {
     pub(super) total_input_tokens: u64,
     pub(super) total_output_tokens: u64,
     pub(super) attachments: Vec<TaskAttachmentManifest>,
+    pub(super) waiting_for_human: bool,
 }
 
 impl TaskExecutionOutcome {
@@ -31,6 +32,7 @@ impl TaskExecutionOutcome {
             total_input_tokens,
             total_output_tokens,
             attachments: Vec::new(),
+            waiting_for_human: false,
         }
     }
 
@@ -48,6 +50,18 @@ impl TaskExecutionOutcome {
             total_input_tokens,
             total_output_tokens,
             attachments: Vec::new(),
+            waiting_for_human: false,
+        }
+    }
+
+    pub(super) fn waiting(total_input_tokens: u64, total_output_tokens: u64) -> Self {
+        Self {
+            success: true,
+            error: None,
+            total_input_tokens,
+            total_output_tokens,
+            attachments: Vec::new(),
+            waiting_for_human: true,
         }
     }
 
@@ -94,7 +108,6 @@ where
 
 pub(super) async fn build_handoff_attachments<S, W>(
     ctx: &TaskCommandContext<S, W>,
-    routine_id: Option<Uuid>,
     handoffs: &[nenjo::routines::RoutineHandoff],
 ) -> Result<Vec<TaskAttachmentManifest>>
 where
@@ -114,6 +127,9 @@ where
             nenjo::manifest::RoutineEdgeCondition::Always => "always",
             nenjo::manifest::RoutineEdgeCondition::OnPass => "on_pass",
             nenjo::manifest::RoutineEdgeCondition::OnFail => "on_fail",
+            nenjo::manifest::RoutineEdgeCondition::Approved => "approved",
+            nenjo::manifest::RoutineEdgeCondition::ChangesRequested => "changes_requested",
+            nenjo::manifest::RoutineEdgeCondition::Rejected => "rejected",
         };
         attachments.push(TaskAttachmentManifest {
             id: TaskAttachmentId::new(id),
@@ -124,7 +140,6 @@ where
             encrypted_payload,
             content_digest,
             source: Some(RoutineHandoffSource {
-                routine_id,
                 source_step_slug: handoff.source_step.to_string(),
                 destination_step_slug: handoff.target_step.to_string(),
                 edge_condition: edge_condition.to_string(),

@@ -152,7 +152,7 @@ impl Tool for ListAssignedAbilitiesTool {
             .context("failed to serialize ability list")?;
         Ok(ToolResult {
             success: true,
-            output,
+            output: output.into(),
             error: None,
         })
     }
@@ -222,7 +222,7 @@ where
             _ => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some("ability name is required".into()),
                 });
             }
@@ -232,7 +232,7 @@ where
             _ => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some("input is required".into()),
                 });
             }
@@ -240,7 +240,7 @@ where
         let Some(ability) = self.registry.get(ability_name) else {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("unknown ability '{ability_name}'")),
             });
         };
@@ -502,7 +502,7 @@ impl Tool for UpdateAbilityParentTool {
         {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("ability operation was stopped".into()),
             });
         }
@@ -566,7 +566,7 @@ impl Tool for AskAbilityParentTool {
             Some(message) => Ok(json_tool(serde_json::json!({ "message": message }))),
             None => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("parent did not provide input before the operation ended".into()),
             }),
         }
@@ -623,7 +623,7 @@ impl Tool for FinishAbilityTool {
         if finish.summary.is_empty() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("summary is required".into()),
             });
         }
@@ -719,7 +719,7 @@ struct AbilityOperation<P: ProviderRuntime> {
     ability: AbilityManifest,
     call_id: String,
     task_description: String,
-    caller_history_snapshot: Vec<nenjo_models::ChatMessage>,
+    caller_history_snapshot: Vec<nenjo_models::ConversationMessage>,
     child_handle: AsyncOpChildHandle,
     op_handle: super::async_ops::AsyncOpHandle,
     parent_events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
@@ -754,6 +754,7 @@ where
         history: vec![],
         project: None,
         template_override: None,
+        artifacts: Vec::new(),
     });
     if let Some(parent_tx) = parent_events_tx.clone() {
         debug!(
@@ -823,7 +824,7 @@ where
         .supports_developer_role(&sub_instance.model.model_name);
     let mut messages =
         build_instruction_messages(&prompts.system, &prompts.developer, supports_developer_role);
-    messages.push(nenjo_models::ChatMessage::developer(
+    messages.push(nenjo_models::ConversationMessage::developer(
         ABILITY_COMPLETION_GUIDANCE.to_string(),
     ));
 
@@ -841,7 +842,7 @@ where
         user_message = %user_message,
         "Ability sub-agent user message"
     );
-    messages.push(nenjo_models::ChatMessage::user(&user_message));
+    messages.push(nenjo_models::ConversationMessage::user(&user_message));
 
     let (nested_tx, mut nested_rx) = mpsc::unbounded_channel::<TurnEvent>();
     let bridge_op_handle = op_handle.clone();
@@ -1079,7 +1080,7 @@ async fn bridge_ability_transcript(
                         result
                             .error
                             .clone()
-                            .unwrap_or_else(|| result.output.clone()),
+                            .unwrap_or_else(|| result.output.text_content()),
                         events_tx.clone(),
                     )
                     .await;
@@ -1090,7 +1091,10 @@ async fn bridge_ability_transcript(
                         tool: tool_name.clone(),
                         success: result.success,
                         summary: truncate(
-                            result.error.as_deref().unwrap_or(result.output.as_str()),
+                            &result
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| result.output.text_content()),
                             240,
                         ),
                     },
@@ -1099,16 +1103,24 @@ async fn bridge_ability_transcript(
                 .await;
         }
         TurnEvent::TranscriptMessage { message } => {
-            let summary = truncate(&message.content, 240);
-            let transcript = match message.role.as_str() {
-                "user" => AsyncOperationTranscriptEvent::Input { summary },
-                "assistant" => AsyncOperationTranscriptEvent::AssistantMessage { summary },
-                "tool" => AsyncOperationTranscriptEvent::ToolResult {
-                    tool: "tool".into(),
-                    success: true,
-                    summary,
-                },
-                _ => return,
+            let transcript = match message {
+                nenjo_models::ConversationMessage::Chat(chat) => {
+                    let summary = truncate(&chat.content, 240);
+                    match chat.role {
+                        nenjo_models::ChatRole::User => {
+                            AsyncOperationTranscriptEvent::Input { summary }
+                        }
+                        nenjo_models::ChatRole::Assistant => {
+                            AsyncOperationTranscriptEvent::AssistantMessage { summary }
+                        }
+                        nenjo_models::ChatRole::System | nenjo_models::ChatRole::Developer => {
+                            return;
+                        }
+                    }
+                }
+                nenjo_models::ConversationMessage::AssistantToolCalls { .. }
+                | nenjo_models::ConversationMessage::ToolResults(_)
+                | nenjo_models::ConversationMessage::ArtifactAnalysis(_) => return,
             };
             handle.transcript(transcript, events_tx).await;
         }
@@ -1182,7 +1194,7 @@ fn next_ability_operation_id(ability_id: &str) -> AsyncOpId {
 fn json_tool(value: serde_json::Value) -> ToolResult {
     ToolResult {
         success: true,
-        output: value.to_string(),
+        output: value.to_string().into(),
         error: None,
     }
 }
@@ -1303,7 +1315,6 @@ where
             context: prompt_context,
             renderer: caller.prompt.renderer.clone(),
             memory_vars: caller.prompt.memory_vars.clone(),
-            artifact_vars: caller.prompt.artifact_vars.clone(),
         },
         runtime: AgentRuntime {
             tools,
@@ -1361,7 +1372,7 @@ mod tests {
     use crate::types::ActiveDomain;
     use anyhow::Result;
     use nenjo_models::traits::{
-        ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall,
+        ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
     };
 
     struct NoopProvider;
@@ -1393,7 +1404,7 @@ mod tests {
     struct SequentialProvider {
         responses: Vec<ChatResponse>,
         next: AtomicUsize,
-        seen_messages: Mutex<Vec<Vec<ChatMessage>>>,
+        seen_messages: Mutex<Vec<Vec<ConversationMessage>>>,
     }
 
     #[async_trait::async_trait]
@@ -1508,7 +1519,7 @@ mod tests {
         async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
             Ok(ToolResult {
                 success: true,
-                output: self.name.to_string(),
+                output: self.name.to_string().into(),
                 error: None,
             })
         }
@@ -1567,6 +1578,7 @@ mod tests {
                 render_ctx_extra: Default::default(),
                 argument_bindings: Default::default(),
                 knowledge: Default::default(),
+                artifact_input_preparer: None,
             },
         )
     }
@@ -1608,6 +1620,10 @@ mod tests {
                 context_window: None,
                 base_url: None,
                 native_tools: vec![],
+                capabilities: Vec::new(),
+                input_modalities: Vec::new(),
+                output_modalities: Vec::new(),
+                execution_modes: Vec::new(),
             },
             model: AgentModel {
                 model_name: "mock".into(),
@@ -1649,7 +1665,6 @@ mod tests {
                 },
                 renderer: ContextRenderer::from_blocks(&[]),
                 memory_vars: Default::default(),
-                artifact_vars: Default::default(),
             },
             runtime: AgentRuntime {
                 tools: vec![],
@@ -1696,6 +1711,7 @@ mod tests {
                 history: vec![],
                 project: None,
                 template_override: None,
+                artifacts: Vec::new(),
             }))
             .unwrap();
 
@@ -1798,7 +1814,7 @@ mod tests {
 
         let output = turn_loop::run(
             &instance,
-            vec![ChatMessage::user("Create the routine")],
+            vec![ConversationMessage::user("Create the routine")],
             None,
             None,
             None,
@@ -1815,9 +1831,11 @@ mod tests {
         let seen_messages = provider.seen_messages.lock().unwrap();
         assert_eq!(seen_messages.len(), 2);
         assert!(seen_messages[1].iter().any(|message| {
-            message.role == "developer"
-                && message.content.contains("requires the finish tool")
-                && message.content.contains("I'll create it now")
+            message.as_chat().is_some_and(|chat| {
+                chat.role == nenjo_models::ChatRole::Developer
+                    && chat.content.contains("requires the finish tool")
+                    && chat.content.contains("I'll create it now")
+            })
         }));
     }
 
@@ -1855,7 +1873,7 @@ mod tests {
 
         let output = turn_loop::run(
             &instance,
-            vec![ChatMessage::user("Create the routine")],
+            vec![ConversationMessage::user("Create the routine")],
             None,
             None,
             None,
@@ -1912,7 +1930,7 @@ mod tests {
 
         let output = turn_loop::run(
             &instance,
-            vec![ChatMessage::user("Create the routine")],
+            vec![ConversationMessage::user("Create the routine")],
             None,
             None,
             None,
@@ -1926,7 +1944,8 @@ mod tests {
         let seen_messages = provider.seen_messages.lock().unwrap();
         assert_eq!(seen_messages.len(), 2);
         assert!(seen_messages[1].iter().any(|message| {
-            message.role == "tool" && message.content.contains("summary is required")
+            matches!(message, ConversationMessage::ToolResults(results)
+                if results.iter().any(|result| result.output.contains("summary is required")))
         }));
     }
 
@@ -1937,7 +1956,7 @@ mod tests {
 
         let error = turn_loop::run(
             &instance,
-            vec![ChatMessage::user("Create the routine")],
+            vec![ConversationMessage::user("Create the routine")],
             None,
             None,
             None,
@@ -2112,7 +2131,7 @@ mod tests {
                 tool_args: "{}".into(),
                 result: ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some("graph validation failed".into()),
                 },
                 metadata: None,
@@ -2178,6 +2197,7 @@ mod tests {
                 history: vec![],
                 project: None,
                 template_override: None,
+                artifacts: Vec::new(),
             }))
             .unwrap();
 
@@ -2362,7 +2382,8 @@ mod tests {
         let tool = ListAssignedAbilitiesTool::new(registry);
 
         let result = tool.execute(serde_json::json!({})).await.unwrap();
-        let output: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let output: serde_json::Value =
+            serde_json::from_str(result.output.as_text().unwrap()).unwrap();
 
         assert!(result.success);
         assert_eq!(output["abilities"][0]["name"], "Code Review");

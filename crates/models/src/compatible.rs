@@ -9,8 +9,14 @@ use crate::native::{
     MediaToolSpec as NativeMediaToolSpec, ModelMediaCapabilities, NativeMediaRequest,
     NativeMediaResponse, ProviderMediaCapabilities, TranscribeAudioRequest, TranscriptSegment,
 };
+use crate::openai_multimodal::{
+    ChatArtifactDialect, ChatCompletionsContent, artifact_content, chat_artifact_transport,
+};
 use crate::openai_tools::{ProviderToolSpec, convert_tools};
-use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
+use crate::traits::{
+    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
+};
+use crate::{ArtifactInputTransport, MediaType, ModelCapabilityId};
 use anyhow::Context;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -173,7 +179,7 @@ struct NativeChatRequest {
 struct Message {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<ChatCompletionsContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -432,6 +438,23 @@ fn prepare_compatible_audio_data_uri(data_uri: &str) -> anyhow::Result<DecodedAu
     })
 }
 
+fn supports_compatible_transcription_media_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "audio/mpeg"
+            | "audio/mp3"
+            | "audio/wav"
+            | "audio/wave"
+            | "audio/x-wav"
+            | "audio/webm"
+            | "audio/mp4"
+            | "audio/m4a"
+            | "audio/x-m4a"
+            | "audio/ogg"
+            | "audio/flac"
+    )
+}
+
 fn compatible_audio_part(asset: &MediaInputAsset) -> anyhow::Result<Part> {
     match asset {
         MediaInputAsset::DataUri { data_uri } => {
@@ -483,84 +506,102 @@ impl OpenAiCompatibleProvider {
         convert_tools(tools, crate::sanitize_tool_name)
     }
 
-    /// Reconstruct native OpenAI-compatible messages from the turn loop's
-    /// JSON-encoded `ChatMessage` values.
-    ///
-    /// Assistant messages with `tool_calls` JSON are converted into native
-    /// tool call messages. Tool result messages with `tool_call_id` JSON
-    /// are converted into native tool result messages.
-    fn convert_messages(messages: &[ChatMessage], supports_developer_role: bool) -> Vec<Message> {
-        messages
-            .iter()
-            .map(|m| {
-                // Assistant message with tool calls encoded as JSON
-                if m.role == "assistant"
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
-                    && let Some(tool_calls_value) = value.get("tool_calls")
-                    && let Ok(parsed_calls) =
-                        serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
-                {
-                    let tool_calls = parsed_calls
-                        .into_iter()
-                        .map(|tc| NativeToolCall {
-                            id: Some(tc.id),
-                            kind: Some("function".to_string()),
-                            function: NativeFunctionCall {
-                                name: tc.name,
-                                arguments: tc.arguments,
-                            },
-                        })
-                        .collect::<Vec<_>>();
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    return Message {
+    fn convert_messages(
+        request: &ChatRequest<'_>,
+        supports_developer_role: bool,
+    ) -> anyhow::Result<Vec<Message>> {
+        let mut native = Vec::new();
+        for message in request.messages {
+            match message {
+                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                    native.push(Message {
                         role: "assistant".to_string(),
-                        content,
+                        content: text.clone().map(ChatCompletionsContent::text),
                         tool_call_id: None,
-                        tool_calls: Some(tool_calls),
-                    };
+                        tool_calls: Some(
+                            tool_calls
+                                .iter()
+                                .map(|tc| NativeToolCall {
+                                    id: Some(tc.id.clone()),
+                                    kind: Some("function".to_string()),
+                                    function: NativeFunctionCall {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.clone(),
+                                    },
+                                })
+                                .collect(),
+                        ),
+                    });
                 }
-
-                // Tool result message with tool_call_id encoded as JSON
-                if m.role == "tool"
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
-                {
-                    let tool_call_id = value
-                        .get("tool_call_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    return Message {
-                        role: "tool".to_string(),
-                        content,
-                        tool_call_id,
-                        tool_calls: None,
-                    };
+                ConversationMessage::ToolResults(results) => {
+                    for result in results {
+                        native.push(Message {
+                            role: "tool".to_string(),
+                            content: Some(ChatCompletionsContent::text(
+                                result.output.text_content(),
+                            )),
+                            tool_call_id: Some(result.tool_call_id.clone()),
+                            tool_calls: None,
+                        });
+                    }
+                    let references = results.iter().flat_map(|result| {
+                        result.output.parts().iter().filter_map(|part| match part {
+                            crate::ToolOutputPart::Artifact(reference) => Some((reference, None)),
+                            crate::ToolOutputPart::Text(_) => None,
+                        })
+                    });
+                    let content = artifact_content(
+                        "Inspect the attached artifact.",
+                        references,
+                        request.prepared_artifacts,
+                        ChatArtifactDialect::OpenAi,
+                    )?;
+                    if content.has_media() {
+                        native.push(Message {
+                            role: "user".to_string(),
+                            content: Some(content),
+                            tool_call_id: None,
+                            tool_calls: None,
+                        });
+                    }
                 }
-
-                // Regular message (system, user, plain assistant)
-                Message {
-                    // Generic compatible endpoints cannot reliably accept OpenAI's
-                    // `developer` role. These instructions are typically injected
-                    // mid-conversation, where MLX/Qwen templates also reject a
-                    // `system` message; a user message preserves the valid turn
-                    // sequence after the preceding assistant response.
-                    role: if m.role == "developer" && !supports_developer_role {
+                ConversationMessage::Chat(message) => native.push(Message {
+                    role: if message.role == ChatRole::Developer && !supports_developer_role {
                         "user".to_string()
                     } else {
-                        m.role.clone()
+                        message.role.to_string()
                     },
-                    content: Some(m.content.clone()),
+                    content: Some(artifact_content(
+                        &message.content,
+                        message.artifacts.iter().map(|input| {
+                            (
+                                input.artifact(),
+                                input.instruction().map(|value| value.as_str()),
+                            )
+                        }),
+                        request.prepared_artifacts,
+                        ChatArtifactDialect::OpenAi,
+                    )?),
                     tool_call_id: None,
                     tool_calls: None,
-                }
-            })
-            .collect()
+                }),
+                ConversationMessage::ArtifactAnalysis(analysis) => native.push(Message {
+                    role: "user".to_string(),
+                    content: Some(ChatCompletionsContent::text(analysis.model_context())),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }),
+            }
+        }
+        Ok(native)
+    }
+
+    fn responses_fallback_allowed(&self, request: &ChatRequest<'_>) -> bool {
+        self.supports_responses_fallback
+            && !request
+                .messages
+                .iter()
+                .any(ConversationMessage::has_artifact_references)
     }
 
     async fn chat_via_responses(
@@ -679,6 +720,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        request.ensure_artifacts_prepared()?;
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "{} API key not set. Run `nenjo onboard` or set the appropriate env var.",
@@ -689,7 +731,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let tools = Self::convert_tools(request.tools);
         let chat_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(request.messages, self.supports_developer_role(model)),
+            messages: Self::convert_messages(&request, self.supports_developer_role(model))?,
             temperature,
             stream: Some(false),
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
@@ -706,14 +748,20 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let status = response.status();
 
             // 404 may mean this provider uses the Responses API instead
-            if status == reqwest::StatusCode::NOT_FOUND && self.supports_responses_fallback {
+            if status == reqwest::StatusCode::NOT_FOUND && self.responses_fallback_allowed(&request)
+            {
                 warn!(
                     provider = %self.name,
-                    url = %url,
                     "Chat completions returned 404 — falling back to Responses API (tool calls will be unavailable)"
                 );
-                let system = request.messages.iter().find(|m| m.role == "system");
-                let last_user = request.messages.iter().rfind(|m| m.role == "user");
+                let system = request.messages.iter().find_map(|message| {
+                    message
+                        .as_chat()
+                        .filter(|chat| chat.role == ChatRole::System)
+                });
+                let last_user = request.messages.iter().rev().find_map(|message| {
+                    message.as_chat().filter(|chat| chat.role == ChatRole::User)
+                });
                 if let Some(user_msg) = last_user {
                     let text = self
                         .chat_via_responses(
@@ -854,6 +902,41 @@ impl ModelProvider for OpenAiCompatibleProvider {
         // template. Use `system`, which is the portable role across these APIs.
         false
     }
+
+    fn artifact_input_transport(
+        &self,
+        _model: &str,
+        capability: ModelCapabilityId,
+        media_type: &MediaType,
+    ) -> ArtifactInputTransport {
+        const MAX_INLINE_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+        match capability {
+            ModelCapabilityId::Chat
+            | ModelCapabilityId::AnalyzeImage
+            | ModelCapabilityId::AnalyzeDocument => {
+                chat_artifact_transport(ChatArtifactDialect::OpenAi, media_type.essence_str())
+            }
+            ModelCapabilityId::AnalyzeVideo => ArtifactInputTransport::Unsupported,
+            ModelCapabilityId::TranscribeAudio => {
+                if supports_compatible_transcription_media_type(media_type.essence_str()) {
+                    ArtifactInputTransport::Inline {
+                        max_bytes: std::num::NonZeroU64::new(MAX_INLINE_ARTIFACT_BYTES)
+                            .expect("inline artifact limit is non-zero"),
+                    }
+                } else {
+                    ArtifactInputTransport::Unsupported
+                }
+            }
+            ModelCapabilityId::GenerateSpeech
+            | ModelCapabilityId::GenerateImage
+            | ModelCapabilityId::EditImage
+            | ModelCapabilityId::GenerateVideo
+            | ModelCapabilityId::EditVideo
+            | ModelCapabilityId::ImageToVideo
+            | ModelCapabilityId::ReferenceToVideo
+            | ModelCapabilityId::ExtendVideo => ArtifactInputTransport::Unsupported,
+        }
+    }
 }
 
 #[async_trait]
@@ -913,10 +996,93 @@ mod media_capability_tests {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use nenjo_tool_api::{ArtifactId, ArtifactSize, Sha256Digest};
+    use sha2::{Digest, Sha256};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use uuid::Uuid;
+
     use super::*;
+    use crate::{
+        ArtifactInput, ArtifactInputSource, ArtifactRef, ChatMessage, PreparedArtifact,
+        PreparedArtifactInputs, ToolResultMessage,
+    };
 
     fn make_provider(name: &str, url: &str, key: Option<&str>) -> OpenAiCompatibleProvider {
         OpenAiCompatibleProvider::new(name, url, key, AuthStyle::Bearer)
+    }
+
+    fn prepared_artifact(media_type: &str, bytes: &[u8]) -> (ArtifactRef, PreparedArtifactInputs) {
+        let bytes: Arc<[u8]> = Arc::from(bytes);
+        let reference = ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).unwrap(),
+            Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(&bytes))).unwrap(),
+            MediaType::parse(media_type).unwrap(),
+            ArtifactSize::new(bytes.len() as u64),
+        );
+        let prepared = PreparedArtifact::new(reference.clone(), bytes).unwrap();
+        (reference, PreparedArtifactInputs::new([prepared]))
+    }
+
+    async fn capture_one_json_request() -> (
+        String,
+        tokio::sync::oneshot::Receiver<(String, serde_json::Value)>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock compatible endpoint");
+        let address = listener.local_addr().expect("mock endpoint address");
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept provider request");
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("read provider request");
+                assert!(read > 0, "provider request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec())
+                .expect("provider request headers are UTF-8");
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().expect("content length"))
+                })
+                .expect("provider request content length");
+            while request.len() - header_end < content_length {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).await.expect("read provider body");
+                assert!(read > 0, "provider request body ended early");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = serde_json::from_slice(&request[header_end..header_end + content_length])
+                .expect("provider request body is JSON");
+            sender
+                .send((headers, body))
+                .expect("return captured provider request");
+            let response = r#"{"choices":[{"message":{"content":"grounded"}}],"usage":{"prompt_tokens":7,"completion_tokens":2}}"#;
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                        response.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write provider response");
+        });
+        (format!("http://{address}/v1"), receiver)
     }
 
     #[test]
@@ -951,13 +1117,14 @@ mod tests {
 
     #[tokio::test]
     async fn chat_fails_without_key() {
-        use crate::traits::{ChatMessage, ChatRequest};
+        use crate::traits::{ChatRequest, ConversationMessage};
         let p = make_provider("Venice", "https://api.venice.ai", None);
-        let messages = vec![ChatMessage::user("hello")];
+        let messages = vec![ConversationMessage::user("hello")];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = p.chat(request, "llama-3.3-70b", 0.7).await;
         assert!(result.is_err());
@@ -976,13 +1143,13 @@ mod tests {
             messages: vec![
                 Message {
                     role: "system".to_string(),
-                    content: Some("You are Nenjo".to_string()),
+                    content: Some(ChatCompletionsContent::text("You are Nenjo")),
                     tool_call_id: None,
                     tool_calls: None,
                 },
                 Message {
                     role: "user".to_string(),
-                    content: Some("hello".to_string()),
+                    content: Some(ChatCompletionsContent::text("hello")),
                     tool_call_id: None,
                     tool_calls: None,
                 },
@@ -1004,22 +1171,241 @@ mod tests {
 
     #[test]
     fn developer_role_is_mapped_to_user_for_generic_compatible_endpoints() {
-        let messages = vec![ChatMessage::developer("Use the response tool")];
-        let converted = OpenAiCompatibleProvider::convert_messages(&messages, false);
+        let messages = vec![ConversationMessage::developer("Use the response tool")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let converted = OpenAiCompatibleProvider::convert_messages(&request, false).unwrap();
 
         assert_eq!(converted[0].role, "user");
         assert_eq!(
-            converted[0].content.as_deref(),
-            Some("Use the response tool")
+            serde_json::to_value(converted[0].content.as_ref().unwrap()).unwrap(),
+            serde_json::json!("Use the response tool")
         );
     }
 
     #[test]
     fn developer_role_is_preserved_when_supported() {
-        let messages = vec![ChatMessage::developer("Use the response tool")];
-        let converted = OpenAiCompatibleProvider::convert_messages(&messages, true);
+        let messages = vec![ConversationMessage::developer("Use the response tool")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let converted = OpenAiCompatibleProvider::convert_messages(&request, true).unwrap();
 
         assert_eq!(converted[0].role, "developer");
+    }
+
+    #[test]
+    fn compatible_chat_serializes_prepared_image_bytes_as_a_data_url() {
+        let (reference, prepared) = prepared_artifact("image/png", b"png");
+        let messages = vec![ConversationMessage::chat(
+            ChatMessage::user("Describe this image").with_artifacts(vec![ArtifactInput::new(
+                reference,
+                ArtifactInputSource::UserAttachment,
+            )]),
+        )];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: Some(&prepared),
+        };
+
+        let converted = OpenAiCompatibleProvider::convert_messages(&request, false).unwrap();
+
+        assert_eq!(
+            serde_json::to_value(converted[0].content.as_ref().unwrap()).unwrap(),
+            serde_json::json!([
+                {"type": "text", "text": "Describe this image"},
+                {
+                    "type": "image_url",
+                    "image_url": {
+                        "url": "data:image/png;base64,cG5n",
+                        "detail": "auto"
+                    }
+                }
+            ])
+        );
+    }
+
+    #[tokio::test]
+    async fn compatible_http_request_carries_prepared_image_bytes_and_auth() {
+        let (base_url, captured) = capture_one_json_request().await;
+        let provider = make_provider("compatible", &base_url, Some("test-key"));
+        let (reference, prepared) = prepared_artifact("image/png", b"png");
+        let messages = vec![ConversationMessage::chat(
+            ChatMessage::user("Describe this image").with_artifacts(vec![ArtifactInput::new(
+                reference,
+                ArtifactInputSource::UserAttachment,
+            )]),
+        )];
+
+        let response = provider
+            .chat(
+                ChatRequest {
+                    messages: &messages,
+                    tools: None,
+                    native_tools: None,
+                    prepared_artifacts: Some(&prepared),
+                },
+                "vision-model",
+                0.0,
+            )
+            .await
+            .expect("compatible chat response");
+        let (headers, body) = captured.await.expect("captured provider request");
+
+        assert!(headers.starts_with("POST /v1/chat/completions HTTP/1.1"));
+        assert!(
+            headers
+                .to_ascii_lowercase()
+                .contains("authorization: bearer test-key")
+        );
+        assert_eq!(
+            body["messages"][0]["content"],
+            serde_json::json!([
+                {"type": "text", "text": "Describe this image"},
+                {"type": "image_url", "image_url": {
+                    "url": "data:image/png;base64,cG5n", "detail": "auto"
+                }}
+            ])
+        );
+        assert_eq!(response.text.as_deref(), Some("grounded"));
+        assert_eq!(response.usage.input_tokens, 7);
+        assert_eq!(response.usage.output_tokens, 2);
+    }
+
+    #[test]
+    fn compatible_chat_projects_tool_artifacts_into_a_user_media_message() {
+        let (reference, prepared) = prepared_artifact("application/pdf", b"pdf");
+        let artifact_id = reference.id();
+        let messages = vec![ConversationMessage::tool_result(
+            ToolResultMessage::text("call-1", "Artifact metadata").with_artifact(reference),
+        )];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: Some(&prepared),
+        };
+
+        let converted = OpenAiCompatibleProvider::convert_messages(&request, false).unwrap();
+
+        assert_eq!(converted.len(), 2);
+        assert_eq!(converted[0].role, "tool");
+        assert_eq!(converted[1].role, "user");
+        assert_eq!(
+            serde_json::to_value(converted[1].content.as_ref().unwrap()).unwrap(),
+            serde_json::json!([
+                {"type": "text", "text": "Inspect the attached artifact."},
+                {"type": "file", "file": {
+                    "filename": format!("artifact-{artifact_id}.pdf"),
+                    "file_data": "data:application/pdf;base64,cGRm"
+                }}
+            ])
+        );
+    }
+
+    #[test]
+    fn compatible_chat_rejects_video_parts() {
+        let (reference, prepared) = prepared_artifact("video/mp4", b"video");
+        let messages = vec![ConversationMessage::chat(
+            ChatMessage::user("Describe this video").with_artifacts(vec![ArtifactInput::new(
+                reference,
+                ArtifactInputSource::UserAttachment,
+            )]),
+        )];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: Some(&prepared),
+        };
+
+        let error = OpenAiCompatibleProvider::convert_messages(&request, false).unwrap_err();
+
+        assert!(
+            error
+                .to_string()
+                .contains("unsupported Chat Completions media type")
+        );
+    }
+
+    #[test]
+    fn compatible_transport_supports_standard_artifacts_and_transcription_but_not_video() {
+        let provider = make_provider("compatible", "https://example.com/v1", Some("key"));
+        let image = MediaType::parse("image/png").unwrap();
+        let document = MediaType::parse("application/pdf").unwrap();
+        let chat_audio = MediaType::parse("audio/wav").unwrap();
+        let transcription_audio = MediaType::parse("audio/flac").unwrap();
+        let video = MediaType::parse("video/mp4").unwrap();
+
+        assert!(matches!(
+            provider.artifact_input_transport("vision", ModelCapabilityId::Chat, &image),
+            ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "document-model",
+                ModelCapabilityId::AnalyzeDocument,
+                &document,
+            ),
+            ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport("audio-model", ModelCapabilityId::Chat, &chat_audio),
+            ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "transcriber",
+                ModelCapabilityId::TranscribeAudio,
+                &transcription_audio,
+            ),
+            ArtifactInputTransport::Inline { .. }
+        ));
+        assert_eq!(
+            provider.artifact_input_transport("video", ModelCapabilityId::Chat, &video),
+            ArtifactInputTransport::Unsupported
+        );
+        assert_eq!(
+            provider.artifact_input_transport("video", ModelCapabilityId::AnalyzeVideo, &video,),
+            ArtifactInputTransport::Unsupported
+        );
+    }
+
+    #[test]
+    fn responses_fallback_is_disabled_for_artifact_requests() {
+        let provider = make_provider("compatible", "https://example.com/v1", Some("key"));
+        let text_messages = vec![ConversationMessage::user("hello")];
+        let text_request = ChatRequest {
+            messages: &text_messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        assert!(provider.responses_fallback_allowed(&text_request));
+
+        let (reference, prepared) = prepared_artifact("image/png", b"png");
+        let artifact_messages = vec![ConversationMessage::chat(
+            ChatMessage::user("inspect").with_artifacts(vec![ArtifactInput::new(
+                reference,
+                ArtifactInputSource::UserAttachment,
+            )]),
+        )];
+        let artifact_request = ChatRequest {
+            messages: &artifact_messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: Some(&prepared),
+        };
+        assert!(!provider.responses_fallback_allowed(&artifact_request));
     }
 
     #[test]
@@ -1063,7 +1449,7 @@ mod tests {
 
     #[tokio::test]
     async fn all_compatible_providers_fail_without_key() {
-        use crate::traits::{ChatMessage, ChatRequest};
+        use crate::traits::{ChatRequest, ConversationMessage};
         let providers = vec![
             make_provider("Venice", "https://api.venice.ai", None),
             make_provider("Moonshot", "https://api.moonshot.cn", None),
@@ -1075,11 +1461,12 @@ mod tests {
         ];
 
         for p in providers {
-            let messages = vec![ChatMessage::user("test")];
+            let messages = vec![ConversationMessage::user("test")];
             let request = ChatRequest {
                 messages: &messages,
                 tools: None,
                 native_tools: None,
+                prepared_artifacts: None,
             };
             let result = p.chat(request, "model", 0.7).await;
             assert!(result.is_err(), "{} should fail without key", p.name);

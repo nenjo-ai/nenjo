@@ -126,7 +126,7 @@ impl Tool for WebFetchTool {
         if !self.security.can_act() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Action blocked: autonomy is read-only".into()),
             });
         }
@@ -134,7 +134,7 @@ impl Tool for WebFetchTool {
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Action blocked: rate limit exceeded".into()),
             });
         }
@@ -144,7 +144,7 @@ impl Tool for WebFetchTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(e.to_string()),
                 });
             }
@@ -192,7 +192,7 @@ impl Tool for WebFetchTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Failed to build HTTP client: {e}")),
                 });
             }
@@ -203,7 +203,7 @@ impl Tool for WebFetchTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("HTTP request failed: {e}")),
                 });
             }
@@ -213,7 +213,7 @@ impl Tool for WebFetchTool {
         if !status.is_success() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "HTTP {} {}",
                     status.as_u16(),
@@ -240,7 +240,7 @@ impl Tool for WebFetchTool {
         } else {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "Unsupported content type: {content_type}. \
                      web_fetch supports text/html, text/plain, text/markdown, and application/json."
@@ -253,7 +253,7 @@ impl Tool for WebFetchTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Failed to read response body: {e}")),
                 });
             }
@@ -269,7 +269,7 @@ impl Tool for WebFetchTool {
 
         Ok(ToolResult {
             success: true,
-            output,
+            output: output.into(),
             error: None,
         })
     }

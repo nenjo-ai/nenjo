@@ -220,7 +220,7 @@ impl Tool for HttpRequestTool {
         if !self.security.can_act() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Action blocked: autonomy is read-only".into()),
             });
         }
@@ -228,7 +228,7 @@ impl Tool for HttpRequestTool {
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Action blocked: rate limit exceeded".into()),
             });
         }
@@ -238,7 +238,7 @@ impl Tool for HttpRequestTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(e.to_string()),
                 });
             }
@@ -249,7 +249,7 @@ impl Tool for HttpRequestTool {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(e.to_string()),
                 });
             }
@@ -295,7 +295,7 @@ impl Tool for HttpRequestTool {
 
                 Ok(ToolResult {
                     success: status.is_success(),
-                    output,
+                    output: output.into(),
                     error: if status.is_client_error() || status.is_server_error() {
                         Some(format!("HTTP {}", status_code))
                     } else {
@@ -305,7 +305,7 @@ impl Tool for HttpRequestTool {
             }
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("HTTP request failed: {e}")),
             }),
         }

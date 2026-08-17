@@ -15,6 +15,7 @@ use uuid::Uuid;
 
 use nenjo::Slug;
 use nenjo_events::{DomainActivation, Response, StreamEvent};
+use nenjo_models::ArtifactRef;
 
 use nenjo_harness::events::HarnessEvent;
 use nenjo_harness::registry::ExecutionKind;
@@ -170,6 +171,7 @@ pub struct ChatCommandContext<S> {
 pub struct ChatCommandRequest<'a> {
     pub message_id: Option<&'a str>,
     pub content: &'a str,
+    pub artifacts: &'a [ArtifactRef],
     pub project: Option<&'a str>,
     pub agent: Option<&'a str>,
     pub target_type: Option<&'a str>,
@@ -185,6 +187,7 @@ pub struct ChatSlashCommandRequest<'a> {
     pub message_id: Option<&'a str>,
     pub command: &'a str,
     pub content: &'a str,
+    pub artifacts: &'a [ArtifactRef],
     pub project: Option<&'a str>,
     pub agent: Option<&'a str>,
     pub target_type: Option<&'a str>,
@@ -303,6 +306,7 @@ where
     let ChatCommandRequest {
         message_id,
         content,
+        artifacts,
         project,
         agent,
         target_type,
@@ -341,6 +345,7 @@ where
             CouncilChatAdapterRequest {
                 input_message_id,
                 content,
+                artifacts,
                 project,
                 council: target.context("No council target provided for chat")?,
                 session_id,
@@ -360,7 +365,8 @@ where
     let resolver = PlatformResourceResolver::new(&manifest);
     let agent_id = resolver.agent_id(&agent_slug)?;
     let mut chat = ChatRequest::new(agent_slug.clone(), effective_content.to_string())
-        .with_session(session_id);
+        .with_session(session_id)
+        .with_artifacts(artifacts.to_vec());
     if let Some(input_message_id) = input_message_id {
         chat = chat.with_input_message_id(input_message_id);
     }
@@ -618,6 +624,7 @@ where
         ChatCommandRequest {
             message_id: request.message_id,
             content: &user_content,
+            artifacts: request.artifacts,
             project: request.project,
             agent: request.agent,
             target_type: request.target_type,
@@ -769,6 +776,7 @@ fn relative_manifest_path<'a>(raw_path: &'a str, label: &str) -> Result<&'a Path
 struct CouncilChatAdapterRequest<'a> {
     input_message_id: Option<Uuid>,
     content: &'a str,
+    artifacts: &'a [ArtifactRef],
     project: Option<&'a str>,
     council: &'a str,
     session_id: Uuid,
@@ -798,6 +806,7 @@ where
         council.clone(),
         project.clone(),
         request.content.to_string(),
+        request.artifacts.to_vec(),
         request.session_id,
         &events_tx,
     )
@@ -926,7 +935,7 @@ mod tests {
     };
     use nenjo_events::{Response, StreamEvent};
     use nenjo_models::{
-        ChatMessage, ChatRequest as ModelChatRequest, ChatResponse, TokenUsage, ToolCall,
+        ChatRequest as ModelChatRequest, ChatResponse, ConversationMessage, TokenUsage, ToolCall,
     };
     use serde_json::Value;
     use uuid::Uuid;
@@ -938,8 +947,24 @@ mod tests {
 
     use super::*;
 
-    type ModelRequests = Arc<Mutex<Vec<Vec<ChatMessage>>>>;
+    type ModelRequests = Arc<Mutex<Vec<Vec<ConversationMessage>>>>;
     type ScriptedResponses = Arc<Mutex<VecDeque<ChatResponse>>>;
+
+    fn message_contains(message: &ConversationMessage, needle: &str) -> bool {
+        match message {
+            ConversationMessage::Chat(chat) => chat.content.contains(needle),
+            ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                text.as_deref().is_some_and(|text| text.contains(needle))
+                    || tool_calls
+                        .iter()
+                        .any(|call| call.arguments.contains(needle))
+            }
+            ConversationMessage::ToolResults(results) => {
+                results.iter().any(|result| result.output.contains(needle))
+            }
+            ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.contains(needle),
+        }
+    }
 
     struct ScriptedModelProvider {
         requests: ModelRequests,
@@ -1333,6 +1358,7 @@ Original user message: {{ chat.message }}
                     message_id: Some(&input_message_id_text),
                     command: "/ralph-loop",
                     content: "/ralph-loop copy the demo repo",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -1414,8 +1440,10 @@ Original user message: {{ chat.message }}
         let messages = requests.first().expect("model should be called");
         let rendered_user_message = messages
             .iter()
+            .filter_map(ConversationMessage::as_chat)
             .find(|message| {
-                message.role == "user" && message.content.contains("Use Ralph's loop discipline")
+                message.role == nenjo_models::ChatRole::User
+                    && message.content.contains("Use Ralph's loop discipline")
             })
             .expect("rendered command should be sent as the user message");
         assert!(
@@ -1572,6 +1600,7 @@ Original user message: {{ chat.message }}
                 ChatCommandRequest {
                     message_id: None,
                     content: "Use the Ralph Loop skill for this task.",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -1624,7 +1653,7 @@ Original user message: {{ chat.message }}
         assert!(
             requests[1]
                 .iter()
-                .any(|message| message.content.contains("--- SKILL.md ---")),
+                .any(|message| message_contains(message, "--- SKILL.md ---")),
             "loaded skill markdown should be returned to the model after use_skill"
         );
     }
@@ -1806,6 +1835,7 @@ Original user message: {{ chat.message }}
                 ChatCommandRequest {
                     message_id: None,
                     content: "Use the Ralph Loop skill and write a note.",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -1858,7 +1888,7 @@ Original user message: {{ chat.message }}
         assert!(
             requests[1]
                 .iter()
-                .any(|message| message.content.contains("skill-prompt-context")),
+                .any(|message| message_contains(message, "skill-prompt-context")),
             "newly activated skill UserPromptSubmit context should be visible before the second model call"
         );
     }
@@ -1975,6 +2005,7 @@ Original user message: {{ chat.message }}
                 ChatCommandRequest {
                     message_id: None,
                     content: "Use the Ralph Loop skill and write a blocked file.",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -2021,9 +2052,10 @@ Original user message: {{ chat.message }}
             "blocked tool result should be returned to the model"
         );
         assert!(
-            requests[2].iter().any(|message| {
-                message.content.contains("Blocked by hook") && message.content.contains("no writes")
-            }),
+            requests[2]
+                .iter()
+                .any(|message| message_contains(message, "Blocked by hook")
+                    && message_contains(message, "no writes")),
             "model should receive the PreToolUse block as the failed tool result"
         );
     }
@@ -2175,6 +2207,7 @@ Original user message: {{ chat.message }}
                 ChatCommandRequest {
                     message_id: None,
                     content: "Use the Ralph Loop skill, write a note, then read a missing file.",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -2227,7 +2260,7 @@ Original user message: {{ chat.message }}
         assert!(
             requests[3]
                 .iter()
-                .any(|message| message.content.contains("Failed to resolve file path")),
+                .any(|message| message_contains(message, "Failed to resolve file path")),
             "model should receive the failed read result after the PostToolUse hook"
         );
     }
@@ -2346,6 +2379,7 @@ Original user message: {{ chat.message }}
                 ChatCommandRequest {
                     message_id: None,
                     content: "Use the MCP skill to review the demo project.",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -2366,27 +2400,27 @@ Original user message: {{ chat.message }}
         assert!(
             second_request
                 .iter()
-                .any(|message| message.content.contains("ACTIVE SKILL MCP TOOLS"))
+                .any(|message| message_contains(message, "ACTIVE SKILL MCP TOOLS"))
         );
         assert!(
             second_request
                 .iter()
-                .any(|message| message.content.contains("call_skill_mcp_tool"))
+                .any(|message| message_contains(message, "call_skill_mcp_tool"))
         );
         assert!(
             second_request
                 .iter()
-                .any(|message| message.content.contains("tool: `review`"))
+                .any(|message| message_contains(message, "tool: `review`"))
         );
         assert!(
             second_request
                 .iter()
-                .any(|message| message.content.contains("arguments_schema"))
+                .any(|message| message_contains(message, "arguments_schema"))
         );
         assert!(
             requests[2]
                 .iter()
-                .any(|message| message.content.contains("skill-mcp-review-ok:demo")),
+                .any(|message| message_contains(message, "skill-mcp-review-ok:demo")),
             "MCP tool result should be visible to the model after proxy call"
         );
     }
@@ -2458,6 +2492,7 @@ Original user message: {{ chat.message }}
                     message_id: None,
                     command: "/ralph-loop",
                     content: "/ralph-loop add prompt context",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -2515,7 +2550,7 @@ Original user message: {{ chat.message }}
         assert!(
             messages
                 .iter()
-                .any(|message| message.content.contains("prompt-hook-context")),
+                .any(|message| message_contains(message, "prompt-hook-context")),
             "UserPromptSubmit additionalContext should be visible to the model"
         );
     }
@@ -2591,6 +2626,7 @@ Original user message: {{ chat.message }}
                     message_id: None,
                     command: "/ralph-loop",
                     content: "/ralph-loop produce the final answer",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -2636,15 +2672,13 @@ Original user message: {{ chat.message }}
         assert!(
             requests[1]
                 .iter()
-                .any(|message| message.content.contains("Use the stop hook guidance.")),
+                .any(|message| message_contains(message, "Use the stop hook guidance.")),
             "systemMessage should be appended before the continuation request"
         );
         assert!(
             requests[1].iter().any(|message| {
-                message
-                    .content
-                    .contains("Hook `Ralph Loop Stop` blocked completion")
-                    && message.content.contains("revise before stopping")
+                message_contains(message, "Hook `Ralph Loop Stop` blocked completion")
+                    && message_contains(message, "revise before stopping")
             }),
             "the continuation request should include the hook reason"
         );
@@ -2717,6 +2751,7 @@ Original user message: {{ chat.message }}
                     message_id: None,
                     command: "/ralph-loop",
                     content: "/ralph-loop keep trying",
+                    artifacts: &[],
                     project: Some("demo-project"),
                     agent: Some("coder"),
                     target_type: None,
@@ -2789,6 +2824,10 @@ Original user message: {{ chat.message }}
             context_window: None,
             base_url: None,
             native_tools: vec![],
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         };
         let model_slug = model_manifest_slug(&model.model_provider, &model.model);
         Manifest {
@@ -2870,6 +2909,10 @@ Original user message: {{ chat.message }}
             context_window: None,
             base_url: None,
             native_tools: vec![],
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         };
         let model_slug = model_manifest_slug(&model.model_provider, &model.model);
         Manifest {

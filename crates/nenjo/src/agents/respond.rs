@@ -135,14 +135,14 @@ impl Tool for RespondToUserTool {
         let Some(status) = RespondToUserStatus::parse(&parsed.status) else {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(INVALID_STATUS_ERROR.into()),
             });
         };
         if status.is_terminal() && self.async_ops.has_open_model_visible().await {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(TERMINAL_RESPONSE_BLOCKED_BY_ASYNC_OPS.into()),
             });
         }
@@ -151,14 +151,14 @@ impl Tool for RespondToUserTool {
         if message.is_empty() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("message is required".into()),
             });
         }
 
         Ok(ToolResult {
             success: true,
-            output: message.to_string(),
+            output: message.to_string().into(),
             error: None,
         })
     }

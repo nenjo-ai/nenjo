@@ -6,7 +6,9 @@
 
 use anyhow::Result;
 use derive_builder::Builder;
-use nenjo_models::{MediaOperation, NativeModelToolId};
+use nenjo_models::{
+    MediaOperation, ModelCapabilityId, ModelExecutionMode, ModelModality, NativeModelToolId,
+};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -620,6 +622,7 @@ pub enum RoutineStepType {
     Agent,
     Council,
     Gate,
+    Human,
     Terminal,
     TerminalFail,
 }
@@ -630,6 +633,7 @@ impl std::fmt::Display for RoutineStepType {
             Self::Agent => "agent",
             Self::Council => "council",
             Self::Gate => "gate",
+            Self::Human => "human",
             Self::Terminal => "terminal",
             Self::TerminalFail => "terminal_fail",
         };
@@ -656,6 +660,9 @@ pub enum RoutineEdgeCondition {
     Always,
     OnPass,
     OnFail,
+    Approved,
+    ChangesRequested,
+    Rejected,
 }
 
 impl RoutineEdgeCondition {
@@ -663,6 +670,9 @@ impl RoutineEdgeCondition {
         match s.to_lowercase().as_str() {
             "on_pass" => Self::OnPass,
             "on_fail" => Self::OnFail,
+            "approved" => Self::Approved,
+            "changes_requested" => Self::ChangesRequested,
+            "rejected" => Self::Rejected,
             _ => Self::Always,
         }
     }
@@ -672,6 +682,7 @@ impl RoutineEdgeCondition {
             Self::Always => true,
             Self::OnPass => passed,
             Self::OnFail => !passed,
+            Self::Approved | Self::ChangesRequested | Self::Rejected => false,
         }
     }
 }
@@ -701,6 +712,18 @@ pub struct ModelManifest {
     /// Provider-native tools enabled for this model configuration.
     #[serde(default)]
     pub native_tools: Vec<NativeModelToolId>,
+    /// Assignable operations declared for this configured model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub capabilities: Vec<ModelCapabilityId>,
+    /// Modalities accepted by this configured model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input_modalities: Vec<ModelModality>,
+    /// Modalities produced by this configured model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub output_modalities: Vec<ModelModality>,
+    /// Execution styles supported by this configured model.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub execution_modes: Vec<ModelExecutionMode>,
 }
 
 impl_manifest_identity!(ModelManifest);

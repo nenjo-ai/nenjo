@@ -39,7 +39,7 @@ impl ContentSearchEngine {
         if pattern.is_empty() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Empty pattern is not allowed.".into()),
             });
         }
@@ -54,7 +54,7 @@ impl ContentSearchEngine {
         if !matches!(output_mode, "content" | "files_with_matches" | "count") {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "Invalid output_mode '{output_mode}'. Allowed values: content, files_with_matches, count."
                 )),
@@ -97,7 +97,7 @@ impl ContentSearchEngine {
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: too many actions in the last hour".into()),
             });
         }
@@ -106,7 +106,7 @@ impl ContentSearchEngine {
         if std::path::Path::new(search_path).is_absolute() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Absolute paths are not allowed. Use a relative path.".into()),
             });
         }
@@ -114,7 +114,7 @@ impl ContentSearchEngine {
         if search_path.contains("../") || search_path.contains("..\\") || search_path == ".." {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Path traversal ('..') is not allowed.".into()),
             });
         }
@@ -122,7 +122,7 @@ impl ContentSearchEngine {
         if !self.security.is_path_allowed(search_path) {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "Path '{search_path}' is not allowed by security policy."
                 )),
@@ -133,7 +133,7 @@ impl ContentSearchEngine {
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
@@ -147,7 +147,7 @@ impl ContentSearchEngine {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Cannot resolve path '{search_path}': {e}")),
                 });
             }
@@ -156,7 +156,7 @@ impl ContentSearchEngine {
         if !self.security.is_resolved_path_allowed(&resolved_canon) {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "Resolved path for '{search_path}' is outside the allowed workspace."
                 )),
@@ -167,7 +167,7 @@ impl ContentSearchEngine {
         if multiline && !self.has_rg {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(
                     "Multiline matching requires ripgrep (rg), which is not available.".into(),
                 ),
@@ -219,14 +219,14 @@ impl ContentSearchEngine {
             Ok(Err(e)) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Failed to execute search command: {e}")),
                 });
             }
             Err(_) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Search timed out after {TIMEOUT_SECS} seconds.")),
                 });
             }
@@ -238,7 +238,7 @@ impl ContentSearchEngine {
             let stderr = String::from_utf8_lossy(&output.stderr);
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Search error: {}", stderr.trim())),
             });
         }
@@ -266,7 +266,7 @@ impl ContentSearchEngine {
 
         Ok(ToolResult {
             success: true,
-            output: final_output,
+            output: final_output.into(),
             error: None,
         })
     }

@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::tools::ToolResult;
-use nenjo_models::ChatMessage;
+use nenjo_models::{ArtifactInput, ConversationMessage};
 use serde::{Deserialize, Serialize};
 use tokio::sync::{Mutex, Notify, mpsc};
 use uuid::Uuid;
@@ -115,7 +115,7 @@ pub enum TurnEvent {
         ability_tool_name: String,
         ability_name: String,
         task_input: String,
-        caller_history: Vec<ChatMessage>,
+        caller_history: Vec<ConversationMessage>,
     },
     /// One or more tool calls are starting.
     ToolCallStart {
@@ -208,7 +208,7 @@ pub enum TurnEvent {
         messages_after: usize,
     },
     /// A transcript message was durably relevant to future turns.
-    TranscriptMessage { message: ChatMessage },
+    TranscriptMessage { message: ConversationMessage },
     /// A user-visible assistant response emitted by the harness response tool.
     AssistantResponse { message: String, status: String },
     /// Execution was paused by the caller.
@@ -223,6 +223,7 @@ pub enum TurnEvent {
 pub struct QueuedUserMessage {
     pub message_id: Option<Uuid>,
     pub content: String,
+    pub artifacts: Vec<ArtifactInput>,
 }
 
 #[derive(Clone)]
@@ -241,9 +242,19 @@ impl TurnInputSender {
         message_id: Option<Uuid>,
         content: impl Into<String>,
     ) -> Result<(), mpsc::error::SendError<QueuedUserMessage>> {
+        self.send_user_message_with_artifacts(message_id, content, Vec::new())
+    }
+
+    pub fn send_user_message_with_artifacts(
+        &self,
+        message_id: Option<Uuid>,
+        content: impl Into<String>,
+        artifacts: Vec<ArtifactInput>,
+    ) -> Result<(), mpsc::error::SendError<QueuedUserMessage>> {
         let result = self.tx.send(QueuedUserMessage {
             message_id,
             content: content.into(),
+            artifacts,
         });
         if result.is_ok() {
             self.notify.notify_waiters();
@@ -352,7 +363,7 @@ pub struct TurnOutput {
     /// Number of tool calls executed.
     pub tool_calls: u32,
     /// Full conversation messages (for history persistence).
-    pub messages: Vec<ChatMessage>,
+    pub messages: Vec<ConversationMessage>,
 }
 
 /// Terminal failures produced by the agent turn loop.

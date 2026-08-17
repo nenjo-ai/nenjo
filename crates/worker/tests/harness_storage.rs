@@ -6,8 +6,7 @@ use nenjo::manifest::{Manifest, ManifestResource, ProjectManifest};
 use nenjo_models::{ChatRequest, ChatResponse, TokenUsage};
 use nenjo_sessions::{
     CheckpointRecord, SessionCheckpoint, SessionRuntimeEvent, SessionStatus, SessionStore,
-    SessionTranscriptChatMessage, SessionTranscriptEventPayload, SessionTranscriptRecord,
-    TraceEvent, TracePhase,
+    SessionTranscriptEventPayload, SessionTranscriptRecord, TraceEvent, TracePhase,
 };
 use serde_json::json;
 use tempfile::tempdir;
@@ -220,11 +219,8 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
         .record(SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
             session_id,
             turn_id: Some(turn_id),
-            payload: SessionTranscriptEventPayload::ChatMessage {
-                message: SessionTranscriptChatMessage {
-                    role: "user".to_string(),
-                    content: "hello".to_string(),
-                },
+            payload: SessionTranscriptEventPayload::ConversationMessage {
+                message: nenjo_models::ConversationMessage::user("hello"),
             },
         }))
         .await
@@ -268,6 +264,7 @@ async fn worker_session_runtime_persists_harness_events_under_state_events() {
                 current_phase: Some(nenjo_sessions::ExecutionPhase::CallingModel),
                 active_tool_name: None,
                 worktree: None,
+                state: None,
             },
         }))
         .await

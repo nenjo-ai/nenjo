@@ -9,9 +9,8 @@ use nenjo_harness::{
 };
 use nenjo_sessions::{
     SessionKind, SessionOwnerKind, SessionRefs, SessionRuntimeEvent, SessionStatus, SessionStore,
-    SessionTranscriptChatMessage, SessionTranscriptEvent, SessionTranscriptEventPayload,
-    SessionTranscriptRecord, SessionUpsert, TokenUsage, TraceEvent, TracePhase, TranscriptQuery,
-    TranscriptStore,
+    SessionTranscriptEvent, SessionTranscriptEventPayload, SessionTranscriptRecord, SessionUpsert,
+    TokenUsage, TraceEvent, TracePhase, TranscriptQuery, TranscriptStore,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -77,6 +76,10 @@ async fn chat_test_provider()
         context_window: None,
         base_url: None,
         native_tools: Vec::new(),
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
     let agent = nenjo::manifest::AgentManifest {
         name: "system".into(),
@@ -323,11 +326,8 @@ async fn file_transcript_store_appends_without_rewriting_existing_events() {
                 seq: 0,
                 recorded_at: Utc::now(),
                 turn_id: None,
-                payload: SessionTranscriptEventPayload::ChatMessage {
-                    message: SessionTranscriptChatMessage {
-                        role: "user".to_string(),
-                        content: content.to_string(),
-                    },
+                payload: SessionTranscriptEventPayload::ConversationMessage {
+                    message: nenjo_models::ConversationMessage::user(content),
                 },
             })
             .await

@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::{ProviderError, RoutineRunner, ToolFactory, builder};
+use super::{ArtifactInputPreparer, ProviderError, RoutineRunner, ToolFactory, builder};
 use crate::Slug;
 use crate::agents::builder::AgentBuilder;
 use crate::agents::prompts::PromptContext;
@@ -91,6 +91,9 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
     where
         Self: 'a;
 
+    /// Concrete host-side artifact preparation service used by this runtime.
+    type ArtifactPreparer: ArtifactInputPreparer + 'static;
+
     /// Return an owned snapshot of the manifest used by this runtime.
     fn manifest_snapshot(&self) -> Arc<Manifest>;
 
@@ -102,6 +105,11 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
 
     /// Borrow the runtime's tool factory.
     fn tool_factory(&self) -> &Self::ToolFactory<'_>;
+
+    /// Host-side artifact preparation service when this runtime supports media inputs.
+    fn artifact_input_preparer(&self) -> Option<&Self::ArtifactPreparer> {
+        None
+    }
 
     /// Find an agent manifest by slug.
     fn find_agent_manifest(&self, slug: &Slug) -> Option<&AgentManifest>;

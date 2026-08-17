@@ -329,11 +329,31 @@ where
         system_response_tx: system_response_tx.clone(),
         pending_artifacts: pending_task_artifacts.clone(),
     };
+    let initial_task_executor = task_executor.clone();
     let task_runtime = TaskRuntime::new(
         task_store,
-        move |submission, cancellation| {
-            let task_executor = task_executor.clone();
-            async move { task_executor.execute(submission, cancellation).await }
+        move |submission, action, cancellation| {
+            let task_executor = initial_task_executor.clone();
+            async move {
+                match action {
+                    nenjo_harness::TaskInboxAction::Initial => {
+                        task_executor.execute(submission, cancellation).await
+                    }
+                    nenjo_harness::TaskInboxAction::Continue {
+                        request_id,
+                        resolution_revision,
+                    } => {
+                        task_executor
+                            .continue_execution(
+                                submission,
+                                request_id,
+                                resolution_revision,
+                                cancellation,
+                            )
+                            .await
+                    }
+                }
+            }
         },
         max_concurrency,
     );
@@ -490,6 +510,47 @@ where
                         Err(error) => {
                             seen_message_ids.remove(&message_id);
                             warn!(%error, %execution_run_id, "Failed to cancel task execution; leaving delivery unacknowledged");
+                        }
+                    }
+                    continue;
+                }
+                if let Command::ExecutionContinue {
+                    execution_run_id,
+                    request_id,
+                    resolution_revision,
+                } = command
+                {
+                    match task_runtime
+                        .continue_execution(execution_run_id, request_id, resolution_revision)
+                        .await
+                    {
+                        Ok(
+                            nenjo_harness::ContinuationOutcome::Queued(_)
+                            | nenjo_harness::ContinuationOutcome::Duplicate,
+                        ) => {
+                            ack_received_envelope(ack, message_id, "task_execution_continue");
+                        }
+                        Ok(
+                            nenjo_harness::ContinuationOutcome::Missing
+                            | nenjo_harness::ContinuationOutcome::Inactive,
+                        ) => {
+                            seen_message_ids.remove(&message_id);
+                            warn!(
+                                %execution_run_id,
+                                %request_id,
+                                resolution_revision,
+                                "Targeted worker cannot accept continuation; leaving delivery unacknowledged"
+                            );
+                        }
+                        Err(error) => {
+                            seen_message_ids.remove(&message_id);
+                            error!(
+                                %error,
+                                %execution_run_id,
+                                %request_id,
+                                resolution_revision,
+                                "Failed to persist task continuation; leaving delivery unacknowledged"
+                            );
                         }
                     }
                     continue;

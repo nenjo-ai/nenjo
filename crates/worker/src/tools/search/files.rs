@@ -26,7 +26,7 @@ impl FileSearchEngine {
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: too many actions in the last hour".into()),
             });
         }
@@ -35,7 +35,7 @@ impl FileSearchEngine {
         if pattern.starts_with('/') || pattern.starts_with('\\') {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Absolute paths are not allowed. Use a relative glob pattern.".into()),
             });
         }
@@ -44,7 +44,7 @@ impl FileSearchEngine {
         if pattern.contains("../") || pattern.contains("..\\") || pattern == ".." {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Path traversal ('..') is not allowed in glob patterns.".into()),
             });
         }
@@ -53,7 +53,7 @@ impl FileSearchEngine {
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
@@ -67,7 +67,7 @@ impl FileSearchEngine {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Invalid glob pattern: {e}")),
                 });
             }
@@ -78,7 +78,7 @@ impl FileSearchEngine {
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Cannot resolve workspace directory: {e}")),
                 });
             }
@@ -138,7 +138,7 @@ impl FileSearchEngine {
 
         Ok(ToolResult {
             success: true,
-            output,
+            output: output.into(),
             error: None,
         })
     }
@@ -339,7 +339,8 @@ mod tests {
         let result = tool.execute(json!({"pattern": "*.txt"})).await.unwrap();
 
         assert!(result.success);
-        let lines: Vec<&str> = result.output.lines().collect();
+        let text = result.output.text_content();
+        let lines: Vec<&str> = text.lines().collect();
         // First 3 lines should be the sorted file names
         assert!(lines.len() >= 3);
         assert_eq!(lines[0], "a.txt");

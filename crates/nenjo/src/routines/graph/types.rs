@@ -12,6 +12,7 @@ pub enum RoutineGraphStepType {
     Agent,
     Council,
     Gate,
+    Human,
     Lambda,
     Terminal,
     TerminalFail,
@@ -23,6 +24,7 @@ impl RoutineGraphStepType {
             "agent" => Some(Self::Agent),
             "council" => Some(Self::Council),
             "gate" => Some(Self::Gate),
+            "human" => Some(Self::Human),
             "lambda" => Some(Self::Lambda),
             "terminal" => Some(Self::Terminal),
             "terminal_fail" => Some(Self::TerminalFail),
@@ -41,6 +43,7 @@ impl From<RoutineStepType> for RoutineGraphStepType {
             RoutineStepType::Agent => Self::Agent,
             RoutineStepType::Council => Self::Council,
             RoutineStepType::Gate => Self::Gate,
+            RoutineStepType::Human => Self::Human,
             RoutineStepType::Terminal => Self::Terminal,
             RoutineStepType::TerminalFail => Self::TerminalFail,
         }
@@ -53,6 +56,9 @@ pub enum RoutineGraphEdgeCondition {
     Always,
     OnPass,
     OnFail,
+    Approved,
+    ChangesRequested,
+    Rejected,
 }
 
 impl RoutineGraphEdgeCondition {
@@ -61,6 +67,9 @@ impl RoutineGraphEdgeCondition {
             "always" => Some(Self::Always),
             "on_pass" => Some(Self::OnPass),
             "on_fail" => Some(Self::OnFail),
+            "approved" => Some(Self::Approved),
+            "changes_requested" => Some(Self::ChangesRequested),
+            "rejected" => Some(Self::Rejected),
             _ => None,
         }
     }
@@ -72,6 +81,9 @@ impl From<RoutineEdgeCondition> for RoutineGraphEdgeCondition {
             RoutineEdgeCondition::Always => Self::Always,
             RoutineEdgeCondition::OnPass => Self::OnPass,
             RoutineEdgeCondition::OnFail => Self::OnFail,
+            RoutineEdgeCondition::Approved => Self::Approved,
+            RoutineEdgeCondition::ChangesRequested => Self::ChangesRequested,
+            RoutineEdgeCondition::Rejected => Self::Rejected,
         }
     }
 }
@@ -84,6 +96,8 @@ pub struct RoutineGraphStep {
     pub has_agent: bool,
     pub has_council: bool,
     pub has_lambda: bool,
+    /// Validated request contract for human steps.
+    pub human_request: Option<crate::routines::human_review::HumanStepSpec>,
 }
 
 impl RoutineGraphStep {
@@ -95,6 +109,11 @@ impl RoutineGraphStep {
             has_agent: step.agent.is_some(),
             has_council: step.council.is_some(),
             has_lambda: false,
+            human_request: step
+                .config
+                .get("request")
+                .cloned()
+                .and_then(|value| crate::routines::human_review::HumanStepSpec::parse(value).ok()),
         }
     }
 }

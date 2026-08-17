@@ -87,6 +87,10 @@ fn test_manifest() -> Manifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
 
     let agent = AgentManifest {
@@ -137,8 +141,7 @@ fn test_manifest() -> Manifest {
 #[tokio::test]
 async fn provider_with_memory_adds_tools() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
+    let memory = MarkdownMemory::new(dir.path());
 
     let provider = Provider::builder()
         .with_manifest(test_manifest())
@@ -171,18 +174,12 @@ async fn provider_with_memory_adds_tools() {
         names.contains(&"forget_memory"),
         "should have forget_memory"
     );
-    assert!(
-        names.contains(&"save_artifact"),
-        "should have save_artifact"
-    );
-    assert!(
-        names.contains(&"read_artifact"),
-        "should have read_artifact"
-    );
-    assert!(
-        names.contains(&"delete_artifact"),
-        "should have delete_artifact"
-    );
+    for legacy_name in ["save_artifact", "read_artifact", "delete_artifact"] {
+        assert!(
+            !names.contains(&legacy_name),
+            "memory must not expose legacy artifact tool {legacy_name}"
+        );
+    }
 }
 
 #[tokio::test]
@@ -213,8 +210,7 @@ async fn provider_without_memory_has_no_memory_tools() {
 #[tokio::test]
 async fn memory_store_and_recall() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let memory = Arc::new(MarkdownMemory::new(dir.path()));
     let scope = MemoryScope::new("test-agent", Some("test-project"));
 
     use nenjo::memory::Memory;
@@ -255,8 +251,7 @@ async fn memory_store_and_recall() {
 #[tokio::test]
 async fn memory_forget() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let memory = Arc::new(MarkdownMemory::new(dir.path()));
     let scope = MemoryScope::new("test-agent", Some("test-project"));
 
     use nenjo::memory::Memory;
@@ -289,8 +284,7 @@ async fn memory_forget() {
 #[tokio::test]
 async fn memory_vars_injected_into_prompts() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let memory = Arc::new(MarkdownMemory::new(dir.path()));
     let scope = MemoryScope::new("memory-agent", Some("test-project"));
 
     use nenjo::memory::Memory;
@@ -350,8 +344,7 @@ async fn memory_vars_injected_into_prompts() {
 #[tokio::test]
 async fn memory_vars_empty_when_no_facts() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let memory = Arc::new(MarkdownMemory::new(dir.path()));
     let scope = MemoryScope::new("empty-agent", Some("empty-project"));
 
     let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
@@ -361,56 +354,6 @@ async fn memory_vars_empty_when_no_facts() {
     assert!(vars.is_empty(), "should be empty when no facts exist");
 }
 
-#[tokio::test]
-async fn artifact_vars_injected() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
-    let scope = MemoryScope::new("test-agent", Some("test-project"));
-
-    use nenjo::memory::Memory;
-
-    memory
-        .save_artifact(
-            &scope.artifacts_project,
-            "auth-prd.md",
-            "Auth PRD",
-            "architect",
-            "# Auth PRD\nOAuth2 flow",
-        )
-        .await
-        .unwrap();
-    memory
-        .save_artifact(
-            &scope.artifacts_global,
-            "standards.md",
-            "Coding standards",
-            "system",
-            "# Standards\nUse Rust",
-        )
-        .await
-        .unwrap();
-
-    let vars = nenjo::memory::build_artifact_vars(memory.as_ref(), &scope)
-        .await
-        .unwrap();
-
-    assert!(vars.contains_key("artifacts"), "should have artifacts key");
-    assert!(
-        vars.contains_key("artifacts.project"),
-        "should have project key"
-    );
-    assert!(
-        vars.contains_key("artifacts.workspace"),
-        "should have workspace key"
-    );
-
-    let full = &vars["artifacts"];
-    assert!(full.contains("auth-prd.md"));
-    assert!(full.contains("standards.md"));
-    assert!(full.contains("architect"));
-}
-
 // ---------------------------------------------------------------------------
 // Scope isolation tests
 // ---------------------------------------------------------------------------
@@ -418,8 +361,7 @@ async fn artifact_vars_injected() {
 #[tokio::test]
 async fn scope_project_agent_three_tiers_isolated() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let memory = Arc::new(MarkdownMemory::new(dir.path()));
 
     use nenjo::memory::Memory;
 
@@ -463,8 +405,7 @@ async fn scope_project_agent_three_tiers_isolated() {
 #[tokio::test]
 async fn scope_system_agent_collapses_to_core() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let memory = Arc::new(MarkdownMemory::new(dir.path()));
 
     use nenjo::memory::Memory;
 
@@ -493,8 +434,7 @@ async fn scope_system_agent_collapses_to_core() {
 #[tokio::test]
 async fn scope_shared_visible_across_agents() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
+    let memory = Arc::new(MarkdownMemory::new(dir.path()));
 
     use nenjo::memory::Memory;
 
@@ -521,80 +461,6 @@ async fn scope_shared_visible_across_agents() {
     assert!(reviewer_project.is_empty());
 }
 
-#[tokio::test]
-async fn scope_artifacts_shared_across_agents() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
-
-    use nenjo::memory::Memory;
-
-    let scope_architect = MemoryScope::new("architect", Some("webapp"));
-    let scope_coder = MemoryScope::new("coder", Some("webapp"));
-
-    // Architect saves a project artifact
-    memory
-        .save_artifact(
-            &scope_architect.artifacts_project,
-            "design.md",
-            "System design",
-            "architect",
-            "# Design doc",
-        )
-        .await
-        .unwrap();
-
-    // Coder can see it (same project artifacts path)
-    let vars = nenjo::memory::build_artifact_vars(memory.as_ref(), &scope_coder)
-        .await
-        .unwrap();
-    assert!(vars["artifacts.project"].contains("design.md"));
-    assert!(vars["artifacts.project"].contains("architect"));
-
-    // Coder can read the full content
-    let content = memory
-        .read_artifact(&scope_coder.artifacts_project, "design.md")
-        .await
-        .unwrap()
-        .unwrap();
-    assert!(content.contains("# Design doc"));
-}
-
-#[tokio::test]
-async fn scope_artifacts_global_visible_to_all() {
-    let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = Arc::new(MarkdownMemory::new(dir.path(), ws_dir.path()));
-
-    use nenjo::memory::Memory;
-
-    let scope_a = MemoryScope::new("agent-a", Some("project-x"));
-    let scope_b = MemoryScope::new("agent-b", Some("project-y"));
-    let scope_sys = MemoryScope::new("system-agent", None);
-
-    // Agent A saves a global artifact
-    memory
-        .save_artifact(
-            &scope_a.artifacts_global,
-            "guide.md",
-            "Onboarding guide",
-            "agent-a",
-            "# Guide",
-        )
-        .await
-        .unwrap();
-
-    // All agents see it regardless of project
-    for scope in [&scope_a, &scope_b, &scope_sys] {
-        let entries = memory
-            .list_artifacts(&scope.artifacts_global)
-            .await
-            .unwrap();
-        assert_eq!(entries.len(), 1, "global artifact should be visible");
-        assert_eq!(entries[0].filename, "guide.md");
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Ability & domain memory flow
 // ---------------------------------------------------------------------------
@@ -604,8 +470,7 @@ async fn ability_inherits_memory_vars() {
     use nenjo::manifest::AbilityManifest;
 
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
+    let memory = MarkdownMemory::new(dir.path());
 
     use nenjo::memory::Memory;
 
@@ -626,6 +491,10 @@ async fn ability_inherits_memory_vars() {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
 
     let ability = AbilityManifest {
@@ -733,8 +602,7 @@ async fn domain_expansion_preserves_memory() {
     use nenjo::manifest::DomainManifest;
 
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
+    let memory = MarkdownMemory::new(dir.path());
 
     use nenjo::memory::Memory;
 
@@ -754,6 +622,10 @@ async fn domain_expansion_preserves_memory() {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
 
     let domain = DomainManifest {
@@ -852,10 +724,6 @@ async fn domain_expansion_preserves_memory() {
         names.contains(&"save_memory"),
         "domain runner should have save_memory"
     );
-    assert!(
-        names.contains(&"save_artifact"),
-        "domain runner should have save_artifact"
-    );
 }
 
 // ---------------------------------------------------------------------------
@@ -865,8 +733,7 @@ async fn domain_expansion_preserves_memory() {
 #[tokio::test]
 async fn runner_with_memory_executes() {
     let dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(dir.path(), ws_dir.path());
+    let memory = MarkdownMemory::new(dir.path());
 
     let provider = Provider::builder()
         .with_manifest(test_manifest())

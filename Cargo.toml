@@ -1,6 +1,7 @@
 [workspace]
 resolver = "2"
 members = [
+    "crates/content",
     "crates/crypto-auth",
     "crates/harness",
     "crates/knowledge",
@@ -32,6 +33,7 @@ repository = "https://github.com/nenjo-ai/nenjo"
 
 [workspace.dependencies]
 nenjo = { path = "crates/nenjo", version = "0.31.0" }
+nenjo-content = { path = "crates/content", version = "0.31.0" }
 nenjo-crypto-auth = { path = "crates/crypto-auth", version = "0.31.0" }
 nenjo-platform = { path = "crates/platform", version = "0.31.0" }
 nenjo-packages = { path = "crates/packages", version = "0.31.0" }
@@ -77,6 +79,7 @@ glob = "0.3"
 hkdf = "0.12"
 indicatif = "0.18"
 minijinja = "2"
+mime = "0.3.17"
 nanohtml2text = "0.1"
 parking_lot = "0.12.5"
 quick-xml = "0.41.0"

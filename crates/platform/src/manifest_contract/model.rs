@@ -59,6 +59,10 @@ impl ModelRecord {
             context_window: self.context_window,
             base_url: self.base_url.clone(),
             native_tools: self.native_tools.clone(),
+            capabilities: self.capabilities.clone(),
+            input_modalities: self.input_modalities.clone(),
+            output_modalities: self.output_modalities.clone(),
+            execution_modes: self.execution_modes.clone(),
         }
     }
 

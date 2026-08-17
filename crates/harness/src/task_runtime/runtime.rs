@@ -14,10 +14,12 @@ use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use super::store::{CancellationOutcome, EnqueueOutcome, OccurrenceOutcome, TaskRuntimeStore};
+use super::store::{
+    CancellationOutcome, ContinuationOutcome, EnqueueOutcome, OccurrenceOutcome, TaskRuntimeStore,
+};
 use super::types::{
-    TaskExecutionState, TaskExecutorOutcome, TaskInboxItem, TaskRuntimeEvent, TaskSubmission,
-    TaskTrigger,
+    TaskExecutionState, TaskExecutorOutcome, TaskInboxAction, TaskInboxItem, TaskRuntimeEvent,
+    TaskSubmission, TaskTrigger,
 };
 
 /// Durable inbox, shared concurrency gate, and local schedule coordinator.
@@ -49,7 +51,10 @@ impl<S, Execute> Clone for TaskRuntime<S, Execute> {
 impl<S, Execute, ExecuteFuture> TaskRuntime<S, Execute>
 where
     S: TaskRuntimeStore + 'static,
-    Execute: Fn(TaskSubmission, CancellationToken) -> ExecuteFuture + Send + Sync + 'static,
+    Execute: Fn(TaskSubmission, TaskInboxAction, CancellationToken) -> ExecuteFuture
+        + Send
+        + Sync
+        + 'static,
     ExecuteFuture: Future<Output = Result<TaskExecutorOutcome>> + Send + 'static,
 {
     /// Construct an always-active task runtime with a bounded execution limit.
@@ -174,6 +179,34 @@ where
         Ok(())
     }
 
+    /// Persist and queue one human-review continuation before transport ACK.
+    pub async fn continue_execution(
+        &self,
+        execution_run_id: uuid::Uuid,
+        request_id: uuid::Uuid,
+        resolution_revision: u64,
+    ) -> Result<ContinuationOutcome> {
+        let outcome = self
+            .inner
+            .store
+            .enqueue_continuation(
+                execution_run_id,
+                TaskInboxAction::Continue {
+                    request_id,
+                    resolution_revision,
+                },
+            )
+            .await?;
+        if let ContinuationOutcome::Queued(item) = &outcome {
+            self.emit(item.as_ref().clone());
+            self.inner
+                .dispatch_tx
+                .send(item.as_ref().clone())
+                .map_err(|_| anyhow!("task runtime is stopped"))?;
+        }
+        Ok(outcome)
+    }
+
     /// Replace hydrated definitions while retaining locally advanced unchanged schedules.
     pub async fn replace_schedules(
         &self,
@@ -220,16 +253,10 @@ where
             }
         };
         self.emit(running.clone());
-        let result = (self.inner.execute)(running.submission.clone(), cancellation).await;
+        let result =
+            (self.inner.execute)(running.submission.clone(), running.action, cancellation).await;
         self.remove_running(execution_run_id)?;
-        let state = match result {
-            Ok(TaskExecutorOutcome::Completed) => TaskExecutionState::Completed,
-            Ok(TaskExecutorOutcome::Failed(error)) => TaskExecutionState::Failed { error },
-            Ok(TaskExecutorOutcome::Cancelled) => TaskExecutionState::Cancelled,
-            Err(error) => TaskExecutionState::Failed {
-                error: error_chain(&error),
-            },
-        };
+        let state = state_from_executor_result(result);
         if let Some(item) = self.inner.store.transition(execution_run_id, state).await? {
             self.emit(item)
         }
@@ -296,6 +323,18 @@ where
             }
         }
         Ok(())
+    }
+}
+
+fn state_from_executor_result(result: Result<TaskExecutorOutcome>) -> TaskExecutionState {
+    match result {
+        Ok(TaskExecutorOutcome::Completed) => TaskExecutionState::Completed,
+        Ok(TaskExecutorOutcome::Failed(error)) => TaskExecutionState::Failed { error },
+        Ok(TaskExecutorOutcome::Cancelled) => TaskExecutionState::Cancelled,
+        Ok(TaskExecutorOutcome::WaitingForHuman) => TaskExecutionState::WaitingForHuman,
+        Err(error) => TaskExecutionState::Failed {
+            error: error_chain(&error),
+        },
     }
 }
 

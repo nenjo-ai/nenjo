@@ -29,24 +29,6 @@ impl<'a> PlatformResourceResolver<'a> {
             .ok_or_else(|| anyhow!("agent not found: {slug}"))
     }
 
-    pub fn routine(&self, id: Uuid) -> Result<Slug> {
-        self.manifest
-            .routines
-            .iter()
-            .find(|routine| stable_resource_id("routine", &routine.slug) == id)
-            .map(|routine| routine.slug.clone())
-            .ok_or_else(|| anyhow!("routine not found: {id}"))
-    }
-
-    pub fn routine_id(&self, slug: &Slug) -> Result<Uuid> {
-        self.manifest
-            .routines
-            .iter()
-            .any(|routine| routine.slug == *slug)
-            .then(|| stable_resource_id("routine", slug))
-            .ok_or_else(|| anyhow!("routine not found: {slug}"))
-    }
-
     pub fn project(&self, id: Uuid) -> Result<Option<Slug>> {
         if id.is_nil() {
             return Ok(None);

@@ -3,14 +3,14 @@ use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use nenjo_models::ChatMessage;
+use nenjo_models::ConversationMessage;
 use nenjo_sessions::{
     ChatSessionUpsert, CheckpointQuery, DomainSessionUpsert, SessionCheckpoint,
     SessionCheckpointUpdate, SessionKind, SessionLeaseGrant, SessionLeaseRequest, SessionOwnerKind,
     SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionTranscriptAppend,
-    SessionTranscriptChatMessage, SessionTranscriptEvent, SessionTranscriptEventPayload,
-    SessionTranscriptRecord, SessionTransition, SessionUpsert, SessionWriteOutcome,
-    TaskSessionUpsert, TokenUsage, TraceEvent, TracePhase, TranscriptQuery,
+    SessionTranscriptEvent, SessionTranscriptEventPayload, SessionTranscriptRecord,
+    SessionTransition, SessionUpsert, SessionWriteOutcome, TaskSessionUpsert, TokenUsage,
+    TraceEvent, TracePhase, TranscriptQuery,
 };
 use tokio::sync::mpsc;
 use tokio::sync::oneshot;
@@ -484,51 +484,35 @@ pub fn task_session_upsert_event(upsert: TaskSessionUpsert) -> SessionRuntimeEve
     })
 }
 
-pub fn chat_message_to_transcript(message: &ChatMessage) -> SessionTranscriptChatMessage {
-    SessionTranscriptChatMessage {
-        role: message.role.clone(),
-        content: message.content.clone(),
-    }
-}
-
-pub fn transcript_message_to_chat(message: SessionTranscriptChatMessage) -> ChatMessage {
-    ChatMessage {
-        role: message.role,
-        content: message.content,
-    }
-}
-
-fn domain_activated_to_chat(domain_command: &str, domain_name: &str) -> ChatMessage {
-    ChatMessage::developer(format!(
+fn domain_activated_to_message(domain_command: &str, domain_name: &str) -> ConversationMessage {
+    ConversationMessage::developer(format!(
         "Domain activated: {domain_command} ({domain_name}). The user explicitly activated this domain at this point in the conversation. Continue with this domain's guidance, capabilities, and permissions active."
     ))
 }
 
-fn domain_deactivated_to_chat(domain_command: &str, domain_name: &str) -> ChatMessage {
-    ChatMessage::developer(format!(
+fn domain_deactivated_to_message(domain_command: &str, domain_name: &str) -> ConversationMessage {
+    ConversationMessage::developer(format!(
         "Domain deactivated: {domain_command} ({domain_name}). The user explicitly exited this domain at this point in the conversation. Continue without this domain's expanded permissions active."
     ))
 }
 
-pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ChatMessage> {
+pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ConversationMessage> {
     events
         .iter()
         .filter_map(|event| match &event.payload {
-            SessionTranscriptEventPayload::ChatMessage { message } => {
-                Some(transcript_message_to_chat(message.clone()))
-            }
+            SessionTranscriptEventPayload::ConversationMessage { message } => Some(message.clone()),
             SessionTranscriptEventPayload::DomainActivated {
                 domain_command,
                 domain_name,
                 ..
-            } => Some(domain_activated_to_chat(domain_command, domain_name)),
+            } => Some(domain_activated_to_message(domain_command, domain_name)),
             SessionTranscriptEventPayload::DomainDeactivated {
                 domain_command,
                 domain_name,
                 ..
-            } => Some(domain_deactivated_to_chat(domain_command, domain_name)),
+            } => Some(domain_deactivated_to_message(domain_command, domain_name)),
             SessionTranscriptEventPayload::TurnInterrupted { reason } => Some(
-                ChatMessage::developer(format!("Previous turn was interrupted: {reason}")),
+                ConversationMessage::developer(format!("Previous turn was interrupted: {reason}")),
             ),
             _ => None,
         })
@@ -618,7 +602,7 @@ pub fn transcript_payloads_from_turn_event(
             parent_tool_name: parent_tool_name.clone(),
             tool_name: tool_name.clone(),
             success: result.success,
-            output_preview: Some(preview(&result.output)),
+            output_preview: Some(preview(&result.output.text_content())),
             error_preview: result.error.as_deref().map(preview),
         }],
         nenjo::TurnEvent::AbilityCompleted {
@@ -634,8 +618,8 @@ pub fn transcript_payloads_from_turn_event(
             final_output: final_output.clone(),
         }],
         nenjo::TurnEvent::TranscriptMessage { message } => {
-            vec![SessionTranscriptEventPayload::ChatMessage {
-                message: chat_message_to_transcript(message),
+            vec![SessionTranscriptEventPayload::ConversationMessage {
+                message: message.clone(),
             }]
         }
         nenjo::TurnEvent::AssistantResponse { .. } => Vec::new(),
@@ -725,7 +709,7 @@ pub fn trace_events_from_turn_event(
             TracePhase::ToolCompleted,
             Some(tool_name.clone()),
             Some(result.success),
-            Some(preview(&result.output)),
+            Some(preview(&result.output.text_content())),
             serde_json::json!({
                 "batch_id": batch_id,
                 "tool_call_id": tool_call_id,
@@ -879,8 +863,8 @@ pub fn trace_events_from_turn_event(
             TracePhase::PromptRendered,
             None,
             None,
-            Some(preview(&message.content)),
-            serde_json::json!({ "message_role": message.role }),
+            conversation_message_preview(message),
+            serde_json::json!({ "message_kind": conversation_message_kind(message) }),
             TraceEventFields::default(),
         )],
         nenjo::TurnEvent::Paused => vec![trace_event(
@@ -973,9 +957,39 @@ fn preview(value: &str) -> String {
     out
 }
 
+fn conversation_message_kind(message: &ConversationMessage) -> &'static str {
+    match message {
+        ConversationMessage::Chat(_) => "chat",
+        ConversationMessage::AssistantToolCalls { .. } => "assistant_tool_calls",
+        ConversationMessage::ToolResults(_) => "tool_results",
+        ConversationMessage::ArtifactAnalysis(_) => "artifact_analysis",
+    }
+}
+
+fn conversation_message_preview(message: &ConversationMessage) -> Option<String> {
+    let text = match message {
+        ConversationMessage::Chat(chat) => chat.content.clone(),
+        ConversationMessage::AssistantToolCalls { text, tool_calls } => text
+            .clone()
+            .unwrap_or_else(|| format!("{} tool call(s)", tool_calls.len())),
+        ConversationMessage::ToolResults(results) => results
+            .iter()
+            .map(|result| result.output.text_content())
+            .filter(|text| !text.is_empty())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.clone(),
+    };
+    (!text.is_empty()).then(|| preview(&text))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nenjo_models::{
+        ArtifactId, ArtifactInput, ArtifactInputSource, ArtifactRef, ArtifactSize, MediaType,
+        Sha256Digest, ToolResultMessage,
+    };
     use nenjo_sessions::{SessionTranscriptEvent, SessionTranscriptEventPayload};
 
     #[test]
@@ -994,11 +1008,54 @@ mod tests {
         let history = replay_transcript_history(&events);
 
         assert_eq!(history.len(), 1);
-        assert_eq!(history[0].role, "developer");
+        let restored = history[0].as_chat().unwrap();
+        assert_eq!(restored.role, nenjo_models::ChatRole::Developer);
         assert_eq!(
-            history[0].content,
+            restored.content,
             "Previous turn was interrupted: cancelled by user"
         );
+    }
+
+    #[test]
+    fn transcript_roundtrip_preserves_artifact_refs_without_bytes() {
+        let artifact = ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).unwrap(),
+            Sha256Digest::parse(&format!("sha256:{}", "e".repeat(64))).unwrap(),
+            MediaType::parse("image/png").unwrap(),
+            ArtifactSize::new(99),
+        );
+        let original = ConversationMessage::chat(
+            nenjo_models::ChatMessage::user("inspect this image").with_artifacts(vec![
+                ArtifactInput::new(artifact, ArtifactInputSource::UserAttachment),
+            ]),
+        );
+
+        let encoded = serde_json::to_value(&original).unwrap();
+        let restored: ConversationMessage = serde_json::from_value(encoded.clone()).unwrap();
+
+        assert_eq!(restored, original);
+        assert!(encoded.get("bytes").is_none());
+        assert!(encoded.to_string().find("base64").is_none());
+    }
+
+    #[test]
+    fn transcript_replay_preserves_semantic_tool_results() {
+        let event = SessionTranscriptEvent {
+            session_id: Uuid::new_v4(),
+            seq: 1,
+            recorded_at: Utc::now(),
+            turn_id: None,
+            payload: SessionTranscriptEventPayload::ConversationMessage {
+                message: ConversationMessage::tool_result(ToolResultMessage::text(
+                    "call-1", "done",
+                )),
+            },
+        };
+
+        assert!(matches!(
+            replay_transcript_history(&[event]).as_slice(),
+            [ConversationMessage::ToolResults(results)] if results[0].tool_call_id == "call-1"
+        ));
     }
 
     #[test]
@@ -1082,7 +1139,7 @@ mod tests {
                 ability_tool_name: "ability.review".to_string(),
                 ability_name: "Review".to_string(),
                 task_input: "inspect this".to_string(),
-                caller_history: vec![ChatMessage::user("please inspect")],
+                caller_history: vec![ConversationMessage::user("please inspect")],
             },
         )
         .remove(0);

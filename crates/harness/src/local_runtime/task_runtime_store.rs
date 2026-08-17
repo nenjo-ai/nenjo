@@ -10,8 +10,8 @@ use tokio::sync::Mutex;
 use uuid::Uuid;
 
 use crate::task_runtime::{
-    CancellationOutcome, EnqueueOutcome, OccurrenceOutcome, TaskExecutionState, TaskInboxItem,
-    TaskRuntimeStore, TaskSchedule,
+    CancellationOutcome, ContinuationOutcome, EnqueueOutcome, OccurrenceOutcome,
+    TaskExecutionState, TaskInboxAction, TaskInboxItem, TaskRuntimeStore, TaskSchedule,
 };
 
 #[derive(Debug, Default, Serialize, Deserialize)]
@@ -167,6 +167,38 @@ impl TaskRuntimeStore for FileTaskRuntimeStore {
             .collect())
     }
 
+    async fn enqueue_continuation(
+        &self,
+        execution_run_id: Uuid,
+        action: TaskInboxAction,
+    ) -> Result<ContinuationOutcome> {
+        if !matches!(action, TaskInboxAction::Continue { .. }) {
+            bail!("continuation intake requires a continue action");
+        }
+        let mut snapshot = self.snapshot.lock().await;
+        let Some(item) = snapshot
+            .inbox
+            .iter_mut()
+            .find(|item| item.submission.execution_run_id == execution_run_id)
+        else {
+            return Ok(ContinuationOutcome::Missing);
+        };
+        if item.action == action {
+            return Ok(ContinuationOutcome::Duplicate);
+        }
+        if item.state != TaskExecutionState::WaitingForHuman {
+            return Ok(ContinuationOutcome::Inactive);
+        }
+        item.action = action;
+        item.state = TaskExecutionState::Queued;
+        item.revision = item.revision.saturating_add(1);
+        item.updated_at = Utc::now();
+        item.recovered = false;
+        let queued = item.clone();
+        self.persist_blocking(&snapshot)?;
+        Ok(ContinuationOutcome::Queued(Box::new(queued)))
+    }
+
     async fn transition(
         &self,
         execution_run_id: Uuid,
@@ -198,9 +230,29 @@ impl TaskRuntimeStore for FileTaskRuntimeStore {
                 | (TaskExecutionState::Running, TaskExecutionState::Completed)
                 | (
                     TaskExecutionState::Running,
+                    TaskExecutionState::WaitingForHuman
+                )
+                | (
+                    TaskExecutionState::Running,
                     TaskExecutionState::Failed { .. }
                 )
                 | (TaskExecutionState::Running, TaskExecutionState::Cancelled)
+                | (
+                    TaskExecutionState::WaitingForHuman,
+                    TaskExecutionState::Running
+                )
+                | (
+                    TaskExecutionState::WaitingForHuman,
+                    TaskExecutionState::Completed
+                )
+                | (
+                    TaskExecutionState::WaitingForHuman,
+                    TaskExecutionState::Failed { .. }
+                )
+                | (
+                    TaskExecutionState::WaitingForHuman,
+                    TaskExecutionState::Cancelled
+                )
         );
         if !valid {
             bail!(
@@ -214,6 +266,7 @@ impl TaskRuntimeStore for FileTaskRuntimeStore {
             TaskExecutionState::Rejected { reason } => truncate(reason, 500),
             TaskExecutionState::Queued
             | TaskExecutionState::Running
+            | TaskExecutionState::WaitingForHuman
             | TaskExecutionState::Completed
             | TaskExecutionState::Cancelled => {}
         }
@@ -251,7 +304,7 @@ impl TaskRuntimeStore for FileTaskRuntimeStore {
                 self.persist_blocking(&snapshot)?;
                 Ok(CancellationOutcome::Queued(Box::new(changed)))
             }
-            TaskExecutionState::Running => {
+            TaskExecutionState::Running | TaskExecutionState::WaitingForHuman => {
                 item.state = TaskExecutionState::Cancelled;
                 item.revision = item.revision.saturating_add(1);
                 item.updated_at = Utc::now();

@@ -32,6 +32,9 @@ use crate::native::MediaOperation;
 #[serde(rename_all = "snake_case")]
 pub enum ModelCapabilityId {
     Chat,
+    AnalyzeImage,
+    AnalyzeVideo,
+    AnalyzeDocument,
     TranscribeAudio,
     GenerateSpeech,
     GenerateImage,
@@ -47,6 +50,9 @@ impl ModelCapabilityId {
     /// Every assignable operation, in stable display and serialization order.
     pub const ALL: &'static [Self] = &[
         Self::Chat,
+        Self::AnalyzeImage,
+        Self::AnalyzeVideo,
+        Self::AnalyzeDocument,
         Self::TranscribeAudio,
         Self::GenerateSpeech,
         Self::GenerateImage,
@@ -61,6 +67,9 @@ impl ModelCapabilityId {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Chat => "chat",
+            Self::AnalyzeImage => "analyze_image",
+            Self::AnalyzeVideo => "analyze_video",
+            Self::AnalyzeDocument => "analyze_document",
             Self::TranscribeAudio => "transcribe_audio",
             Self::GenerateSpeech => "generate_speech",
             Self::GenerateImage => "generate_image",
@@ -76,6 +85,9 @@ impl ModelCapabilityId {
     pub const fn label(self) -> &'static str {
         match self {
             Self::Chat => "Chat",
+            Self::AnalyzeImage => "Analyze image",
+            Self::AnalyzeVideo => "Analyze video",
+            Self::AnalyzeDocument => "Analyze document",
             Self::TranscribeAudio => "Transcribe audio",
             Self::GenerateSpeech => "Generate speech",
             Self::GenerateImage => "Generate image",
@@ -101,6 +113,9 @@ impl std::str::FromStr for ModelCapabilityId {
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim() {
             "chat" => Ok(Self::Chat),
+            "analyze_image" => Ok(Self::AnalyzeImage),
+            "analyze_video" => Ok(Self::AnalyzeVideo),
+            "analyze_document" => Ok(Self::AnalyzeDocument),
             "transcribe_audio" => Ok(Self::TranscribeAudio),
             "generate_speech" => Ok(Self::GenerateSpeech),
             "generate_image" => Ok(Self::GenerateImage),
@@ -136,6 +151,14 @@ impl TryFrom<MediaOperation> for ModelCapabilityId {
     type Error = String;
 
     fn try_from(value: MediaOperation) -> Result<Self, Self::Error> {
+        value.as_str().parse()
+    }
+}
+
+impl TryFrom<ModelCapabilityId> for MediaOperation {
+    type Error = String;
+
+    fn try_from(value: ModelCapabilityId) -> Result<Self, Self::Error> {
         value.as_str().parse()
     }
 }
@@ -196,6 +219,18 @@ pub fn assignable_operation_modality_hints(cap: &str) -> Option<CapabilityModali
     Some(match operation {
         ModelCapabilityId::Chat => CapabilityModalityHints {
             inputs: &[ModelModality::Text],
+            outputs: &[ModelModality::Text],
+        },
+        ModelCapabilityId::AnalyzeImage => CapabilityModalityHints {
+            inputs: &[ModelModality::Text, ModelModality::Image],
+            outputs: &[ModelModality::Text],
+        },
+        ModelCapabilityId::AnalyzeVideo => CapabilityModalityHints {
+            inputs: &[ModelModality::Text, ModelModality::Video],
+            outputs: &[ModelModality::Text],
+        },
+        ModelCapabilityId::AnalyzeDocument => CapabilityModalityHints {
+            inputs: &[ModelModality::Text, ModelModality::File],
             outputs: &[ModelModality::Text],
         },
         ModelCapabilityId::TranscribeAudio => CapabilityModalityHints {
@@ -363,8 +398,16 @@ mod tests {
     }
 
     #[test]
+    fn analysis_capabilities_do_not_convert_to_native_operations() {
+        assert!(MediaOperation::try_from(ModelCapabilityId::AnalyzeImage).is_err());
+        assert!(MediaOperation::try_from(ModelCapabilityId::AnalyzeVideo).is_err());
+        assert!(MediaOperation::try_from(ModelCapabilityId::AnalyzeDocument).is_err());
+    }
+
+    #[test]
     fn assignable_operation_predicate_uses_the_canonical_enum() {
         assert!(is_assignable_operation_capability("chat"));
+        assert!(is_assignable_operation_capability("analyze_image"));
         assert!(is_assignable_operation_capability("generate_image"));
         assert!(!is_assignable_operation_capability("realtime_voice_agent"));
     }
@@ -415,19 +458,38 @@ mod tests {
     }
 
     #[test]
-    fn canonical_operation_set_is_chat_plus_executable_native_operations() {
+    fn canonical_operation_set_separates_analysis_from_native_operations() {
         assert_eq!(ASSIGNABLE_OPERATION_CAPABILITIES, ModelCapabilityId::ALL);
         for operation in ASSIGNABLE_OPERATION_CAPABILITIES {
-            if *operation == ModelCapabilityId::Chat {
-                continue;
+            match operation {
+                ModelCapabilityId::Chat
+                | ModelCapabilityId::AnalyzeImage
+                | ModelCapabilityId::AnalyzeVideo
+                | ModelCapabilityId::AnalyzeDocument => {
+                    assert!(
+                        !MediaOperation::ALL
+                            .iter()
+                            .any(|native| native.as_str() == operation.as_str()),
+                        "{operation} must not create a worker-native media tool"
+                    );
+                }
+                ModelCapabilityId::TranscribeAudio
+                | ModelCapabilityId::GenerateSpeech
+                | ModelCapabilityId::GenerateImage
+                | ModelCapabilityId::EditImage
+                | ModelCapabilityId::GenerateVideo
+                | ModelCapabilityId::EditVideo
+                | ModelCapabilityId::ImageToVideo
+                | ModelCapabilityId::ReferenceToVideo
+                | ModelCapabilityId::ExtendVideo => {
+                    assert!(
+                        MediaOperation::ALL
+                            .iter()
+                            .any(|native| native.as_str() == operation.as_str()),
+                        "{operation} must have a worker-native operation"
+                    );
+                }
             }
-            assert!(
-                MediaOperation::ALL
-                    .iter()
-                    .any(|native| native.as_str() == operation.as_str()),
-                "{} must have a worker-native operation",
-                operation
-            );
         }
     }
 }

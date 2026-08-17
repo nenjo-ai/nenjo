@@ -99,6 +99,7 @@ impl ModelProvider for RouterProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        request.ensure_artifacts_prepared()?;
         let (provider_idx, resolved_model) = self.resolve(model);
         let (_, provider) = &self.providers[provider_idx];
         provider.chat(request, &resolved_model, temperature).await
@@ -122,6 +123,21 @@ impl ModelProvider for RouterProvider {
             .get(self.default_index)
             .map(|(_, p)| p.supports_developer_role(model))
             .unwrap_or(false)
+    }
+
+    fn artifact_input_transport(
+        &self,
+        model: &str,
+        capability: crate::ModelCapabilityId,
+        media_type: &crate::MediaType,
+    ) -> crate::ArtifactInputTransport {
+        let (provider_idx, resolved_model) = self.resolve(model);
+        self.providers
+            .get(provider_idx)
+            .map(|(_, provider)| {
+                provider.artifact_input_transport(&resolved_model, capability, media_type)
+            })
+            .unwrap_or(crate::ArtifactInputTransport::Unsupported)
     }
 
     async fn warmup(&self) -> anyhow::Result<()> {

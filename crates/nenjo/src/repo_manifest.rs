@@ -51,6 +51,9 @@ pub struct RoutineStepManifestV1 {
     pub council: Option<String>,
     #[serde(default)]
     pub config: serde_json::Value,
+    /// Human-review request contract. Valid only when `type` is `human`.
+    #[serde(default)]
+    pub request: Option<serde_json::Value>,
     #[serde(default)]
     pub position: Option<RoutineStepPositionV1>,
     #[serde(default)]
@@ -71,6 +74,9 @@ pub struct RoutineEdgeManifestV1 {
     pub to: String,
     #[serde(default = "default_routine_edge_condition")]
     pub condition: String,
+    /// Human-review outcome alias for `condition`.
+    #[serde(default)]
+    pub outcome: Option<String>,
     #[serde(default)]
     pub max_attempts: Option<u32>,
     #[serde(default)]

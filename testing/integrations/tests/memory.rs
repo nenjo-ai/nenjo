@@ -1,4 +1,4 @@
-//! E2E tests for memory and artifact tools with a real LLM.
+//! E2E tests for persistent memory tools with a real LLM.
 //!
 //! Requires `OPENROUTER_API_KEY` environment variable.
 //! Tests are skipped automatically if the key is not set.
@@ -48,6 +48,10 @@ fn make_model() -> ModelManifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     }
 }
 
@@ -96,8 +100,7 @@ async fn memory_store_writes_to_correct_scope() {
     };
 
     let mem_dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(mem_dir.path(), ws_dir.path());
+    let memory = MarkdownMemory::new(mem_dir.path());
 
     let model = make_model();
     let project = ProjectManifest {
@@ -168,96 +171,5 @@ async fn memory_store_writes_to_correct_scope() {
     assert!(
         !files.is_empty(),
         "should have at least one category file in project dir"
-    );
-}
-
-/// Agent saves an artifact via save_artifact, verify the file and manifest
-/// land in the workspace dir.
-#[tokio::test]
-async fn save_artifact_writes_to_workspace() {
-    let api_key = match get_api_key() {
-        Some(key) => key,
-        None => {
-            eprintln!("OPENROUTER_API_KEY not set — skipping");
-            return;
-        }
-    };
-
-    let mem_dir = tempfile::tempdir().unwrap();
-    let ws_dir = tempfile::tempdir().unwrap();
-    let memory = MarkdownMemory::new(mem_dir.path(), ws_dir.path());
-
-    let model = make_model();
-    let project = ProjectManifest {
-        name: "webapp".into(),
-        slug: Slug::derive("webapp"),
-        description: None,
-        settings: serde_json::Value::Null,
-    };
-    let agent = make_agent(
-        "architect",
-        &model,
-        "You are a helpful assistant.\n\
-         When the user asks you to create a document, use save_artifact with scope 'project'.\n\
-         Always respond concisely.",
-    );
-
-    let manifest = Manifest {
-        agents: vec![agent],
-        models: vec![model],
-        projects: vec![project.clone()],
-        ..Default::default()
-    };
-
-    let provider = Provider::builder()
-        .with_manifest(manifest)
-        .with_model_factory(OpenRouterFactory { api_key })
-        .with_tool_factory(NoopToolFactory)
-        .with_memory(memory)
-        .build()
-        .await
-        .unwrap();
-
-    let runner = provider
-        .agent("architect")
-        .await
-        .unwrap()
-        .with_project_context(&project)
-        .build()
-        .await
-        .unwrap();
-
-    let output = runner
-        .chat("Create an artifact called 'auth-design.md' with description 'Auth design doc' and content '# Auth Design\nUse OAuth2 with PKCE flow.'")
-        .await
-        .expect("chat should succeed");
-
-    println!("Response: {}", output.text);
-    println!("Tool calls: {}", output.tool_calls);
-
-    assert!(
-        output.tool_calls >= 1,
-        "agent should have called save_artifact, got: {}",
-        output.tool_calls
-    );
-
-    // Verify artifact landed in workspace dir under project
-    let resource_dir = ws_dir.path().join("webapp/artifacts");
-    assert!(
-        resource_dir.exists(),
-        "artifact dir should exist at {:?}",
-        resource_dir
-    );
-
-    let manifest_path = resource_dir.join("manifest.json");
-    assert!(
-        manifest_path.exists(),
-        "manifest.json should exist in artifact dir"
-    );
-
-    // Artifact should NOT be in memory dir
-    assert!(
-        !mem_dir.path().join("webapp").exists(),
-        "artifacts should NOT be in memory dir"
     );
 }

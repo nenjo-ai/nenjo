@@ -45,6 +45,10 @@ fn make_model() -> ModelManifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     }
 }
 

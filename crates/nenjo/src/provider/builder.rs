@@ -6,8 +6,9 @@ use std::sync::Arc;
 use anyhow::{Context, Result, bail};
 
 use super::{
-    ErasedProvider, ModelProviderFactory, NoopToolFactory, Provider, ProviderMemory,
-    ProviderServices, ToolFactory, TypedModelProviderFactory,
+    ArtifactInputPreparer, ErasedProvider, ModelProviderFactory, NoArtifactInputPreparer,
+    NoopToolFactory, Provider, ProviderMemory, ProviderServices, ToolFactory,
+    TypedModelProviderFactory,
 };
 use crate::ManifestReader;
 use crate::arguments::ResolvedArgumentBinding;
@@ -44,6 +45,7 @@ pub struct ProviderBuilder<
     ModelFactory = MissingModelProviderFactory,
     ToolFactoryImpl = NoopToolFactory,
     Mem = NoMemory,
+    ArtifactPreparer = NoArtifactInputPreparer,
 > {
     manifest: Option<Manifest>,
     loaders: Loaders,
@@ -55,6 +57,7 @@ pub struct ProviderBuilder<
     argument_bindings: Vec<ResolvedArgumentBinding>,
     knowledge_pack_entries: Vec<KnowledgePackEntry>,
     live_manifest_reader: Option<Arc<dyn ManifestReader>>,
+    artifact_input_preparer: Option<ArtifactPreparer>,
 }
 
 /// Marker used until `.with_model_factory(...)` is called.
@@ -117,12 +120,13 @@ impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory>
             argument_bindings: Vec::new(),
             knowledge_pack_entries: Vec::new(),
             live_manifest_reader: None,
+            artifact_input_preparer: None,
         }
     }
 }
 
-impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
-    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
+    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
 {
     /// Provide a pre-built manifest directly.
     ///
@@ -147,7 +151,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     pub fn with_loader<Loader>(
         self,
         loader: Loader,
-    ) -> ProviderBuilder<(Loaders, Loader), ModelFactory, ToolFactoryImpl, Mem>
+    ) -> ProviderBuilder<(Loaders, Loader), ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
     where
         Loader: ManifestLoader + 'static,
     {
@@ -162,6 +166,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
             live_manifest_reader: self.live_manifest_reader,
+            artifact_input_preparer: self.artifact_input_preparer,
         }
     }
 
@@ -172,7 +177,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     pub fn with_model_factory<Factory>(
         self,
         factory: Factory,
-    ) -> ProviderBuilder<Loaders, Factory, ToolFactoryImpl, Mem>
+    ) -> ProviderBuilder<Loaders, Factory, ToolFactoryImpl, Mem, ArtifactPreparer>
     where
         Factory: TypedModelProviderFactory + 'static,
     {
@@ -187,6 +192,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
             live_manifest_reader: self.live_manifest_reader,
+            artifact_input_preparer: self.artifact_input_preparer,
         }
     }
 
@@ -196,7 +202,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     pub fn with_tool_factory<Factory>(
         self,
         factory: Factory,
-    ) -> ProviderBuilder<Loaders, ModelFactory, Factory, Mem>
+    ) -> ProviderBuilder<Loaders, ModelFactory, Factory, Mem, ArtifactPreparer>
     where
         Factory: ToolFactory + 'static,
     {
@@ -211,6 +217,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
             live_manifest_reader: self.live_manifest_reader,
+            artifact_input_preparer: self.artifact_input_preparer,
         }
     }
 
@@ -221,7 +228,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     pub fn with_memory<MemoryImpl>(
         self,
         memory: MemoryImpl,
-    ) -> ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, MemoryImpl>
+    ) -> ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, MemoryImpl, ArtifactPreparer>
     where
         MemoryImpl: Memory + 'static,
     {
@@ -236,6 +243,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
             live_manifest_reader: self.live_manifest_reader,
+            artifact_input_preparer: self.artifact_input_preparer,
         }
     }
 
@@ -279,6 +287,42 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
         self
     }
 
+    /// Install the host service that materializes durable artifact references
+    /// into one ephemeral provider request.
+    pub fn with_artifact_input_preparer<Preparer>(
+        self,
+        preparer: Preparer,
+    ) -> ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem, Preparer>
+    where
+        Preparer: ArtifactInputPreparer + 'static,
+    {
+        self.with_optional_artifact_input_preparer(Some(preparer))
+    }
+
+    /// Select the concrete artifact preparation type while preserving runtime
+    /// absence when the host cannot install that service.
+    pub fn with_optional_artifact_input_preparer<Preparer>(
+        self,
+        preparer: Option<Preparer>,
+    ) -> ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem, Preparer>
+    where
+        Preparer: ArtifactInputPreparer + 'static,
+    {
+        ProviderBuilder {
+            manifest: self.manifest,
+            loaders: self.loaders,
+            model_factory: self.model_factory,
+            tool_factory: self.tool_factory,
+            memory: self.memory,
+            agent_config: self.agent_config,
+            render_ctx_extra: self.render_ctx_extra,
+            argument_bindings: self.argument_bindings,
+            knowledge_pack_entries: self.knowledge_pack_entries,
+            live_manifest_reader: self.live_manifest_reader,
+            artifact_input_preparer: preparer,
+        }
+    }
+
     /// Register multiple knowledge packs with this provider.
     ///
     /// Registered packs automatically contribute reusable knowledge tools and
@@ -312,13 +356,14 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
     }
 }
 
-impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
-    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
+    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
 where
     Loaders: ManifestLoaders + Send + Sync,
     ModelFactory: TypedModelProviderFactory + 'static,
     ToolFactoryImpl: ToolFactory + 'static,
     Mem: ProviderMemory + 'static,
+    ArtifactPreparer: ArtifactInputPreparer + 'static,
 {
     /// Build the Provider by loading and merging all manifest sources.
     ///
@@ -326,7 +371,9 @@ where
     /// empty manifest. If no model factory is configured, manifest-backed agent
     /// resolution will fail unless the agent builder receives an explicit model
     /// provider.
-    pub async fn build(self) -> Result<Provider<ModelFactory, ToolFactoryImpl, Mem>> {
+    pub async fn build(
+        self,
+    ) -> Result<Provider<ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>> {
         let model_factory = self.model_factory;
 
         // Start from the provided manifest (if any), then merge loaders on top.
@@ -350,24 +397,26 @@ where
                 render_ctx_extra,
                 argument_bindings: self.argument_bindings,
                 knowledge,
+                artifact_input_preparer: self.artifact_input_preparer.map(Arc::new),
             },
         ))
     }
 }
 
-impl<Loaders, ModelFactory, ToolFactoryImpl, Mem>
-    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem>
+impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
+    ProviderBuilder<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
 where
     Loaders: ManifestLoaders + Send + Sync,
     ModelFactory: ModelProviderFactory + 'static,
     ToolFactoryImpl: ToolFactory + 'static,
     Mem: Memory + 'static,
+    ArtifactPreparer: ArtifactInputPreparer + 'static,
 {
     /// Build a Provider using the compatibility-erased model factory path.
     ///
     /// Use [`build`](Self::build) to preserve the concrete model
     /// factory type through [`Provider`].
-    pub async fn build_erased(self) -> Result<ErasedProvider> {
+    pub async fn build_erased(self) -> Result<ErasedProvider<ArtifactPreparer>> {
         let model_factory = self.model_factory;
 
         let mut manifest = self.manifest.unwrap_or_default();
@@ -391,6 +440,7 @@ where
                 render_ctx_extra,
                 argument_bindings: self.argument_bindings,
                 knowledge,
+                artifact_input_preparer: self.artifact_input_preparer.map(Arc::new),
             },
         ))
     }

@@ -26,7 +26,7 @@ pub enum CapabilityLane {
 pub enum Capability {
     /// Chat commands: message, domain enter/exit, cancel, session delete.
     Chat,
-    /// Task execution: execute, cancel, pause, resume.
+    /// Task execution: execute, human continuation, cancel, pause, resume.
     Task,
     /// Exclusive authority to activate cached task schedules.
     Cron,
@@ -152,6 +152,7 @@ mod tests {
     #[test]
     fn from_str_error() {
         assert!("bogus".parse::<Capability>().is_err());
+        assert!("human_review".parse::<Capability>().is_err());
     }
 
     #[test]
@@ -187,5 +188,15 @@ mod tests {
             Capability::effective_worker_subscriptions(&[Capability::Chat]),
             vec![Capability::Chat, Capability::Ping]
         );
+    }
+
+    #[test]
+    fn continuation_uses_the_task_lane() {
+        let command = crate::Command::ExecutionContinue {
+            execution_run_id: uuid::Uuid::new_v4(),
+            request_id: uuid::Uuid::new_v4(),
+            resolution_revision: 2,
+        };
+        assert_eq!(command.capability(), Capability::Task);
     }
 }

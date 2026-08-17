@@ -11,7 +11,7 @@ fn routine_ref_schema() -> serde_json::Value {
 fn routine_step_config_schema() -> serde_json::Value {
     json!({
         "type": "object",
-        "description": "Step-specific configuration payload. Supported fields are instructions and metadata only. Put step guidance in instructions. Put optional structured context under metadata. Do not put retry budgets, inputs, evaluation_criteria, or other execution controls here; retry budgets belong on on_fail edge metadata.max_attempts.",
+        "description": "Step-specific configuration payload. Agent and gate steps use instructions and optional metadata. Human steps require request. terminal_fail steps may use failure_reason. Do not put retry budgets, inputs, evaluation_criteria, or other execution controls here; retry budgets belong only on gate on_fail edge metadata.max_attempts.",
         "properties": {
             "instructions": {
                 "type": "string",
@@ -20,6 +20,28 @@ fn routine_step_config_schema() -> serde_json::Value {
             "metadata": {
                 "type": ["object", "array", "string"],
                 "description": "Optional JSON context rendered through {{ routine.step.metadata }}. Use this for data the step prompt explicitly references; it does not control execution."
+            },
+            "request": {
+                "type": "object",
+                "required": ["title"],
+                "description": "Required contract for human steps. The title is rendered for the reviewer. approval optionally defines structured fields collected only when the reviewer approves.",
+                "properties": {
+                    "title": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Reviewer-facing title template, for example Review {{ task.title }}."
+                    },
+                    "approval": {
+                        "type": "object",
+                        "description": "Optional approval form contract. Follow the human-review routine documentation for field and option shapes."
+                    }
+                },
+                "additionalProperties": false
+            },
+            "failure_reason": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Optional failure explanation for terminal_fail steps."
             }
         },
         "additionalProperties": false
@@ -41,8 +63,8 @@ fn routine_step_schema() -> serde_json::Value {
             },
             "step_type": {
                 "type": "string",
-                "enum": ["agent", "council", "gate", "terminal", "terminal_fail"],
-                "description": "Execution kind for this step."
+                "enum": ["agent", "council", "gate", "human", "terminal", "terminal_fail"],
+                "description": "Execution kind for this step. Human steps require config.request and cannot be entry steps."
             },
             "council": {
                 "type": ["string", "null"],
@@ -66,7 +88,7 @@ fn routine_edge_schema() -> serde_json::Value {
     json!({
         "type": "object",
         "required": ["source_step", "target_step", "condition"],
-        "description": "Routine graphs must be acyclic after removing on_fail edges. source_step, target_step, and condition are top-level edge fields, not metadata fields. Use on_fail only from gate steps for failure recovery, retry loops, or remediation paths; always and on_pass edges must not create cycles.",
+        "description": "Routine graphs must be acyclic after removing gate on_fail and human changes_requested edges. source_step, target_step, and condition are top-level edge fields, not metadata fields. Use on_fail only from gate steps and approved, changes_requested, or rejected only from human steps.",
         "properties": {
             "source_step": {
                 "type": "string",
@@ -78,8 +100,8 @@ fn routine_edge_schema() -> serde_json::Value {
             },
             "condition": {
                 "type": "string",
-                "enum": ["always", "on_pass", "on_fail"],
-                "description": "Routing condition for this edge. on_fail may only originate from gate steps."
+                "enum": ["always", "on_pass", "on_fail", "approved", "changes_requested", "rejected"],
+                "description": "Routing condition. Agent edges use always; gate edges use on_pass/on_fail; human edges use approved/changes_requested/rejected. A human outcome may fan out across multiple matching edges."
             },
             "metadata": {
                 "type": "object",
@@ -100,7 +122,7 @@ fn routine_edge_schema() -> serde_json::Value {
                             },
                             "properties": {
                                 "type": "object",
-                                "description": "Properties of the handoff payload."
+                                "description": "Properties of the handoff payload. Mark artifact ID strings with format=nenjo-artifact-id so human review validates and renders them as artifacts rather than ordinary strings."
                             },
                             "required": {
                                 "type": "array",
@@ -113,7 +135,7 @@ fn routine_edge_schema() -> serde_json::Value {
                             }
                         },
                         "additionalProperties": true,
-                        "description": "Required for every edge whose source step is agent or gate. A runtime-enforced JSON Schema object for the handoff payload; its root type must be object. Keep this object inside metadata.handoff_schema; purpose, handoff_instructions, and max_attempts are sibling fields in metadata. For example {\"type\":\"object\",\"required\":[\"work\"],\"properties\":{\"work\":{\"type\":\"string\"}},\"additionalProperties\":false}."
+                        "description": "Required for every edge whose source step is agent or gate. A runtime-enforced JSON Schema object for the handoff payload; its root type must be object. Keep this object inside metadata.handoff_schema; purpose, handoff_instructions, and max_attempts are sibling fields in metadata. For artifact handoffs use a property such as {\"type\":\"string\",\"format\":\"nenjo-artifact-id\"}."
                     },
                     "handoff_instructions": {
                         "type": "string",
@@ -122,7 +144,7 @@ fn routine_edge_schema() -> serde_json::Value {
                     "max_attempts": {
                         "type": "integer",
                         "minimum": 1,
-                        "description": "Retry budget for gate on_fail retry edges."
+                        "description": "Retry budget only for gate on_fail retry edges. Never use this on human review edges."
                     }
                 },
                 "additionalProperties": true
@@ -150,7 +172,7 @@ fn routine_graph_schema() -> serde_json::Value {
             },
             "edges": {
                 "type": "array",
-                "description": "Full routine edge list for this graph. Cycles are allowed only through on_fail edges from gate steps; the graph formed by always and on_pass edges must remain acyclic.",
+                "description": "Full routine edge list for this graph. Cycles are allowed only through on_fail edges from gate steps or changes_requested edges from human steps; all other edge conditions must remain acyclic.",
                 "items": routine_edge_schema()
             }
         },

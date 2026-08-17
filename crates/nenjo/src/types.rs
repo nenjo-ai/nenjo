@@ -15,7 +15,7 @@ pub use crate::context::RenderContextVars;
 
 /// Git context for a task execution — set by the harness when the project
 /// has a synced repository. Provides the agent with branch and worktree info.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct GitContext {
     /// Branch name for this task (e.g. `agent/run-id/fix-auth`).
     pub branch: String,

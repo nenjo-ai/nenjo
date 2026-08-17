@@ -445,20 +445,6 @@ fn synthetic_vars() -> HashMap<String, String> {
                 "<memories-shared>shared memory</memories-shared>".into(),
             ),
         ]),
-        artifact_vars: HashMap::from([
-            (
-                "artifacts".into(),
-                "<artifacts>validation artifact</artifacts>".into(),
-            ),
-            (
-                "artifacts.project".into(),
-                "<project><artifact name=\"design.md\" /></project>".into(),
-            ),
-            (
-                "artifacts.workspace".into(),
-                "<workspace><artifact name=\"notes.md\" /></workspace>".into(),
-            ),
-        ]),
         knowledge_vars: HashMap::from([(
             "knowledge.validation.summary".into(),
             "Validation knowledge".into(),

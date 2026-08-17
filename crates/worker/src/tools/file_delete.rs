@@ -248,7 +248,7 @@ fn contains_dot_git(dir: &Dir) -> anyhow::Result<bool> {
 fn success(output: String) -> ToolResult {
     ToolResult {
         success: true,
-        output,
+        output: output.into(),
         error: None,
     }
 }
@@ -256,7 +256,7 @@ fn success(output: String) -> ToolResult {
 fn failure(error: impl Into<String>) -> ToolResult {
     ToolResult {
         success: false,
-        output: String::new(),
+        output: String::new().into(),
         error: Some(error.into()),
     }
 }

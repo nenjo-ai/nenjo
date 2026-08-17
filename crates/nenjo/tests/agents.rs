@@ -1,6 +1,7 @@
 //! Tests for AgentBuilder and AgentRunner.
 
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use uuid::Uuid;
@@ -9,11 +10,19 @@ use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, DomainManifest, Manifest, ModelManifest,
     ProjectManifest, PromptConfig, PromptTemplates, model_manifest_slug,
 };
-use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
+use nenjo::provider::{
+    ArtifactInputPreparer, ModelProviderFactory, NoopToolFactory, PreparedModelArtifacts, Provider,
+    ToolFactory,
+};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
 use nenjo::{Slug, Tool, ToolCategory, ToolResult};
-use nenjo_models::ToolCall;
-use nenjo_models::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage};
+use nenjo_models::traits::{
+    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage,
+};
+use nenjo_models::{
+    ArtifactId, ArtifactRef, ArtifactSize, MediaType, PreparedArtifact, PreparedArtifactInputs,
+    Sha256Digest, ToolCall,
+};
 
 // ---------------------------------------------------------------------------
 // Mocks
@@ -89,6 +98,103 @@ impl ModelProviderFactory for MockModelProviderFactory {
     }
 }
 
+#[derive(Default)]
+struct ArtifactRequestObservation {
+    calls: AtomicUsize,
+    bytes: Mutex<Option<Vec<u8>>>,
+}
+
+struct ArtifactRecordingProvider {
+    reference: ArtifactRef,
+    observation: Arc<ArtifactRequestObservation>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for ArtifactRecordingProvider {
+    async fn chat(
+        &self,
+        request: ChatRequest<'_>,
+        _model: &str,
+        _temperature: f64,
+    ) -> Result<ChatResponse> {
+        self.observation.calls.fetch_add(1, Ordering::SeqCst);
+        let bytes = request
+            .prepared_artifacts
+            .and_then(|prepared| prepared.get(&self.reference))
+            .map(|artifact| artifact.bytes().to_vec());
+        *self.observation.bytes.lock().unwrap() = bytes;
+
+        Ok(ChatResponse {
+            text: None,
+            tool_calls: vec![ToolCall {
+                id: "call_respond_to_user".to_string(),
+                name: "respond_to_user".to_string(),
+                arguments: serde_json::json!({
+                    "message": "artifact prepared",
+                    "status": "completed",
+                })
+                .to_string(),
+            }],
+            provider_tool_calls: vec![],
+            usage: TokenUsage::default(),
+        })
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+}
+
+struct ArtifactRecordingFactory {
+    reference: ArtifactRef,
+    observation: Arc<ArtifactRequestObservation>,
+}
+
+impl ModelProviderFactory for ArtifactRecordingFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        Ok(Arc::new(ArtifactRecordingProvider {
+            reference: self.reference.clone(),
+            observation: self.observation.clone(),
+        }))
+    }
+}
+
+struct RecordingArtifactInputPreparer {
+    reference: ArtifactRef,
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ArtifactInputPreparer for RecordingArtifactInputPreparer {
+    async fn prepare(
+        &self,
+        messages: &[ConversationMessage],
+        _agent: &AgentManifest,
+        _model: &ModelManifest,
+    ) -> Result<PreparedModelArtifacts> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        let artifact = PreparedArtifact::new(self.reference.clone(), Arc::from(&b""[..]))?;
+        Ok(PreparedModelArtifacts::new(
+            messages,
+            PreparedArtifactInputs::new([artifact]),
+            Vec::new(),
+            TokenUsage::default(),
+        ))
+    }
+}
+
+fn empty_image_artifact() -> ArtifactRef {
+    ArtifactRef::new(
+        ArtifactId::parse(Uuid::new_v4()).unwrap(),
+        Sha256Digest::parse(
+            "sha256:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        )
+        .unwrap(),
+        MediaType::parse("image/png").unwrap(),
+        ArtifactSize::new(0),
+    )
+}
+
 struct EchoTool;
 
 #[async_trait::async_trait]
@@ -119,7 +225,7 @@ impl Tool for EchoTool {
         let msg = args["message"].as_str().unwrap_or("no message");
         Ok(ToolResult {
             success: true,
-            output: format!("echo: {msg}"),
+            output: format!("echo: {msg}").into(),
             error: None,
         })
     }
@@ -157,7 +263,7 @@ impl Tool for MarkerTool {
     async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
         Ok(ToolResult {
             success: true,
-            output: self.0.to_string(),
+            output: self.0.to_string().into(),
             error: None,
         })
     }
@@ -202,6 +308,10 @@ fn test_manifest() -> Manifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
 
     let agent = AgentManifest {
@@ -289,6 +399,50 @@ async fn runner_chat() {
 }
 
 #[tokio::test]
+async fn runner_uses_concrete_artifact_preparer_for_model_request() {
+    let reference = empty_image_artifact();
+    let preparer_calls = Arc::new(AtomicUsize::new(0));
+    let observation = Arc::new(ArtifactRequestObservation::default());
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(ArtifactRecordingFactory {
+            reference: reference.clone(),
+            observation: observation.clone(),
+        })
+        .with_tool_factory(NoopToolFactory)
+        .with_artifact_input_preparer(RecordingArtifactInputPreparer {
+            reference: reference.clone(),
+            calls: preparer_calls.clone(),
+        })
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let output = runner
+        .run(nenjo::AgentRun::chat(nenjo::ChatInput {
+            message: "Inspect this image".into(),
+            history: Vec::new(),
+            project: None,
+            template_override: None,
+            artifacts: vec![reference],
+        }))
+        .await
+        .unwrap();
+
+    assert_eq!(output.text, "artifact prepared");
+    assert_eq!(preparer_calls.load(Ordering::SeqCst), 1);
+    assert_eq!(observation.calls.load(Ordering::SeqCst), 1);
+    assert_eq!(*observation.bytes.lock().unwrap(), Some(Vec::new()));
+}
+
+#[tokio::test]
 async fn runner_chat_with_history() {
     let provider = Provider::builder()
         .with_manifest(test_manifest())
@@ -309,8 +463,8 @@ async fn runner_chat_with_history() {
         .unwrap();
 
     let history = vec![
-        ChatMessage::user("What's 2+2?"),
-        ChatMessage::assistant("4"),
+        ConversationMessage::user("What's 2+2?"),
+        ConversationMessage::assistant("4"),
     ];
 
     let output = runner
@@ -421,6 +575,7 @@ async fn instance_builds_prompts() {
         history: vec![],
         project: None,
         template_override: None,
+        artifacts: Vec::new(),
     });
 
     let prompts = runner.instance().build_prompts(&task).unwrap();
@@ -467,6 +622,7 @@ async fn instance_renders_self_prompt_var() {
         history: vec![],
         project: None,
         template_override: None,
+        artifacts: Vec::new(),
     });
     let prompts = runner.instance().build_prompts(&task).unwrap();
 
@@ -554,6 +710,10 @@ fn manifest_with_abilities_and_domains(
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     };
 
     let agent = AgentManifest {
@@ -949,6 +1109,7 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
             history: vec![],
             project: None,
             template_override: None,
+            artifacts: Vec::new(),
         }))
         .unwrap();
     assert!(

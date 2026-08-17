@@ -63,8 +63,9 @@ pub use package_resolve::{
     resolve_all_logical_winners, resolve_logical_key,
 };
 pub use provider::{
-    ErasedProvider, ModelProviderFactory, Provider, ProviderBuilder, ProviderError,
-    ProviderRuntime, RoutineRunner, ToolContext, ToolFactory, TypedModelProviderFactory,
+    ArtifactInputPreparer, ErasedProvider, ModelProviderFactory, PreparedModelArtifacts, Provider,
+    ProviderBuilder, ProviderError, ProviderRuntime, RoutineRunner, ToolContext, ToolFactory,
+    TypedModelProviderFactory,
 };
 pub use routines::{
     LocalRoutineExecutionRegistration, LocalRoutineExecutionWatcher, RuntimeExecutionEvent,

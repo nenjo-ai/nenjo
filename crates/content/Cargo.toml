@@ -1,0 +1,18 @@
+[package]
+name = "nenjo-content"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Storage-neutral content and immutable artifact reference contracts for Nenjo"
+readme = "README.md"
+
+[dependencies]
+mime = { workspace = true }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+uuid = { workspace = true, features = ["serde"] }
+
+[dev-dependencies]
+serde_json = { workspace = true }

@@ -3,7 +3,7 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
-use super::types::{TaskExecutionState, TaskInboxItem, TaskSchedule};
+use super::types::{TaskExecutionState, TaskInboxAction, TaskInboxItem, TaskSchedule};
 
 /// Result of a durable inbox insertion.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -42,6 +42,19 @@ pub enum CancellationOutcome {
     Inactive,
 }
 
+/// Result of durably recording a human-review continuation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ContinuationOutcome {
+    /// The exact continuation was persisted and queued for execution.
+    Queued(Box<TaskInboxItem>),
+    /// The exact request revision was already persisted or consumed.
+    Duplicate,
+    /// The execution exists but cannot accept a new continuation.
+    Inactive,
+    /// This worker has no retained receipt for the targeted execution.
+    Missing,
+}
+
 /// Persistence boundary used by the harness task coordinator.
 #[async_trait]
 pub trait TaskRuntimeStore: Send + Sync {
@@ -50,6 +63,13 @@ pub trait TaskRuntimeStore: Send + Sync {
 
     /// Load queued receipts that should be dispatched during runtime startup.
     async fn recoverable(&self) -> Result<Vec<TaskInboxItem>>;
+
+    /// Atomically persist a continuation intent before its broker delivery is acknowledged.
+    async fn enqueue_continuation(
+        &self,
+        execution_run_id: Uuid,
+        action: TaskInboxAction,
+    ) -> Result<ContinuationOutcome>;
 
     /// Persist one valid lifecycle transition and return the updated receipt.
     async fn transition(

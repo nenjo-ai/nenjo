@@ -1,5 +1,6 @@
 //! Routine execution types — inputs, state, step config.
 
+use nenjo_models::ArtifactRef;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use uuid::Uuid;
@@ -26,7 +27,7 @@ pub struct StepResult {
     pub tool_calls: u32,
     /// Full conversation messages (excluding system/developer) for chat history
     /// persistence. Only populated for chat tasks.
-    pub messages: Vec<nenjo_models::ChatMessage>,
+    pub messages: Vec<nenjo_models::ConversationMessage>,
 }
 
 impl Default for StepResult {
@@ -58,7 +59,7 @@ impl Default for StepResult {
 ///     .with_execution_run_id(run_id)
 ///     .with_labels(vec!["auth".into(), "security".into()]);
 /// ```
-#[derive(Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineInput {
     pub project: Option<Slug>,
     pub title: String,
@@ -74,6 +75,8 @@ pub struct RoutineInput {
     pub project_description: Option<String>,
     pub project_metadata: Option<String>,
     pub session_binding: Option<SessionBinding>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub artifacts: Vec<ArtifactRef>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -99,6 +102,7 @@ impl RoutineInput {
             project_description: None,
             project_metadata: None,
             session_binding: None,
+            artifacts: Vec::new(),
         }
     }
 
@@ -129,6 +133,11 @@ impl RoutineInput {
 
     pub fn with_priority(mut self, priority: impl Into<String>) -> Self {
         self.priority = Some(priority.into());
+        self
+    }
+
+    pub fn with_artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
+        self.artifacts = artifacts;
         self
     }
 
@@ -266,7 +275,7 @@ impl RoutineState {
 }
 
 /// One activated routine edge and the structured handoff it delivered.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RoutineHandoff {
     pub source_step: Slug,
     pub target_step: Slug,
@@ -292,6 +301,7 @@ pub enum StepType {
     Agent,
     Council,
     Gate,
+    Human,
     Terminal,
     TerminalFail,
 }
@@ -301,6 +311,7 @@ impl StepType {
         match s.to_lowercase().as_str() {
             "council" => Self::Council,
             "gate" => Self::Gate,
+            "human" => Self::Human,
             "terminal" => Self::Terminal,
             "terminal_fail" => Self::TerminalFail,
             _ => Self::Agent,
@@ -313,7 +324,7 @@ impl StepType {
 // ---------------------------------------------------------------------------
 
 /// Accumulated metrics for a single routine step.
-#[derive(Debug, Clone, Default, Serialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct StepMetrics {
     pub execution_count: u32,
     pub input_tokens: u64,
@@ -327,7 +338,7 @@ impl StepMetrics {
 }
 
 /// Accumulator for all step metrics within a routine execution.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct RoutineMetrics {
     steps: HashMap<Slug, StepMetrics>,
 }
@@ -365,6 +376,8 @@ impl RoutineMetrics {
 
 #[cfg(test)]
 mod tests {
+    use nenjo_models::{ArtifactId, ArtifactRef, ArtifactSize, MediaType, Sha256Digest};
+
     use super::*;
     #[test]
     fn edge_condition_parsing() {
@@ -401,6 +414,7 @@ mod tests {
         assert_eq!(StepType::from_str_value("agent"), StepType::Agent);
         assert_eq!(StepType::from_str_value("council"), StepType::Council);
         assert_eq!(StepType::from_str_value("gate"), StepType::Gate);
+        assert_eq!(StepType::from_str_value("human"), StepType::Human);
         assert_eq!(StepType::from_str_value("terminal"), StepType::Terminal);
         assert_eq!(
             StepType::from_str_value("terminal_fail"),
@@ -411,6 +425,12 @@ mod tests {
 
     #[test]
     fn routine_input_builder() {
+        let artifact = ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).expect("non-nil artifact id"),
+            Sha256Digest::parse(&format!("sha256:{}", "a".repeat(64))).expect("valid digest"),
+            MediaType::parse("image/png").expect("valid media type"),
+            ArtifactSize::new(4),
+        );
         let project = ProjectManifest {
             name: "Demo Project".to_string(),
             slug: Slug::derive("demo_project"),
@@ -419,13 +439,19 @@ mod tests {
         };
         let input = RoutineInput::new("Title", "Desc")
             .with_project_context(&project)
-            .with_labels(vec!["a".into()]);
+            .with_labels(vec!["a".into()])
+            .with_artifacts(vec![artifact.clone()]);
         assert_eq!(
             input.project.as_ref().map(Slug::as_str),
             Some("demo_project")
         );
         assert_eq!(input.title, "Title");
         assert_eq!(input.labels, vec!["a"]);
+        assert_eq!(input.artifacts, vec![artifact.clone()]);
+        let checkpoint = serde_json::to_value(&input).expect("serialize routine input");
+        let restored: RoutineInput =
+            serde_json::from_value(checkpoint).expect("restore routine input");
+        assert_eq!(restored.artifacts, vec![artifact]);
     }
 
     #[test]

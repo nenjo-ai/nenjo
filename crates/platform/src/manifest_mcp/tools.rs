@@ -162,6 +162,22 @@ mod tests {
             config_schema["properties"]["metadata"]["type"],
             serde_json::json!(["object", "array", "string"])
         );
+        assert_eq!(
+            config_schema["properties"]["request"]["required"],
+            serde_json::json!(["title"])
+        );
+        assert_eq!(
+            tool.parameters["properties"]["graph"]["properties"]["steps"]["items"]["properties"]["step_type"]
+                ["enum"],
+            serde_json::json!([
+                "agent",
+                "council",
+                "gate",
+                "human",
+                "terminal",
+                "terminal_fail"
+            ])
+        );
         assert!(
             config_schema["properties"]["instructions"]["description"]
                 .as_str()
@@ -217,6 +233,24 @@ mod tests {
                 .unwrap_or_default()
                 .contains("must define handoff_schema"),
             "edge metadata guidance must identify handoff_schema as the route contract"
+        );
+        assert!(
+            handoff_schema["description"]
+                .as_str()
+                .unwrap_or_default()
+                .contains("nenjo-artifact-id"),
+            "artifact handoffs must advertise their semantic JSON Schema format"
+        );
+        assert_eq!(
+            graph_schema["properties"]["edges"]["items"]["properties"]["condition"]["enum"],
+            serde_json::json!([
+                "always",
+                "on_pass",
+                "on_fail",
+                "approved",
+                "changes_requested",
+                "rejected"
+            ])
         );
     }
 

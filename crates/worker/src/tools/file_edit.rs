@@ -103,7 +103,7 @@ impl Tool for FileEditTool {
         {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "Edit text is too large (limit: {MAX_FILE_MUTATION_BYTES} bytes per value)"
                 )),
@@ -113,7 +113,7 @@ impl Tool for FileEditTool {
         if old_string.is_empty() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("old_string must not be empty".into()),
             });
         }
@@ -122,7 +122,7 @@ impl Tool for FileEditTool {
         if !self.security.can_act() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Action blocked: autonomy is read-only".into()),
             });
         }
@@ -131,7 +131,7 @@ impl Tool for FileEditTool {
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: too many actions in the last hour".into()),
             });
         }
@@ -140,7 +140,7 @@ impl Tool for FileEditTool {
         if !self.security.is_path_allowed(&path) {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Path not allowed by security policy: {path}")),
             });
         }
@@ -152,7 +152,7 @@ impl Tool for FileEditTool {
         if self.security.is_managed_runtime_path(&mutation_key) {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Path is managed by Nenjo runtime installs and is read-only".into()),
             });
         }
@@ -161,7 +161,7 @@ impl Tool for FileEditTool {
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
@@ -204,38 +204,38 @@ impl Tool for FileEditTool {
         match edit_result {
             Ok(EditOutcome::Edited(new_len)) => Ok(ToolResult {
                 success: true,
-                output: format!("Edited {path}: replaced 1 occurrence ({} bytes)", new_len),
+                output: format!("Edited {path}: replaced 1 occurrence ({} bytes)", new_len).into(),
                 error: None,
             }),
             Ok(EditOutcome::MissingMatch) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("old_string not found in file".into()),
             }),
             Ok(EditOutcome::AmbiguousMatch(count)) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "old_string matches {count} times; must match exactly once"
                 )),
             }),
             Ok(EditOutcome::SourceTooLarge(bytes)) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "File is too large: {bytes} bytes (limit: {MAX_FILE_MUTATION_BYTES} bytes)"
                 )),
             }),
             Ok(EditOutcome::ResultTooLarge(bytes)) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "Edited file would be too large: {bytes} bytes (limit: {MAX_FILE_MUTATION_BYTES} bytes)"
                 )),
             }),
             Err(e) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Failed to read file or apply edit: {e}")),
             }),
         }

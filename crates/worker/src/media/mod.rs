@@ -1,7 +1,19 @@
 //! Native media capability resolution.
 
+pub mod artifact_router;
+pub mod input_preparer;
+pub mod provider_analyzer;
 pub mod resolver;
 
+pub use artifact_router::{
+    ArtifactAnalysisRequest, ArtifactAnalysisResult, ArtifactAnalyzer, ArtifactAnalyzerResolver,
+    ArtifactInputDisposition, ArtifactInputRoute, ArtifactInputRouteError,
+    ArtifactTransportResolver, ArtifactTransportTarget, AssignedArtifactAnalyzer,
+    DirectArtifactInput, MaterializedAnalysisInput, PrimaryArtifactModel, collect_artifact_inputs,
+};
+
+pub use input_preparer::WorkerArtifactInputPreparer;
+pub use provider_analyzer::ProviderArtifactAnalyzer;
 pub use resolver::{
     AgentModelAssignments, AssignmentSource, MediaCapabilitySource, MediaProviderResolver,
     MediaResolutionError, ModelAssignmentResolveError, ModelAssignmentResolver, ModelRuntimeConfig,

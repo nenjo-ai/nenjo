@@ -126,7 +126,7 @@ impl Tool for MemoryRecallTool {
         if namespaces.is_empty() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("No namespace available for the requested scope.".into()),
             });
         }
@@ -203,7 +203,7 @@ impl Tool for MemoryRecallTool {
         }
         Ok(ToolResult {
             success: true,
-            output,
+            output: output.into(),
             error: None,
         })
     }

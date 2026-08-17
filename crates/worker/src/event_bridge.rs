@@ -193,28 +193,31 @@ pub fn turn_event_to_stream_events(
             tool_args,
             result,
             metadata,
-        } => vec![StreamEvent::ToolCallCompleted {
-            run_id: run_id.to_string(),
-            batch_id: batch_id.clone(),
-            call_id: tool_call_id
-                .clone()
-                .unwrap_or_else(|| format!("{}:{}", tool_name, tool_args.len())),
-            parent_call_id: parent_tool_name.clone(),
-            success: result.success,
-            payload: Some(merge_tool_payload(
-                with_parsed_tool_output(
-                    serde_json::json!({
-                        "tool_name": tool_name,
-                        "tool_args": event_text_preview(tool_args),
-                        "output_preview": truncate_preview(&result.output, PREVIEW_MAX_CHARS),
-                        "error_preview": result.error.as_deref().and_then(summarize_preview),
-                    }),
-                    &result.output,
-                ),
-                metadata.as_ref(),
-            )),
-            encrypted_payload: None,
-        }],
+        } => {
+            let output_text = result.output.text_content();
+            vec![StreamEvent::ToolCallCompleted {
+                run_id: run_id.to_string(),
+                batch_id: batch_id.clone(),
+                call_id: tool_call_id
+                    .clone()
+                    .unwrap_or_else(|| format!("{}:{}", tool_name, tool_args.len())),
+                parent_call_id: parent_tool_name.clone(),
+                success: result.success,
+                payload: Some(merge_tool_payload(
+                    with_parsed_tool_output(
+                        serde_json::json!({
+                            "tool_name": tool_name,
+                            "tool_args": event_text_preview(tool_args),
+                            "output_preview": truncate_preview(&output_text, PREVIEW_MAX_CHARS),
+                            "error_preview": result.error.as_deref().and_then(summarize_preview),
+                        }),
+                        &output_text,
+                    ),
+                    metadata.as_ref(),
+                )),
+                encrypted_payload: None,
+            }]
+        }
         nenjo::TurnEvent::HookStarted {
             hook,
             hook_event,
@@ -535,11 +538,27 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             messages_before,
             messages_after,
         } => format!("message_compacted({messages_before}->{messages_after})"),
-        nenjo::TurnEvent::TranscriptMessage { message } => format!(
-            "transcript_message(role={}, content_len={})",
-            message.role,
-            message.content.len()
-        ),
+        nenjo::TurnEvent::TranscriptMessage { message } => match message {
+            nenjo_models::ConversationMessage::Chat(chat) => format!(
+                "transcript_message(kind=chat, role={}, content_len={})",
+                chat.role,
+                chat.content.len()
+            ),
+            nenjo_models::ConversationMessage::AssistantToolCalls { text, tool_calls } => format!(
+                "transcript_message(kind=assistant_tool_calls, text_len={}, tool_calls={})",
+                text.as_deref().map_or(0, str::len),
+                tool_calls.len()
+            ),
+            nenjo_models::ConversationMessage::ToolResults(results) => format!(
+                "transcript_message(kind=tool_results, results={})",
+                results.len()
+            ),
+            nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => format!(
+                "transcript_message(kind=artifact_analysis, sources={}, content_len={})",
+                analysis.source_inputs.len(),
+                analysis.text.len()
+            ),
+        },
         nenjo::TurnEvent::Paused => "paused".to_string(),
         nenjo::TurnEvent::Resumed => "resumed".to_string(),
         nenjo::TurnEvent::Done { output } => format!(
@@ -1051,10 +1070,10 @@ pub fn turn_event_to_workflow_step_response(
             Some(merge_tool_payload(
                 with_parsed_tool_output(
                     serde_json::json!({
-                        "output_preview": task_output_preview(&result.output, context.summarize_outputs),
+                        "output_preview": task_output_preview(&result.output.text_content(), context.summarize_outputs),
                         "error": result.error.as_deref().map(event_text_preview),
                     }),
-                    &result.output,
+                    &result.output.text_content(),
                 ),
                 metadata.as_ref(),
             )),
@@ -1484,7 +1503,7 @@ mod tests {
                 tool_args: "{}".to_string(),
                 result: nenjo::ToolResult {
                     success: true,
-                    output: output.clone(),
+                    output: output.clone().into(),
                     error: None,
                 },
                 metadata: None,
@@ -1567,7 +1586,7 @@ mod tests {
                 tool_args: "{}".to_string(),
                 result: nenjo::ToolResult {
                     success: true,
-                    output: "{\"status\":\"completed\"}".to_string(),
+                    output: "{\"status\":\"completed\"}".to_string().into(),
                     error: None,
                 },
                 metadata: Some(metadata),
@@ -1637,7 +1656,7 @@ mod tests {
                 tool_args: "{}".to_string(),
                 result: nenjo::ToolResult {
                     success: true,
-                    output: "{\"status\":\"completed\"}".to_string(),
+                    output: "{\"status\":\"completed\"}".to_string().into(),
                     error: None,
                 },
                 metadata: Some(metadata),
@@ -1873,7 +1892,7 @@ mod tests {
                 tool_args: long.clone(),
                 result: nenjo::ToolResult {
                     success: false,
-                    output: long.clone(),
+                    output: long.clone().into(),
                     error: Some(long.clone()),
                 },
                 metadata: Some(serde_json::json!({
@@ -1963,7 +1982,7 @@ mod tests {
                 tool_args: "{}".to_string(),
                 result: nenjo::ToolResult {
                     success: true,
-                    output: "written".to_string(),
+                    output: "written".to_string().into(),
                     error: None,
                 },
                 metadata: None,
@@ -2116,7 +2135,7 @@ mod tests {
                 tool_args: "{}".to_string(),
                 result: nenjo::ToolResult {
                     success: true,
-                    output: output.clone(),
+                    output: output.clone().into(),
                     error: None,
                 },
                 metadata: None,
@@ -2159,7 +2178,7 @@ mod tests {
                 tool_args: r#"{"pack":"pkg:core","query":"agents"}"#.to_string(),
                 result: nenjo::ToolResult {
                     success: true,
-                    output: output.clone(),
+                    output: output.clone().into(),
                     error: None,
                 },
                 metadata: None,
@@ -2215,7 +2234,7 @@ mod tests {
                 tool_args: r#"{"pack":"pkg:core","query":"workflow"}"#.to_string(),
                 result: nenjo::ToolResult {
                     success: true,
-                    output,
+                    output: output.into(),
                     error: None,
                 },
                 metadata: None,
@@ -2259,7 +2278,7 @@ mod tests {
                 tool_args: r#"{"command":"cargo test"}"#.to_string(),
                 result: nenjo::ToolResult {
                     success: false,
-                    output: oversized_output,
+                    output: oversized_output.into(),
                     error: Some(oversized_error),
                 },
                 metadata: None,

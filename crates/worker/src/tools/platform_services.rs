@@ -1,8 +1,10 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use nenjo::Manifest;
 use nenjo_platform::{
     PlatformManifestBackend, PlatformManifestClient, PlatformResourceIdStore,
+    artifacts::{PlatformArtifactMaterializer, PlatformArtifactRepository},
     task_tools::PlatformTaskToolsBackend,
 };
 use uuid::Uuid;
@@ -10,6 +12,20 @@ use uuid::Uuid;
 use crate::bootstrap::WorkerManifestStore;
 
 use super::platform_payload::PlatformPayloadEncoder;
+
+pub(crate) struct PlatformToolServiceDependencies {
+    pub manifest_store: Arc<WorkerManifestStore>,
+    pub platform_client: Option<Arc<PlatformManifestClient>>,
+    pub payload_encoder: PlatformPayloadEncoder,
+}
+
+pub(crate) struct PlatformToolServiceConfig {
+    pub cached_org_id: Option<Uuid>,
+    pub workspace_dir: PathBuf,
+    pub library_dir: PathBuf,
+    pub state_dir: PathBuf,
+    pub read_only_manifest: Option<Arc<Manifest>>,
+}
 
 #[derive(Clone, Default)]
 pub(crate) struct PlatformToolServices {
@@ -19,18 +35,26 @@ pub(crate) struct PlatformToolServices {
     pub platform_client: Option<Arc<PlatformManifestClient>>,
     pub payload_encoder: Option<PlatformPayloadEncoder>,
     pub cached_org_id: Option<Uuid>,
+    pub artifact_materializer: Option<Arc<PlatformArtifactMaterializer<PlatformPayloadEncoder>>>,
 }
 
 impl PlatformToolServices {
     pub(crate) fn new(
-        manifest_store: Arc<WorkerManifestStore>,
-        platform_client: Option<Arc<PlatformManifestClient>>,
-        payload_encoder: PlatformPayloadEncoder,
-        cached_org_id: Option<Uuid>,
-        workspace_dir: std::path::PathBuf,
-        library_dir: std::path::PathBuf,
-        read_only_manifest: Option<Arc<Manifest>>,
+        dependencies: PlatformToolServiceDependencies,
+        config: PlatformToolServiceConfig,
     ) -> Self {
+        let PlatformToolServiceDependencies {
+            manifest_store,
+            platform_client,
+            payload_encoder,
+        } = dependencies;
+        let PlatformToolServiceConfig {
+            cached_org_id,
+            workspace_dir,
+            library_dir,
+            state_dir,
+            read_only_manifest,
+        } = config;
         let resource_ids = Arc::new(PlatformResourceIdStore::new(manifest_store.root()));
         let manifest_backend = platform_client.as_ref().map(|client| {
             let mut backend = PlatformManifestBackend::new(
@@ -56,6 +80,13 @@ impl PlatformToolServices {
                 resource_ids,
                 cached_org_id,
             });
+        let artifact_materializer = platform_client.as_ref().map(|client| {
+            Arc::new(PlatformArtifactMaterializer::new(
+                PlatformArtifactRepository::new(client.clone()),
+                payload_encoder.clone(),
+                state_dir.join("artifact-cache"),
+            ))
+        });
 
         Self {
             manifest_backend,
@@ -63,6 +94,7 @@ impl PlatformToolServices {
             platform_client,
             payload_encoder: Some(payload_encoder),
             cached_org_id,
+            artifact_materializer,
         }
     }
 }

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 
-use anyhow::Result;
+use anyhow::{Context, Result};
 use nenjo_models::ModelProvider;
 use regex::Regex;
 use tokio::sync::mpsc;
@@ -34,9 +34,12 @@ use crate::agents::respond::{
 use crate::hooks::{
     ActiveHook, ActiveHookScope, HookBlock, HookEvent, HookRuntime, HookRuntimeEvent,
 };
-use crate::provider::ProviderRuntime;
+use crate::provider::{ArtifactInputPreparer, ProviderRuntime};
 use crate::tools::{Tool, ToolCategory, ToolResult};
-use nenjo_models::{ChatMessage, ChatRequest, ProviderStreamEvent, ProviderToolTrace};
+use nenjo_models::{
+    ChatMessage, ChatRequest, ConversationMessage, ProviderStreamEvent, ProviderToolTrace,
+    ToolOutput, ToolResultMessage,
+};
 
 /// How a turn is allowed to reach a successful terminal state.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -86,7 +89,7 @@ fn provider_tool_result(trace: &ProviderToolTrace) -> ToolResult {
 
     ToolResult {
         success: true,
-        output,
+        output: output.into(),
         error: None,
     }
 }
@@ -150,6 +153,7 @@ async fn chat_with_provider_stream<P>(
 where
     P: ModelProvider + ?Sized,
 {
+    request.ensure_artifacts_prepared()?;
     let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
     let response = provider.chat_stream(request, model, temperature, stream_tx);
     tokio::pin!(response);
@@ -288,7 +292,7 @@ where
 }
 
 async fn drain_queued_user_messages(
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut Vec<ConversationMessage>,
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
     turn_input: Option<&TurnInputReceiver>,
 ) -> bool {
@@ -299,10 +303,12 @@ async fn drain_queued_user_messages(
     let mut appended = false;
     for queued_message in queued {
         let content = queued_message.content.trim();
-        if content.is_empty() {
+        if content.is_empty() && queued_message.artifacts.is_empty() {
             continue;
         }
-        let message = ChatMessage::user(content.to_string());
+        let message = ConversationMessage::chat(
+            ChatMessage::user(content.to_string()).with_artifacts(queued_message.artifacts),
+        );
         messages.push(message.clone());
         emit_event(events_tx, TurnEvent::TranscriptMessage { message });
         appended = true;
@@ -319,7 +325,7 @@ tokio::task_local! {
 }
 
 tokio::task_local! {
-    static CURRENT_CHAT_HISTORY: Vec<ChatMessage>;
+    static CURRENT_CHAT_HISTORY: Vec<ConversationMessage>;
 }
 
 tokio::task_local! {
@@ -348,12 +354,12 @@ pub(crate) fn current_turn_input() -> Option<TurnInputReceiver> {
 fn cancelled_tool_result() -> ToolResult {
     ToolResult {
         success: false,
-        output: String::new(),
+        output: String::new().into(),
         error: Some("execution cancelled".into()),
     }
 }
 
-pub(crate) fn current_chat_history() -> Option<Vec<ChatMessage>> {
+pub(crate) fn current_chat_history() -> Option<Vec<ConversationMessage>> {
     CURRENT_CHAT_HISTORY.try_with(Clone::clone).ok()
 }
 
@@ -450,7 +456,7 @@ fn reject_terminal_respond_to_user_results_while_async_ops_open(
 /// conversation messages.
 pub async fn run<P>(
     agent: &AgentInstance<P>,
-    mut messages: Vec<ChatMessage>,
+    mut messages: Vec<ConversationMessage>,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     pause_token: Option<super::types::PauseToken>,
     turn_input: Option<TurnInputReceiver>,
@@ -663,10 +669,63 @@ where
                     );
                 }
 
+                let artifact_input_preparer = agent
+                    .runtime
+                    .provider_runtime
+                    .as_ref()
+                    .and_then(ProviderRuntime::artifact_input_preparer);
+                let mut prepared_model_artifacts = match artifact_input_preparer {
+                    Some(preparer) if messages.iter().any(ConversationMessage::has_artifact_references) => {
+                        let prepared = preparer
+                            .prepare(&messages, &agent.manifest, &agent.model_manifest)
+                            .await
+                            .context("failed to prepare artifact inputs for the model request")?;
+                        record_nested_token_usage(
+                            prepared.usage.input_tokens,
+                            prepared.usage.output_tokens,
+                        );
+                        Some(prepared)
+                    }
+                    Some(_) | None => None,
+                };
+                if let Some(prepared) = &mut prepared_model_artifacts
+                    && compact_messages_for_payload(
+                        &mut prepared.request_messages,
+                        message_payload_budget,
+                    )
+                {
+                    warn!(
+                        agent = agent_name,
+                        model,
+                        payload_bytes_after = estimate_serialized_messages_bytes(
+                            &prepared.request_messages
+                        ),
+                        message_payload_budget,
+                        "Compacted prepared artifact context to fit model request payload budget"
+                    );
+                }
+                if let Some(prepared) = &prepared_model_artifacts {
+                    for analysis in &prepared.new_analysis_messages {
+                        let message = ConversationMessage::artifact_analysis(analysis.clone());
+                        messages.push(message.clone());
+                        emit_event(
+                            events_tx.as_ref(),
+                            TurnEvent::TranscriptMessage { message },
+                        );
+                    }
+                }
+                let request_messages = prepared_model_artifacts
+                    .as_ref()
+                    .map_or(messages.as_slice(), |prepared| {
+                        prepared.request_messages.as_slice()
+                    });
                 let request = ChatRequest {
-                    messages: &messages,
+                    messages: request_messages,
                     tools: tools_ref,
                     native_tools: Some(&agent.model_manifest.native_tools),
+                    prepared_artifacts: prepared_model_artifacts
+                        .as_ref()
+                        .map(|prepared| &prepared.artifacts),
                 };
 
                 let model_request_id = Uuid::new_v4().to_string();
@@ -758,7 +817,8 @@ where
                 total_input_tokens += response.usage.input_tokens;
                 total_output_tokens += response.usage.output_tokens;
 
-                // Log response summary to diagnose tool-calling issues
+                // Log structural response metadata only. Model text and tool
+                // arguments may contain user or decrypted artifact content.
                 debug!(
                     agent = agent_name,
                     model,
@@ -766,11 +826,7 @@ where
                     has_tool_calls = response.has_tool_calls(),
                     tool_call_count = response.tool_calls.len(),
                     has_text = response.text.is_some(),
-                    text_preview = response
-                        .text
-                        .as_deref()
-                        .map(|t| truncate_str(t, 300))
-                        .unwrap_or("(none)"),
+                    text_len = response.text.as_deref().map(str::len).unwrap_or(0),
                     input_tokens = response.usage.input_tokens,
                     output_tokens = response.usage.output_tokens,
                     "LLM response received"
@@ -778,48 +834,22 @@ where
 
                 // If the LLM requested tool calls, execute them
                 if response.has_tool_calls() {
-                    // Record the assistant's tool call request as structured JSON so
-                    // that providers can reconstruct the native assistant-tool-call
-                    // message on the next iteration.  Both the OpenAI and Anthropic
-                    // convert_messages helpers look for a `"tool_calls"` key inside the
-                    // assistant content.
-                    //
-                    // Store full arguments here — truncation of older messages is
-                    // deferred to `truncate_old_tool_arguments()` which runs at the
-                    // start of each iteration.  This ensures the model always sees
-                    // its most recent tool calls intact and won't mimic truncation
-                    // markers as literal content.
-                    let tool_calls_json: Vec<serde_json::Value> = response
-                        .tool_calls
-                        .iter()
-                        .map(|tc| {
-                            serde_json::json!({
-                                "id": tc.id,
-                                "name": tc.name,
-                                "arguments": tc.arguments,
-                            })
-                        })
-                        .collect();
-
-                    let assistant_content = serde_json::json!({
-                        "content": response.text.as_deref().unwrap_or(""),
-                        "tool_calls": tool_calls_json,
-                    });
-
                     debug!(
                         agent = agent_name,
                         model,
-                        tool_call_count = tool_calls_json.len(),
+                        tool_call_count = response.tool_calls.len(),
                         assistant_text_len = response.text.as_deref().map(str::len).unwrap_or(0),
-                        assistant_text_preview = response
-                            .text
-                            .as_deref()
-                            .map(|text| truncate_str(text, 300))
-                            .unwrap_or("(none)"),
-                        tool_calls = %serde_json::Value::Array(tool_calls_json.clone()),
+                        tool_names = ?response
+                            .tool_calls
+                            .iter()
+                            .map(|call| call.name.as_str())
+                            .collect::<Vec<_>>(),
                         "LLM requested tool calls"
                     );
-                    let assistant_message = ChatMessage::assistant(assistant_content.to_string());
+                    let assistant_message = ConversationMessage::assistant_tool_calls(
+                        response.text.clone(),
+                        response.tool_calls.clone(),
+                    );
                     messages.push(assistant_message.clone());
                     emit_event(
                         events_tx.as_ref(),
@@ -942,7 +972,8 @@ where
                             .is_some_and(|t| t.is_terminal())
                     });
 
-                    // Emit result events and build messages in order.
+                    let mut result_messages = Vec::with_capacity(tool_results.len());
+                    // Emit result events and build one semantic result batch in order.
                     for (tool_call, tool_result) in &tool_results {
                         emit_event(
                             events_tx.as_ref(),
@@ -977,14 +1008,19 @@ where
                         // successful terminal results too: if a stop hook requests
                         // continuation, the next provider request must still have a
                         // structurally complete tool-call exchange.
-                        let raw_content = if tool_result.success {
+                        let output = if tool_result.success {
                             tool_result.output.clone()
                         } else {
-                            format!(
+                            let error = tool_result
+                                .error
+                                .clone()
+                                .unwrap_or_else(|| tool_result.output.text_content());
+                            ToolOutput::text(format!(
                                 "Error: {}",
-                                tool_result.error.as_deref().unwrap_or(&tool_result.output)
-                            )
+                                error
+                            ))
                         };
+                        let raw_content = output.text_content();
 
                         debug!(
                             agent = agent_name,
@@ -993,31 +1029,20 @@ where
                             tool_call_id = %tool_call.id,
                             success = tool_result.success,
                             response_len = raw_content.len(),
-                            response_preview = %truncate(&raw_content, 500),
                             "Tool call response"
                         );
 
-                        let tool_content = serde_json::json!({
-                            "tool_call_id": tool_call.id,
-                            "content": raw_content,
-                        });
-                        let tool_message = ChatMessage::tool(tool_content.to_string());
-                        messages.push(tool_message.clone());
-                        emit_event(
-                            events_tx.as_ref(),
-                            TurnEvent::TranscriptMessage {
-                                message: tool_message,
-                            },
-                        );
+                        result_messages.push(ToolResultMessage::new(tool_call.id.clone(), output));
 
                         if tool_result.success
                             && tool_for_call(tools, tool_call)
                                 .is_some_and(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME)
                         {
                             let status = RespondToUserStatus::from_tool_call(tool_call);
-                            let message = tool_result.output.trim().to_string();
+                            let message = tool_result.output.text_content().trim().to_string();
                             if !message.is_empty() {
-                                let assistant_message = ChatMessage::assistant(message.clone());
+                                let assistant_message =
+                                    ConversationMessage::assistant(message.clone());
                                 messages.push(assistant_message.clone());
                                 emit_event(
                                     events_tx.as_ref(),
@@ -1035,6 +1060,14 @@ where
                             }
                         }
                     }
+                    let tool_results_message = ConversationMessage::ToolResults(result_messages);
+                    messages.push(tool_results_message.clone());
+                    emit_event(
+                        events_tx.as_ref(),
+                        TurnEvent::TranscriptMessage {
+                            message: tool_results_message,
+                        },
+                    );
 
                     // Terminal tool: stop the loop. The verdict is already recorded
                     // in the assistant message's tool_calls for extraction.
@@ -1043,7 +1076,7 @@ where
                             agent = agent_name,
                             model, "Terminal tool called, ending turn loop"
                         );
-                        let terminal_tool_text = terminal_tool_result.output.clone();
+                        let terminal_tool_text = terminal_tool_result.output.text_content();
                         let terminal_tool_name = tool_for_call(tools, terminal_tool_call)
                             .map(|tool| tool.name())
                             .unwrap_or_default();
@@ -1101,8 +1134,8 @@ where
                     );
                     // Push an empty assistant message so the provider sees the turn,
                     // then add a nudge so the model tries again.
-                    messages.push(ChatMessage::assistant(String::new()));
-                    messages.push(ChatMessage::developer(
+                    messages.push(ConversationMessage::assistant(String::new()));
+                    messages.push(ConversationMessage::developer(
                         "Your previous response was empty. Please respond to the user's request."
                             .to_string(),
                     ));
@@ -1120,16 +1153,16 @@ where
                         "Deferring final response until model-visible async operations settle"
                     );
                     final_text.clear();
-                    messages.push(ChatMessage::developer(message));
+                    messages.push(ConversationMessage::developer(message));
                     continue;
                 }
                 if let Some(required_tool) = completion.required_tool() {
-                    messages.push(ChatMessage::developer(format!(
+                    messages.push(ConversationMessage::developer(format!(
                         "Your previous response was not delivered because this runtime requires the {required_tool} tool to end the turn. Continue the work, then call {required_tool} only when the requested work is fully handled.\n\nUndelivered response draft:\n{text}"
                     )));
                     continue;
                 }
-                let assistant_message = ChatMessage::assistant(text);
+                let assistant_message = ConversationMessage::assistant(text);
                 messages.push(assistant_message.clone());
                 emit_event(
                     events_tx.as_ref(),
@@ -1221,7 +1254,7 @@ async fn execute_tool(
     agent_name: &str,
     tools: &[Arc<dyn Tool>],
     tool_call: &nenjo_models::ToolCall,
-    current_messages: &[ChatMessage],
+    current_messages: &[ConversationMessage],
     hook_runtime: Option<Arc<HookRuntime>>,
     async_operations: AsyncOperationRuntime,
     cancel: CancellationToken,
@@ -1229,7 +1262,7 @@ async fn execute_tool(
     info!(
         agent = agent_name,
         tool = %tool_call.name,
-        args = %truncate(&tool_call.arguments, 200),
+        args_len = tool_call.arguments.len(),
         "Executing tool call"
     );
 
@@ -1240,7 +1273,7 @@ async fn execute_tool(
         None => {
             return ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Unknown tool: {}", tool_call.name)),
             };
         }
@@ -1252,7 +1285,7 @@ async fn execute_tool(
         Err(e) => {
             return ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Failed to parse tool arguments: {e}")),
             };
         }
@@ -1277,7 +1310,7 @@ async fn execute_tool(
     if let Some(block) = outcome.block {
         return ToolResult {
             success: false,
-            output: String::new(),
+            output: String::new().into(),
             error: Some(format!("Blocked by hook {}: {}", block.hook, block.reason)),
         };
     }
@@ -1289,15 +1322,22 @@ async fn execute_tool(
             Ok(result) => result,
             Err(e) => ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!("Tool execution error: {e}")),
             },
         }
     };
 
-    let current_history: Vec<ChatMessage> = current_messages
+    let current_history: Vec<ConversationMessage> = current_messages
         .iter()
-        .filter(|msg| msg.role != "system" && msg.role != "developer")
+        .filter(|message| {
+            !message.as_chat().is_some_and(|chat| {
+                matches!(
+                    chat.role,
+                    nenjo_models::ChatRole::System | nenjo_models::ChatRole::Developer
+                )
+            })
+        })
         .cloned()
         .collect();
 
@@ -1331,7 +1371,10 @@ async fn execute_tool(
 
     let tool_response = serde_json::json!({
         "success": result.success,
-        "output": &result.output,
+        // Keep the established hook projection text-compatible while exposing
+        // ordered semantic parts to hooks that opt into artifact-aware output.
+        "output": result.output.text_content(),
+        "output_parts": &result.output,
         "error": &result.error,
     });
     let post_tool_hooks = run_hooks_for_event(
@@ -1365,7 +1408,7 @@ async fn run_stop_hooks(
     agent_name: &str,
     hook_runtime: Option<&Arc<HookRuntime>>,
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
-    messages: &[ChatMessage],
+    messages: &[ConversationMessage],
     final_text: &str,
 ) -> Option<HookBlock> {
     run_hooks_for_event(
@@ -1409,7 +1452,7 @@ async fn run_user_prompt_submit_hooks(
     agent_name: &str,
     hook_runtime: Option<&Arc<HookRuntime>>,
     prompt: &str,
-    messages: &[ChatMessage],
+    messages: &[ConversationMessage],
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
     seen: &mut HashSet<ActiveHookKey>,
 ) -> HookRunOutcome {
@@ -1529,25 +1572,30 @@ fn hook_event_for_runtime_event(event: &HookRuntimeEvent<'_>) -> HookEvent {
     }
 }
 
-fn latest_user_prompt(messages: &[ChatMessage]) -> Option<&str> {
+fn latest_user_prompt(messages: &[ConversationMessage]) -> Option<&str> {
     messages
         .iter()
         .rev()
-        .find(|message| message.role == "user")
+        .find_map(|message| {
+            message
+                .as_chat()
+                .filter(|chat| chat.role == nenjo_models::ChatRole::User)
+        })
         .map(|message| message.content.as_str())
 }
 
-fn remove_latest_user_prompt(messages: &mut Vec<ChatMessage>, prompt: &str) {
-    if let Some(index) = messages
-        .iter()
-        .rposition(|message| message.role == "user" && message.content == prompt)
-    {
+fn remove_latest_user_prompt(messages: &mut Vec<ConversationMessage>, prompt: &str) {
+    if let Some(index) = messages.iter().rposition(|message| {
+        message
+            .as_chat()
+            .is_some_and(|chat| chat.role == nenjo_models::ChatRole::User && chat.content == prompt)
+    }) {
         messages.remove(index);
     }
 }
 
 fn append_user_prompt_hook_contexts(
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut Vec<ConversationMessage>,
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
     contexts: Vec<String>,
 ) {
@@ -1559,7 +1607,7 @@ fn append_user_prompt_hook_contexts(
     if contexts.is_empty() {
         return;
     }
-    let message = ChatMessage::developer(format!(
+    let message = ConversationMessage::developer(format!(
         "Additional context from UserPromptSubmit hooks:\n\n{}",
         contexts.join("\n\n")
     ));
@@ -1580,7 +1628,7 @@ fn hook_block_reason(execution: &crate::hooks::HookExecution) -> String {
 }
 
 fn append_hook_block_continuation(
-    messages: &mut Vec<ChatMessage>,
+    messages: &mut Vec<ConversationMessage>,
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
     block: HookBlock,
 ) {
@@ -1588,12 +1636,12 @@ fn append_hook_block_continuation(
         .system_message
         .filter(|message| !message.trim().is_empty())
     {
-        let message = ChatMessage::developer(system_message);
+        let message = ConversationMessage::developer(system_message);
         messages.push(message.clone());
         emit_event(events_tx, TurnEvent::TranscriptMessage { message });
     }
 
-    let message = ChatMessage::user(format!(
+    let message = ConversationMessage::user(format!(
         "Hook `{}` blocked completion and requested continuation:\n{}",
         block.hook, block.reason
     ));

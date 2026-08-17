@@ -165,50 +165,6 @@ pub struct MemoriesContext {
 }
 
 // ---------------------------------------------------------------------------
-// Artifacts (document index injected into prompts)
-// ---------------------------------------------------------------------------
-
-/// A single artifact entry in the prompt index.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "artifact")]
-pub struct ArtifactContext {
-    #[serde(rename = "@name")]
-    pub name: String,
-    #[serde(rename = "@description")]
-    pub description: String,
-    #[serde(rename = "@created_by")]
-    pub created_by: String,
-    #[serde(rename = "@size")]
-    pub size: String,
-}
-
-/// Project-scoped artifacts.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "project")]
-pub struct ArtifactsProjectContext {
-    #[serde(rename = "artifact")]
-    pub artifacts: Vec<ArtifactContext>,
-}
-
-/// Workspace-global artifacts.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "workspace")]
-pub struct ArtifactsWorkspaceContext {
-    #[serde(rename = "artifact")]
-    pub artifacts: Vec<ArtifactContext>,
-}
-
-/// All artifacts combined.
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename = "artifacts")]
-pub struct ArtifactsContext {
-    #[serde(rename = "project", skip_serializing_if = "Option::is_none")]
-    pub project: Option<ArtifactsProjectContext>,
-    #[serde(rename = "workspace", skip_serializing_if = "Option::is_none")]
-    pub workspace: Option<ArtifactsWorkspaceContext>,
-}
-
-// ---------------------------------------------------------------------------
 // Task (current/active) cron
 // ---------------------------------------------------------------------------
 

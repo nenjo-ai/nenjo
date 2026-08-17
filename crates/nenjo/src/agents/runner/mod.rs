@@ -9,7 +9,7 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use nenjo_models::ChatMessage;
+use nenjo_models::{ArtifactInput, ArtifactInputSource, ChatMessage, ConversationMessage};
 use tracing::{debug, info, trace};
 use uuid::Uuid;
 
@@ -128,7 +128,7 @@ pub(crate) fn build_instruction_messages(
     system_prompt: &str,
     developer_prompt: &str,
     supports_developer_role: bool,
-) -> Vec<ChatMessage> {
+) -> Vec<ConversationMessage> {
     let combined = [system_prompt, developer_prompt]
         .into_iter()
         .filter(|part| !part.trim().is_empty())
@@ -138,9 +138,9 @@ pub(crate) fn build_instruction_messages(
     if combined.is_empty() {
         Vec::new()
     } else if supports_developer_role {
-        vec![ChatMessage::developer(combined)]
+        vec![ConversationMessage::developer(combined)]
     } else {
-        vec![ChatMessage::system(combined)]
+        vec![ConversationMessage::system(combined)]
     }
 }
 
@@ -250,7 +250,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     ///
     /// Used by the harness to re-use a domain-expanded instance across
     /// multiple chat turns without rebuilding from the Provider each time.
-    /// Pass memory/scope to preserve memory and artifact loading.
+    /// Pass memory/scope to preserve memory loading.
     pub fn from_instance(
         instance: AgentInstance<P>,
         memory: Option<Arc<P::Memory<'static>>>,
@@ -414,13 +414,14 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     pub async fn chat_with_history_stream(
         &self,
         message: &str,
-        history: Vec<ChatMessage>,
+        history: Vec<ConversationMessage>,
     ) -> Result<ExecutionHandle> {
         self.run_stream(AgentRun::chat(ChatInput {
             message: message.to_string(),
             history,
             project: None,
             template_override: None,
+            artifacts: Vec::new(),
         }))
         .await
     }
@@ -429,7 +430,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     pub async fn chat_with_history_template_stream(
         &self,
         message: &str,
-        history: Vec<ChatMessage>,
+        history: Vec<ConversationMessage>,
         template_override: impl Into<String>,
     ) -> Result<ExecutionHandle> {
         self.run_stream(AgentRun::chat(ChatInput {
@@ -437,6 +438,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             history,
             project: None,
             template_override: Some(template_override.into()),
+            artifacts: Vec::new(),
         }))
         .await
     }
@@ -460,7 +462,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     pub async fn chat_with_history(
         &self,
         message: &str,
-        history: Vec<ChatMessage>,
+        history: Vec<ConversationMessage>,
     ) -> Result<TurnOutput> {
         self.chat_with_history_stream(message, history)
             .await?
@@ -520,14 +522,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         } else {
             None
         };
-        let artifact_vars = if let (Some(mem), Some(scope)) = (&self.memory, &self.memory_scope)
-            && self.instance.prompt.artifact_vars.is_empty()
-        {
-            Some(memory::build_artifact_vars(mem.as_ref(), scope).await?)
-        } else {
-            None
-        };
-
         // 5. Spawn the turn loop.
         let (events_tx, events_rx) = mpsc::unbounded_channel::<TurnEvent>();
         let pause_token = types::PauseToken::new();
@@ -602,7 +596,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         // 3. Build prompts.
         let prompts = inst
-            .build_prompts_with_vars(&run, memory_vars.as_ref(), artifact_vars.as_ref())
+            .build_prompts_with_vars(&run, memory_vars.as_ref())
             .context("failed to build prompts")?;
 
         let system_prompt = prompts.system;
@@ -615,11 +609,10 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         };
         trace!(
             agent = inst.name(),
-            "\nRendered prompts for {}\n\n=== System Prompt ===\n{}\n\n=== Developer Prompt ===\n{}\n\n=== User Message ===\n{}",
-            inst.name(),
-            system_prompt,
-            developer_prompt,
-            user_message,
+            system_prompt_len = system_prompt.len(),
+            developer_prompt_len = developer_prompt.len(),
+            user_message_len = user_message.len(),
+            "Rendered agent prompts"
         );
 
         // 4. Build initial messages.
@@ -627,7 +620,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             .model
             .model_provider
             .supports_developer_role(&inst.model.model_name);
-        let mut messages: Vec<ChatMessage> =
+        let mut messages: Vec<ConversationMessage> =
             build_instruction_messages(&system_prompt, &developer_prompt, supports_developer_role);
 
         match &run.kind {
@@ -636,7 +629,32 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             _ => {}
         }
 
-        messages.push(ChatMessage::user(&user_message));
+        let artifact_inputs = match &run.kind {
+            AgentRunKind::Chat(chat) => chat
+                .artifacts
+                .iter()
+                .cloned()
+                .map(|artifact| ArtifactInput::new(artifact, ArtifactInputSource::UserAttachment))
+                .collect(),
+            AgentRunKind::Task(task) => task
+                .artifacts
+                .iter()
+                .cloned()
+                .map(|artifact| ArtifactInput::new(artifact, ArtifactInputSource::TaskInput))
+                .collect(),
+            AgentRunKind::Gate(crate::input::GateInput {
+                task: Some(task), ..
+            }) => task
+                .artifacts
+                .iter()
+                .cloned()
+                .map(|artifact| ArtifactInput::new(artifact, ArtifactInputSource::TaskInput))
+                .collect(),
+            AgentRunKind::FollowUp(_) | AgentRunKind::Gate(_) => Vec::new(),
+        };
+        messages.push(ConversationMessage::chat(
+            ChatMessage::user(&user_message).with_artifacts(artifact_inputs),
+        ));
 
         let task_id = match &run.kind {
             AgentRunKind::Task(task) => Some(task.task_id),
@@ -840,16 +858,18 @@ mod tests {
     fn instruction_messages_use_developer_when_supported() {
         let messages = build_instruction_messages("root", "app rules", true);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "developer");
-        assert_eq!(messages[0].content, "root\n\napp rules");
+        let message = messages[0].as_chat().unwrap();
+        assert_eq!(message.role, nenjo_models::ChatRole::Developer);
+        assert_eq!(message.content, "root\n\napp rules");
     }
 
     #[test]
     fn instruction_messages_fallback_to_system_when_developer_unsupported() {
         let messages = build_instruction_messages("root", "app rules", false);
         assert_eq!(messages.len(), 1);
-        assert_eq!(messages[0].role, "system");
-        assert_eq!(messages[0].content, "root\n\napp rules");
+        let message = messages[0].as_chat().unwrap();
+        assert_eq!(message.role, nenjo_models::ChatRole::System);
+        assert_eq!(message.content, "root\n\napp rules");
     }
 
     #[test]

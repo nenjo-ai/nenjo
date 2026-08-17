@@ -17,6 +17,37 @@ use nenjo_tool_api::{Tool, ToolCall, ToolCategory, ToolResult};
 use tokio::sync::Notify;
 use uuid::Uuid;
 
+fn message_text(message: &nenjo_models::ConversationMessage) -> String {
+    match message {
+        nenjo_models::ConversationMessage::Chat(chat) => chat.content.clone(),
+        nenjo_models::ConversationMessage::AssistantToolCalls { text, tool_calls } => text
+            .clone()
+            .unwrap_or_else(|| serde_json::to_string(tool_calls).unwrap()),
+        nenjo_models::ConversationMessage::ToolResults(results) => results
+            .iter()
+            .map(|result| result.output.text_content())
+            .collect::<Vec<_>>()
+            .join("\n"),
+        nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.clone(),
+    }
+}
+
+fn tool_result_texts(messages: &[nenjo_models::ConversationMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|message| match message {
+            nenjo_models::ConversationMessage::ToolResults(results) => Some(
+                results
+                    .iter()
+                    .map(|result| result.output.text_content())
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            ),
+            _ => None,
+        })
+        .collect()
+}
+
 fn model(_id: Uuid) -> ModelManifest {
     ModelManifest {
         slug: model_manifest_slug("mock", "mock-v1"),
@@ -28,6 +59,10 @@ fn model(_id: Uuid) -> ModelManifest {
         context_window: None,
         base_url: None,
         native_tools: vec![],
+        capabilities: Vec::new(),
+        input_modalities: Vec::new(),
+        output_modalities: Vec::new(),
+        execution_modes: Vec::new(),
     }
 }
 
@@ -211,13 +246,11 @@ impl ModelProvider for SubAgentScriptLlm {
             .lock()
             .unwrap()
             .push(tool_names.clone());
-        self.captured.messages.lock().unwrap().push(
-            request
-                .messages
-                .iter()
-                .map(|message| message.content.clone())
-                .collect(),
-        );
+        self.captured
+            .messages
+            .lock()
+            .unwrap()
+            .push(request.messages.iter().map(message_text).collect());
 
         if tool_names.iter().any(|name| name == "update_parent_agent") {
             let call = self.child_calls.fetch_add(1, Ordering::SeqCst);
@@ -360,13 +393,11 @@ impl ModelProvider for DelegateScriptLlm {
             .lock()
             .unwrap()
             .push(tool_names.clone());
-        self.captured.messages.lock().unwrap().push(
-            request
-                .messages
-                .iter()
-                .map(|message| message.content.clone())
-                .collect(),
-        );
+        self.captured
+            .messages
+            .lock()
+            .unwrap()
+            .push(request.messages.iter().map(message_text).collect());
 
         if tool_names.iter().any(|name| name == "update_parent_agent") {
             self.child_calls.fetch_add(1, Ordering::SeqCst);
@@ -913,22 +944,17 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
     let output = runner.chat("coordinate a review").await.unwrap();
     assert_eq!(output.text, "parent complete");
 
-    let tool_results = output
-        .messages
-        .iter()
-        .filter(|message| message.role == "tool")
-        .map(|message| message.content.as_str())
-        .collect::<Vec<_>>();
+    let tool_results = tool_result_texts(&output.messages);
     assert!(
         tool_results
             .iter()
-            .any(|content| content.contains(r#"\"operation_id\":\"security_review\""#)),
+            .any(|content| content.contains(r#""operation_id":"security_review""#)),
         "{tool_results:?}"
     );
     assert!(
         tool_results
             .iter()
-            .any(|content| content.contains(r#"\"kind\":\"completed\""#)),
+            .any(|content| content.contains(r#""kind":"completed""#)),
         "{tool_results:?}"
     );
     assert!(
@@ -1050,22 +1076,12 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
     let output = runner.chat("delegate review").await.unwrap();
     assert_eq!(output.text, "parent saw delegated result");
 
-    let tool_results = output
-        .messages
-        .iter()
-        .filter(|message| message.role == "tool")
-        .map(|message| message.content.as_str())
-        .collect::<Vec<_>>();
+    let tool_results = tool_result_texts(&output.messages);
     let list_result = tool_results
         .iter()
-        .find(|content| content.contains(r#""tool_call_id":"list-delegatable""#))
+        .find(|content| content.contains("agents"))
         .expect("list_delegatable_agents tool result");
-    let list_payload: serde_json::Value = serde_json::from_str(
-        serde_json::from_str::<serde_json::Value>(list_result).unwrap()["content"]
-            .as_str()
-            .unwrap(),
-    )
-    .unwrap();
+    let list_payload: serde_json::Value = serde_json::from_str(list_result).unwrap();
     let first_agent = &list_payload["agents"][0];
     assert_eq!(first_agent["slug"], "reviewer");
     assert_eq!(first_agent["description"], "reviewer agent");
@@ -1075,7 +1091,7 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
     assert!(
         tool_results
             .iter()
-            .any(|content| content.contains(r#"\"kind\":\"delegation\""#)
+            .any(|content| content.contains(r#""kind":"delegation""#)
                 && content.contains("delegated review complete")),
         "{tool_results:?}"
     );

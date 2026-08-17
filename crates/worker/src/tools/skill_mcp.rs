@@ -73,7 +73,7 @@ impl Tool for SkillMcpTool {
         if !arguments.is_object() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("'arguments' must be an object".to_string()),
             });
         }
@@ -86,12 +86,12 @@ impl Tool for SkillMcpTool {
         {
             Ok(output) => Ok(ToolResult {
                 success: true,
-                output,
+                output: output.into(),
                 error: None,
             }),
             Err(error) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(error.to_string()),
             }),
         }

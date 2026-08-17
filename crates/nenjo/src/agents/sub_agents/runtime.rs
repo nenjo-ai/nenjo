@@ -575,23 +575,32 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
                     tool: tool_name,
                     success: result.success,
                     summary: truncate(
-                        result.error.as_deref().unwrap_or(result.output.as_str()),
+                        &result
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| result.output.text_content()),
                         240,
                     ),
                 })
                 .await;
         }
         TurnEvent::TranscriptMessage { message } => {
-            let summary = truncate(&message.content, 240);
-            let event = match message.role.as_str() {
-                "user" => SubAgentTranscriptEvent::Input { summary },
-                "assistant" => SubAgentTranscriptEvent::AssistantMessage { summary },
-                "tool" => SubAgentTranscriptEvent::ToolResult {
-                    tool: "tool".into(),
-                    success: true,
-                    summary,
-                },
-                _ => return,
+            let event = match message {
+                nenjo_models::ConversationMessage::Chat(chat) => {
+                    let summary = truncate(&chat.content, 240);
+                    match chat.role {
+                        nenjo_models::ChatRole::User => SubAgentTranscriptEvent::Input { summary },
+                        nenjo_models::ChatRole::Assistant => {
+                            SubAgentTranscriptEvent::AssistantMessage { summary }
+                        }
+                        nenjo_models::ChatRole::System | nenjo_models::ChatRole::Developer => {
+                            return;
+                        }
+                    }
+                }
+                nenjo_models::ConversationMessage::AssistantToolCalls { .. }
+                | nenjo_models::ConversationMessage::ToolResults(_)
+                | nenjo_models::ConversationMessage::ArtifactAnalysis(_) => return,
             };
             child.transcript(event).await;
         }

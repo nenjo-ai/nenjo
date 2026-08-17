@@ -8,8 +8,13 @@ use crate::native::{
     ModelMediaCapabilities, NativeMediaRequest, NativeMediaResponse, ProviderMediaCapabilities,
     TranscribeAudioRequest, TranscriptSegment,
 };
+use crate::openai_multimodal::{
+    ChatArtifactDialect, ChatCompletionsContent, artifact_content, chat_artifact_transport,
+};
 use crate::openai_tools::{ProviderToolSpec, convert_tools};
-use crate::traits::{ChatMessage, ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
+use crate::traits::{
+    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
+};
 use anyhow::Context;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -40,7 +45,7 @@ struct NativeChatRequest {
 struct NativeMessage {
     role: String,
     #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<String>,
+    content: Option<ChatCompletionsContent>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_call_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -266,6 +271,23 @@ fn audio_file_extension(mime_type: &str) -> &'static str {
     }
 }
 
+fn supports_openai_transcription_media_type(media_type: &str) -> bool {
+    matches!(
+        media_type,
+        "audio/mpeg"
+            | "audio/mp3"
+            | "audio/wav"
+            | "audio/wave"
+            | "audio/x-wav"
+            | "audio/webm"
+            | "audio/mp4"
+            | "audio/m4a"
+            | "audio/x-m4a"
+            | "audio/ogg"
+            | "audio/flac"
+    )
+}
+
 fn prepare_openai_audio_data_uri(data_uri: &str) -> anyhow::Result<DecodedAudioDataUri> {
     let decoded = decode_base64_data_uri(data_uri)?;
     let mime_type = decoded.mime_type;
@@ -346,66 +368,87 @@ impl OpenAiProvider {
         convert_tools(tools, crate::sanitize_tool_name)
     }
 
-    fn convert_messages(messages: &[ChatMessage]) -> Vec<NativeMessage> {
-        messages
-            .iter()
-            .map(|m| {
-                if m.role == "assistant"
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
-                    && let Some(tool_calls_value) = value.get("tool_calls")
-                    && let Ok(parsed_calls) =
-                        serde_json::from_value::<Vec<ToolCall>>(tool_calls_value.clone())
-                {
-                    let tool_calls = parsed_calls
-                        .into_iter()
-                        .map(|tc| NativeToolCall {
-                            id: Some(tc.id),
-                            kind: Some("function".to_string()),
-                            function: NativeFunctionCall {
-                                name: tc.name,
-                                arguments: tc.arguments,
-                            },
-                        })
-                        .collect::<Vec<_>>();
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    return NativeMessage {
+    fn convert_messages(request: &ChatRequest<'_>) -> anyhow::Result<Vec<NativeMessage>> {
+        let mut native = Vec::new();
+        for message in request.messages {
+            match message {
+                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                    native.push(NativeMessage {
                         role: "assistant".to_string(),
-                        content,
+                        content: text.clone().map(ChatCompletionsContent::text),
                         tool_call_id: None,
-                        tool_calls: Some(tool_calls),
-                    };
+                        tool_calls: Some(
+                            tool_calls
+                                .iter()
+                                .map(|tc| NativeToolCall {
+                                    id: Some(tc.id.clone()),
+                                    kind: Some("function".to_string()),
+                                    function: NativeFunctionCall {
+                                        name: tc.name.clone(),
+                                        arguments: tc.arguments.clone(),
+                                    },
+                                })
+                                .collect(),
+                        ),
+                    });
                 }
-
-                if m.role == "tool"
-                    && let Ok(value) = serde_json::from_str::<serde_json::Value>(&m.content)
-                {
-                    let tool_call_id = value
-                        .get("tool_call_id")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    let content = value
-                        .get("content")
-                        .and_then(serde_json::Value::as_str)
-                        .map(ToString::to_string);
-                    return NativeMessage {
-                        role: "tool".to_string(),
-                        content,
-                        tool_call_id,
-                        tool_calls: None,
-                    };
+                ConversationMessage::ToolResults(results) => {
+                    for result in results {
+                        native.push(NativeMessage {
+                            role: "tool".to_string(),
+                            content: Some(ChatCompletionsContent::text(
+                                result.output.text_content(),
+                            )),
+                            tool_call_id: Some(result.tool_call_id.clone()),
+                            tool_calls: None,
+                        });
+                    }
+                    let references = results.iter().flat_map(|result| {
+                        result.output.parts().iter().filter_map(|part| match part {
+                            crate::ToolOutputPart::Artifact(reference) => Some((reference, None)),
+                            crate::ToolOutputPart::Text(_) => None,
+                        })
+                    });
+                    let content = artifact_content(
+                        "Inspect the attached artifact.",
+                        references,
+                        request.prepared_artifacts,
+                        ChatArtifactDialect::OpenAi,
+                    )?;
+                    if content.has_media() {
+                        native.push(NativeMessage {
+                            role: "user".to_string(),
+                            content: Some(content),
+                            tool_call_id: None,
+                            tool_calls: None,
+                        });
+                    }
                 }
-
-                NativeMessage {
-                    role: m.role.clone(),
-                    content: Some(m.content.clone()),
+                ConversationMessage::Chat(message) => native.push(NativeMessage {
+                    role: message.role.to_string(),
+                    content: Some(artifact_content(
+                        &message.content,
+                        message.artifacts.iter().map(|input| {
+                            (
+                                input.artifact(),
+                                input.instruction().map(|value| value.as_str()),
+                            )
+                        }),
+                        request.prepared_artifacts,
+                        ChatArtifactDialect::OpenAi,
+                    )?),
                     tool_call_id: None,
                     tool_calls: None,
-                }
-            })
-            .collect()
+                }),
+                ConversationMessage::ArtifactAnalysis(analysis) => native.push(NativeMessage {
+                    role: "user".to_string(),
+                    content: Some(ChatCompletionsContent::text(analysis.model_context())),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }),
+            }
+        }
+        Ok(native)
     }
 
     fn parse_native_response(message: NativeResponseMessage) -> ChatResponse {
@@ -580,6 +623,7 @@ impl ModelProvider for OpenAiProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        request.ensure_artifacts_prepared()?;
         let api_key = self.api_key.as_ref().ok_or_else(|| {
             anyhow::anyhow!("OpenAI API key not set. Set OPENAI_API_KEY or edit config.toml.")
         })?;
@@ -588,7 +632,7 @@ impl ModelProvider for OpenAiProvider {
         let tools = Self::convert_tools(request.tools);
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(request.messages),
+            messages: Self::convert_messages(&request)?,
             // Reasoning models (o1/o3/o4) require temperature=1; omit it to use the default.
             temperature: if is_reasoning {
                 None
@@ -653,6 +697,41 @@ impl ModelProvider for OpenAiProvider {
 
     fn supports_developer_role(&self, model: &str) -> bool {
         Self::is_developer_role_model(model)
+    }
+
+    fn artifact_input_transport(
+        &self,
+        _model: &str,
+        capability: crate::ModelCapabilityId,
+        media_type: &crate::MediaType,
+    ) -> crate::ArtifactInputTransport {
+        const MAX_INLINE_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
+        match capability {
+            crate::ModelCapabilityId::Chat
+            | crate::ModelCapabilityId::AnalyzeImage
+            | crate::ModelCapabilityId::AnalyzeVideo
+            | crate::ModelCapabilityId::AnalyzeDocument => {
+                chat_artifact_transport(ChatArtifactDialect::OpenAi, media_type.essence_str())
+            }
+            crate::ModelCapabilityId::TranscribeAudio => {
+                if supports_openai_transcription_media_type(media_type.essence_str()) {
+                    crate::ArtifactInputTransport::Inline {
+                        max_bytes: std::num::NonZeroU64::new(MAX_INLINE_ARTIFACT_BYTES)
+                            .expect("inline artifact limit is non-zero"),
+                    }
+                } else {
+                    crate::ArtifactInputTransport::Unsupported
+                }
+            }
+            crate::ModelCapabilityId::GenerateSpeech
+            | crate::ModelCapabilityId::GenerateImage
+            | crate::ModelCapabilityId::EditImage
+            | crate::ModelCapabilityId::GenerateVideo
+            | crate::ModelCapabilityId::EditVideo
+            | crate::ModelCapabilityId::ImageToVideo
+            | crate::ModelCapabilityId::ReferenceToVideo
+            | crate::ModelCapabilityId::ExtendVideo => crate::ArtifactInputTransport::Unsupported,
+        }
     }
 
     fn media_capabilities(&self) -> Option<ProviderMediaCapabilities> {
@@ -751,11 +830,12 @@ mod tests {
     #[tokio::test]
     async fn chat_fails_without_key() {
         let p = OpenAiProvider::new(None);
-        let messages = vec![ChatMessage::user("hello")];
+        let messages = vec![ConversationMessage::user("hello")];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = p.chat(request, "gpt-4o", 0.7).await;
         assert!(result.is_err());
@@ -766,13 +846,14 @@ mod tests {
     async fn chat_with_system_fails_without_key() {
         let p = OpenAiProvider::new(None);
         let messages = vec![
-            ChatMessage::system("You are Nenjo"),
-            ChatMessage::user("test"),
+            ConversationMessage::system("You are Nenjo"),
+            ConversationMessage::user("test"),
         ];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = p.chat(request, "gpt-4o", 0.5).await;
         assert!(result.is_err());
@@ -831,5 +912,58 @@ mod tests {
             .expect_err("unsupported mime type");
 
         assert!(error.to_string().contains("MIME type 'text/plain'"));
+    }
+
+    #[test]
+    fn artifact_transport_matches_openai_chat_content_parts() {
+        let provider = OpenAiProvider::new(None);
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "gpt-4o",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("image/png").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
+        assert_eq!(
+            provider.artifact_input_transport(
+                "gpt-4o",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("image/svg+xml").unwrap()
+            ),
+            crate::ArtifactInputTransport::Unsupported
+        );
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "gpt-4o",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("application/pdf").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "gpt-audio-1.5",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("audio/wav").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
+        assert_eq!(
+            provider.artifact_input_transport(
+                "gpt-5.6",
+                crate::ModelCapabilityId::Chat,
+                &crate::MediaType::parse("video/mp4").unwrap()
+            ),
+            crate::ArtifactInputTransport::Unsupported
+        );
+        assert!(matches!(
+            provider.artifact_input_transport(
+                "gpt-4o-transcribe",
+                crate::ModelCapabilityId::TranscribeAudio,
+                &crate::MediaType::parse("audio/webm").unwrap()
+            ),
+            crate::ArtifactInputTransport::Inline { .. }
+        ));
     }
 }

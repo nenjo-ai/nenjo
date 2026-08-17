@@ -3,7 +3,9 @@
 //! - Gemini CLI OAuth tokens (reuse existing ~/.gemini/ authentication)
 //! - Google Cloud ADC (`GOOGLE_APPLICATION_CREDENTIALS`)
 
-use crate::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
+use crate::traits::{
+    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, TokenUsage,
+};
 use async_trait::async_trait;
 use directories::UserDirs;
 use reqwest::Client;
@@ -269,6 +271,7 @@ impl ModelProvider for GeminiProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        request.reject_artifact_inputs()?;
         let auth = self.auth.as_ref().ok_or_else(|| {
             anyhow::anyhow!(
                 "Gemini API key not found. Options:\n\
@@ -283,24 +286,28 @@ impl ModelProvider for GeminiProvider {
         let mut system_instruction: Option<Content> = None;
         let mut contents = Vec::new();
 
-        for msg in request.messages {
-            match msg.role.as_str() {
-                "system" | "developer" => match &mut system_instruction {
-                    Some(existing) => {
-                        existing.parts.push(Part {
-                            text: msg.content.clone(),
-                        });
-                    }
-                    None => {
-                        system_instruction = Some(Content {
-                            role: None,
-                            parts: vec![Part {
+        for message in request.messages {
+            match message {
+                ConversationMessage::Chat(msg)
+                    if matches!(msg.role, ChatRole::System | ChatRole::Developer) =>
+                {
+                    match &mut system_instruction {
+                        Some(existing) => {
+                            existing.parts.push(Part {
                                 text: msg.content.clone(),
-                            }],
-                        });
+                            });
+                        }
+                        None => {
+                            system_instruction = Some(Content {
+                                role: None,
+                                parts: vec![Part {
+                                    text: msg.content.clone(),
+                                }],
+                            });
+                        }
                     }
-                },
-                "assistant" => {
+                }
+                ConversationMessage::Chat(msg) if msg.role == ChatRole::Assistant => {
                     contents.push(Content {
                         role: Some("model".to_string()),
                         parts: vec![Part {
@@ -308,12 +315,43 @@ impl ModelProvider for GeminiProvider {
                         }],
                     });
                 }
-                _ => {
-                    // user, tool, and any other roles → "user"
+                ConversationMessage::Chat(msg) => {
                     contents.push(Content {
                         role: Some("user".to_string()),
                         parts: vec![Part {
                             text: msg.content.clone(),
+                        }],
+                    });
+                }
+                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                    let mut parts = Vec::new();
+                    if let Some(text) = text {
+                        parts.push(Part { text: text.clone() });
+                    }
+                    parts.extend(tool_calls.iter().map(|call| Part {
+                        text: format!("Tool call {}: {}", call.name, call.arguments),
+                    }));
+                    contents.push(Content {
+                        role: Some("model".to_string()),
+                        parts,
+                    });
+                }
+                ConversationMessage::ToolResults(results) => {
+                    contents.push(Content {
+                        role: Some("user".to_string()),
+                        parts: results
+                            .iter()
+                            .map(|result| Part {
+                                text: result.output.text_content(),
+                            })
+                            .collect(),
+                    });
+                }
+                ConversationMessage::ArtifactAnalysis(analysis) => {
+                    contents.push(Content {
+                        role: Some("user".to_string()),
+                        parts: vec![Part {
+                            text: analysis.model_context(),
                         }],
                     });
                 }

@@ -22,6 +22,8 @@ pub enum ScopeResource {
     Projects,
     /// Organization tasks and task-backed execution runs.
     Tasks,
+    /// Immutable organization artifacts.
+    Artifacts,
     /// Org-level library knowledge documents.
     Library,
     /// Routine manifests.
@@ -82,6 +84,8 @@ impl PlatformScope {
             "projects:write" => Self::write(ScopeResource::Projects),
             "tasks:read" => Self::read(ScopeResource::Tasks),
             "tasks:write" => Self::write(ScopeResource::Tasks),
+            "artifacts:read" => Self::read(ScopeResource::Artifacts),
+            "artifacts:write" => Self::write(ScopeResource::Artifacts),
             "library:write" => Self::write(ScopeResource::Library),
             "routines:read" => Self::read(ScopeResource::Routines),
             "routines:write" => Self::write(ScopeResource::Routines),
@@ -145,6 +149,7 @@ impl fmt::Display for PlatformScope {
                     ScopeResource::Domains => "domains",
                     ScopeResource::Projects => "projects",
                     ScopeResource::Tasks => "tasks",
+                    ScopeResource::Artifacts => "artifacts",
                     ScopeResource::Library => "library",
                     ScopeResource::Routines => "routines",
                     ScopeResource::Models => "models",
@@ -168,15 +173,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn task_write_scope_implies_task_read_scope() {
-        let write = PlatformScope::parse("tasks:write");
-        let read = PlatformScope::parse("tasks:read");
-        assert!(write.allows(&read));
-        assert_eq!(write.to_string(), "tasks:write");
+    fn write_scope_implies_read_within_its_resource_family() {
+        for resource in ["tasks", "artifacts"] {
+            let write = PlatformScope::parse(&format!("{resource}:write"));
+            let read = PlatformScope::parse(&format!("{resource}:read"));
+            assert!(write.allows(&read));
+            assert_eq!(write.to_string(), format!("{resource}:write"));
+        }
     }
 
     #[test]
-    fn task_scope_does_not_grant_project_access() {
-        assert!(!PlatformScope::parse("tasks:read").allows(&PlatformScope::parse("projects:read")));
+    fn task_and_artifact_scopes_are_isolated() {
+        assert!(
+            !PlatformScope::parse("tasks:write").allows(&PlatformScope::parse("artifacts:read"))
+        );
+        assert!(
+            !PlatformScope::parse("artifacts:write").allows(&PlatformScope::parse("tasks:read"))
+        );
     }
 }

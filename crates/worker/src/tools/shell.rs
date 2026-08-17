@@ -444,7 +444,7 @@ where
         if self.security.is_rate_limited() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: too many actions in the last hour".into()),
             });
         }
@@ -454,7 +454,7 @@ where
             Err(denial) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: serde_json::to_string_pretty(&denial)?,
+                    output: serde_json::to_string_pretty(&denial)?.into(),
                     error: Some(denial.message),
                 });
             }
@@ -463,7 +463,7 @@ where
         if !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
@@ -479,7 +479,7 @@ where
             Err(e) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(format!("Failed to build runtime command: {e}")),
                 });
             }
@@ -571,7 +571,8 @@ where
                         ),
                         command,
                         working_directory: &self.security.workspace_dir,
-                    })?,
+                    })?
+                    .into(),
                     error: None,
                 })
             }
@@ -586,7 +587,7 @@ async fn finish_shell_tool_result(
     match process.finish().await {
         Ok(output) => Ok(ToolResult {
             success: status.success(),
-            output: output.stdout,
+            output: output.stdout.into(),
             error: (!output.stderr.is_empty()).then_some(output.stderr),
         }),
         Err(error) => Ok(shell_execution_error(error)),
@@ -669,7 +670,7 @@ fn shell_operation_label(command: &str) -> String {
 fn shell_execution_error(error: impl std::fmt::Display) -> ToolResult {
     ToolResult {
         success: false,
-        output: String::new(),
+        output: String::new().into(),
         error: Some(format!("Failed to execute command: {error}")),
     }
 }
@@ -677,7 +678,7 @@ fn shell_execution_error(error: impl std::fmt::Display) -> ToolResult {
 fn shell_timeout_result() -> ToolResult {
     ToolResult {
         success: false,
-        output: String::new(),
+        output: String::new().into(),
         error: Some(format!(
             "Command timed out after {SHELL_TIMEOUT_SECS}s and was killed"
         )),
@@ -782,7 +783,7 @@ mod tests {
             .await
             .unwrap();
         assert!(result.success);
-        assert!(result.output.trim().contains("hello"));
+        assert!(result.output.text_content().trim().contains("hello"));
         assert!(result.error.is_none());
     }
 
@@ -843,7 +844,7 @@ mod tests {
         let pwd = tool.execute(json!({"command": "pwd"})).await.unwrap();
         assert!(pwd.success);
         assert_eq!(
-            std::fs::canonicalize(pwd.output.trim()).unwrap(),
+            std::fs::canonicalize(pwd.output.text_content().trim()).unwrap(),
             std::fs::canonicalize(&workspace).unwrap()
         );
 
@@ -852,7 +853,10 @@ mod tests {
             .await
             .unwrap();
         assert!(relative_read.success);
-        assert_eq!(relative_read.output.trim(), "scoped workspace");
+        assert_eq!(
+            relative_read.output.text_content().trim(),
+            "scoped workspace"
+        );
     }
 
     #[tokio::test]
@@ -860,7 +864,8 @@ mod tests {
         let tool = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime());
         let result = tool.execute(json!({"command": "rm -rf /"})).await.unwrap();
         assert!(!result.success);
-        let denial: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let denial: serde_json::Value =
+            serde_json::from_str(result.output.as_text().unwrap()).unwrap();
         assert_eq!(denial["type"], "scope_violation");
         assert_eq!(denial["rule"], "blocked_executable");
         assert_eq!(denial["suggestion"]["tool"], "remove");
@@ -979,7 +984,7 @@ mod tests {
             .unwrap();
         assert!(result.success);
         assert!(
-            !result.output.trim().is_empty(),
+            !result.output.text_content().trim().is_empty(),
             "HOME should be available in shell"
         );
 
@@ -989,7 +994,7 @@ mod tests {
             .unwrap();
         assert!(result.success);
         assert!(
-            !result.output.trim().is_empty(),
+            !result.output.text_content().trim().is_empty(),
             "PATH should be available in shell"
         );
     }

@@ -31,6 +31,8 @@ use nenjo_events::{
     ModelCapabilityDefaultsManifestUpdate, PackageArgumentBindingUpdate, ResourceAction,
     ResourceType, TaskScheduleAssignment,
 };
+#[cfg(test)]
+use nenjo_models::{ModelCapabilityId, ModelExecutionMode, ModelModality};
 use nenjo_platform::api_client::{ApiClient, KnowledgeDocumentRecord};
 use nenjo_platform::manifest_contract::ModelRecord;
 use nenjo_platform::{
@@ -217,14 +219,11 @@ struct BootstrapAuthEnvelope {
 
 /// Canonical worker cache entry for a configured model.
 ///
-/// Extra routing fields are stored alongside the core manifest fields in
-/// `models.json`; generic manifest loaders safely ignore them.
+/// The platform ID is stored alongside the storage-neutral model manifest in
+/// `models.json`; the manifest itself carries typed routing metadata.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CachedModelManifest {
     pub id: Uuid,
-    /// Assignable operation capability IDs from the platform models inventory.
-    #[serde(default)]
-    pub capabilities: Vec<String>,
     #[serde(flatten)]
     pub manifest: nenjo::manifest::ModelManifest,
 }
@@ -955,12 +954,10 @@ pub fn load_cached_model_runtime(manifests_dir: &Path) -> Vec<ModelRuntimeConfig
                 .map(str::trim)
                 .filter(|value| !value.is_empty())
                 .map(str::to_owned),
-            capabilities: model
-                .capabilities
-                .into_iter()
-                .map(|capability| capability.trim().to_owned())
-                .filter(|capability| !capability.is_empty())
-                .collect(),
+            capabilities: model.manifest.capabilities,
+            input_modalities: model.manifest.input_modalities,
+            output_modalities: model.manifest.output_modalities,
+            execution_modes: model.manifest.execution_modes,
         })
         .collect()
 }
@@ -1313,12 +1310,6 @@ impl WorkerManifestCache {
         self.upsert_model(&CachedModelManifest {
             id: record.id,
             manifest: record.to_manifest(),
-            capabilities: record
-                .capabilities
-                .iter()
-                .map(|capability| capability.as_str().trim().to_owned())
-                .filter(|capability| !capability.is_empty())
-                .collect(),
         })
     }
 
@@ -2594,8 +2585,11 @@ mod tests {
                     context_window: None,
                     base_url: Some("http://127.0.0.1:8080/v1".into()),
                     native_tools: Vec::new(),
+                    capabilities: vec![ModelCapabilityId::Chat],
+                    input_modalities: vec![ModelModality::Text],
+                    output_modalities: vec![ModelModality::Text],
+                    execution_modes: vec![ModelExecutionMode::Immediate],
                 },
-                capabilities: vec!["chat".into()],
             }],
         )
         .unwrap();
@@ -2613,8 +2607,11 @@ mod tests {
                     context_window: None,
                     base_url: Some("http://127.0.0.1:11434/v1".into()),
                     native_tools: Vec::new(),
+                    capabilities: vec![ModelCapabilityId::Chat, ModelCapabilityId::TranscribeAudio],
+                    input_modalities: vec![ModelModality::Text, ModelModality::Audio],
+                    output_modalities: vec![ModelModality::Text],
+                    execution_modes: vec![ModelExecutionMode::Immediate],
                 },
-                capabilities: vec!["chat".into(), "transcribe_audio".into()],
             })
             .unwrap();
 
@@ -2626,7 +2623,14 @@ mod tests {
             runtime[0].base_url.as_deref(),
             Some("http://127.0.0.1:11434/v1")
         );
-        assert_eq!(runtime[0].capabilities, ["chat", "transcribe_audio"]);
+        assert_eq!(
+            runtime[0].capabilities,
+            [ModelCapabilityId::Chat, ModelCapabilityId::TranscribeAudio]
+        );
+        assert_eq!(
+            runtime[0].input_modalities,
+            [ModelModality::Text, ModelModality::Audio]
+        );
 
         cache.remove_model(model_id).unwrap();
         assert!(load_cached_model_runtime(&cache.manifests_dir).is_empty());
@@ -2672,8 +2676,11 @@ mod tests {
                     context_window: None,
                     base_url: Some("http://127.0.0.1:8080/v1".into()),
                     native_tools: Vec::new(),
+                    capabilities: vec![ModelCapabilityId::TranscribeAudio],
+                    input_modalities: vec![ModelModality::Audio],
+                    output_modalities: vec![ModelModality::Text],
+                    execution_modes: vec![ModelExecutionMode::Immediate],
                 },
-                capabilities: vec!["transcribe_audio".into()],
             }],
         )
         .unwrap();
@@ -2701,7 +2708,10 @@ mod tests {
             panic!("expected canonical model cache entry")
         };
         assert_eq!(model.id, model_id);
-        assert_eq!(model.capabilities, ["transcribe_audio"]);
+        assert_eq!(
+            model.manifest.capabilities,
+            [ModelCapabilityId::TranscribeAudio]
+        );
         let agents = load_cached_agent_model_assignments(&cache.manifests_dir);
         let [agent] = agents.as_slice() else {
             panic!("expected canonical agent cache entry")
@@ -2743,6 +2753,10 @@ mod tests {
             context_window: None,
             base_url: None,
             native_tools: Vec::new(),
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
         };
 
         store

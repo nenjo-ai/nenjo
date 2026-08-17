@@ -3,6 +3,7 @@
 //! [`Command::capability`] selects the capability subject segment, and
 //! [`Command::delivery`] selects queue, broadcast, or targeted delivery.
 
+use nenjo_content::ArtifactRef;
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
@@ -86,6 +87,9 @@ pub enum Command {
         /// Optional encrypted content body. When present, workers should prefer this over `content`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<EncryptedPayload>,
+        /// Immutable artifact revisions attached to this user turn.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        artifacts: Vec<ArtifactRef>,
         /// When true, persist for context/history but do not surface in normal chat views.
         #[serde(default)]
         hidden: bool,
@@ -127,6 +131,9 @@ pub enum Command {
         /// Optional encrypted content body. When present, workers should prefer this over `content`.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_content: Option<EncryptedPayload>,
+        /// Immutable artifact revisions attached to this command invocation.
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        artifacts: Vec<ArtifactRef>,
         /// Target project for context scoping.
         #[serde(default)]
         project: Option<String>,
@@ -231,6 +238,14 @@ pub enum Command {
     /// Resume a paused execution.
     #[serde(rename = "execution.resume")]
     ExecutionResume { execution_run_id: Uuid },
+
+    /// Continue a suspended routine after one committed human resolution.
+    #[serde(rename = "execution.continue")]
+    ExecutionContinue {
+        execution_run_id: Uuid,
+        request_id: Uuid,
+        resolution_revision: u64,
+    },
 
     /// Replace the worker's complete cached task-schedule snapshot.
     ///
@@ -355,6 +370,14 @@ impl std::fmt::Display for Command {
             Self::ExecutionResume { execution_run_id } => {
                 write!(f, "execution.resume(run={execution_run_id})")
             }
+            Self::ExecutionContinue {
+                execution_run_id,
+                request_id,
+                resolution_revision,
+            } => write!(
+                f,
+                "execution.continue(run={execution_run_id}, request={request_id}, revision={resolution_revision})"
+            ),
             Self::TaskSchedulesSync { schedules } => {
                 write!(f, "task_schedules.sync(count={})", schedules.len())
             }
@@ -389,7 +412,8 @@ impl Command {
             Command::TaskExecute { .. }
             | Command::ExecutionCancel { .. }
             | Command::ExecutionPause { .. }
-            | Command::ExecutionResume { .. } => Capability::Task,
+            | Command::ExecutionResume { .. }
+            | Command::ExecutionContinue { .. } => Capability::Task,
 
             Command::WorkerPing => Capability::Ping,
             Command::TaskSchedulesSync { .. } => Capability::Manifest,
@@ -412,7 +436,9 @@ impl Command {
             | Command::PackageGraphChanged { .. }
             | Command::RepoSync { .. }
             | Command::RepoUnsync { .. } => CommandDelivery::Broadcast,
-            Command::WorkerAccountKeyUpdated { .. } => CommandDelivery::Targeted,
+            Command::WorkerAccountKeyUpdated { .. } | Command::ExecutionContinue { .. } => {
+                CommandDelivery::Targeted
+            }
             _ => CommandDelivery::Queue,
         }
     }
@@ -470,7 +496,60 @@ pub enum ResourceAction {
 
 #[cfg(test)]
 mod tests {
+    use nenjo_content::{ArtifactId, ArtifactRef, ArtifactSize, MediaType, Sha256Digest};
+
     use super::*;
+
+    fn artifact() -> ArtifactRef {
+        ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).expect("non-nil artifact id"),
+            Sha256Digest::parse(&format!("sha256:{}", "a".repeat(64))).expect("valid digest"),
+            MediaType::parse("image/png").expect("valid media type"),
+            ArtifactSize::new(4),
+        )
+    }
+
+    #[test]
+    fn chat_artifacts_round_trip_and_legacy_commands_default_to_empty() {
+        let reference = artifact();
+        let session_id = Uuid::new_v4();
+        let command = Command::ChatMessage {
+            id: Some(Uuid::new_v4().to_string()),
+            content: String::new(),
+            encrypted_content: None,
+            artifacts: vec![reference.clone()],
+            hidden: false,
+            project: None,
+            routine: None,
+            agent: Some("reviewer".to_string()),
+            target_type: Some("agent".to_string()),
+            target: Some("reviewer".to_string()),
+            domain_session_id: None,
+            domain_activation: None,
+            session_id,
+        };
+        let encoded = serde_json::to_value(&command).expect("serialize chat command");
+        assert_eq!(
+            encoded["artifacts"][0]["id"],
+            reference.id().as_uuid().to_string()
+        );
+        let decoded: Command = serde_json::from_value(encoded).expect("deserialize chat command");
+        assert!(matches!(
+            decoded,
+            Command::ChatMessage { artifacts, .. } if artifacts == vec![reference]
+        ));
+
+        let legacy: Command = serde_json::from_value(serde_json::json!({
+            "type": "chat.message",
+            "content": "legacy",
+            "session_id": session_id
+        }))
+        .expect("deserialize command without artifact field");
+        assert!(matches!(
+            legacy,
+            Command::ChatMessage { artifacts, .. } if artifacts.is_empty()
+        ));
+    }
 
     #[test]
     fn command_delivery_uses_queue_broadcast_and_targeted_lanes() {
@@ -490,7 +569,7 @@ mod tests {
                 project: Some("demo_project".into()),
                 execution_run_id: id,
                 trigger: TaskExecutionTrigger::Manual,
-                target: TaskExecutionTarget::Agent("coder".into()),
+                target: TaskExecutionTarget::agent("coder"),
                 payload: None,
                 encrypted_payload: None,
             }
@@ -538,6 +617,15 @@ mod tests {
             }
             .delivery(),
             CommandDelivery::Broadcast
+        );
+        assert_eq!(
+            Command::ExecutionContinue {
+                execution_run_id: id,
+                request_id: id,
+                resolution_revision: 1,
+            }
+            .delivery(),
+            CommandDelivery::Targeted
         );
         assert_eq!(
             Command::WorkerAccountKeyUpdated {

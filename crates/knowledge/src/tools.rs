@@ -1169,7 +1169,7 @@ impl Tool for KnowledgeTool {
 
         Ok(ToolResult {
             success: true,
-            output: serde_json::to_string_pretty(&output)?,
+            output: serde_json::to_string_pretty(&output)?.into(),
             error: None,
         })
     }
@@ -1318,7 +1318,8 @@ mod tests {
 
             let result = tool.execute(serde_json::json!({})).await.unwrap();
             assert!(result.success);
-            let packs: Vec<serde_json::Value> = serde_json::from_str(&result.output).unwrap();
+            let packs: Vec<serde_json::Value> =
+                serde_json::from_str(&result.output.text_content()).unwrap();
             assert!(packs.is_empty());
         });
     }
@@ -1511,7 +1512,8 @@ mod tests {
                 }))
                 .await
                 .unwrap();
-            let value: Vec<serde_json::Value> = serde_json::from_str(&result.output).unwrap();
+            let value: Vec<serde_json::Value> =
+                serde_json::from_str(&result.output.text_content()).unwrap();
 
             assert!(!value.is_empty());
             assert!(

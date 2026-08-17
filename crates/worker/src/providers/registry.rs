@@ -23,11 +23,11 @@ use tracing::debug;
 
 use nenjo::ModelProviderFactory;
 use nenjo_models::ReliableProvider;
-use nenjo_models::{ModelProvider, ProviderMediaCapabilities};
+use nenjo_models::{ArtifactInputTransport, MediaType, ModelProvider, ProviderMediaCapabilities};
 
 use super::ModelProviders;
 use crate::config::ReliabilityConfig;
-use crate::media::MediaCapabilitySource;
+use crate::media::{ArtifactTransportResolver, ArtifactTransportTarget, MediaCapabilitySource};
 
 /// Registry that creates LLM provider instances on demand.
 ///
@@ -242,6 +242,24 @@ impl MediaCapabilitySource for ModelProviderRegistry {
     }
 }
 
+impl ArtifactTransportResolver for ModelProviderRegistry {
+    fn resolve_transport(
+        &self,
+        target: ArtifactTransportTarget<'_>,
+        media_type: &MediaType,
+    ) -> ArtifactInputTransport {
+        let bare_name = target
+            .provider
+            .strip_prefix("openai-compatible:")
+            .map_or(target.provider, |_| "openai-compatible");
+        Self::create_bare(bare_name, "", target.base_url).artifact_input_transport(
+            target.model,
+            target.capability,
+            media_type,
+        )
+    }
+}
+
 impl ModelProviderFactory for ModelProviderRegistry {
     fn create(&self, provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
         self.create_with_base_url(provider_name, None)
@@ -329,6 +347,75 @@ mod tests {
             .unwrap();
 
         assert!(!Arc::ptr_eq(&first, &second));
+    }
+
+    #[test]
+    fn artifact_transport_discovery_does_not_require_provider_credentials() {
+        let registry = ModelProviderRegistry::new(
+            &HashMap::new(),
+            &crate::config::ReliabilityConfig::default(),
+        );
+
+        assert!(matches!(
+            registry.resolve_transport(
+                ArtifactTransportTarget {
+                    provider: "openai",
+                    model: "gpt-4.1",
+                    base_url: None,
+                    capability: nenjo_models::ModelCapabilityId::Chat,
+                },
+                &MediaType::parse("image/png").unwrap(),
+            ),
+            ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            registry.resolve_transport(
+                ArtifactTransportTarget {
+                    provider: "openrouter",
+                    model: "google/gemini-3.7-flash",
+                    base_url: None,
+                    capability: nenjo_models::ModelCapabilityId::Chat,
+                },
+                &MediaType::parse("text/markdown").unwrap(),
+            ),
+            ArtifactInputTransport::InlineText { .. }
+        ));
+        assert!(matches!(
+            registry.resolve_transport(
+                ArtifactTransportTarget {
+                    provider: "openai-compatible:vllm",
+                    model: "vision-model",
+                    base_url: Some("http://localhost:8000/v1"),
+                    capability: nenjo_models::ModelCapabilityId::AnalyzeImage,
+                },
+                &MediaType::parse("image/png").unwrap(),
+            ),
+            ArtifactInputTransport::Inline { .. }
+        ));
+        assert!(matches!(
+            registry.resolve_transport(
+                ArtifactTransportTarget {
+                    provider: "openai-compatible:local-stt",
+                    model: "whisper",
+                    base_url: Some("http://localhost:8001/v1"),
+                    capability: nenjo_models::ModelCapabilityId::TranscribeAudio,
+                },
+                &MediaType::parse("audio/wav").unwrap(),
+            ),
+            ArtifactInputTransport::Inline { .. }
+        ));
+        assert_eq!(
+            registry.resolve_transport(
+                ArtifactTransportTarget {
+                    provider: "openai-compatible:vllm",
+                    model: "video-model",
+                    base_url: Some("http://localhost:8000/v1"),
+                    capability: nenjo_models::ModelCapabilityId::AnalyzeVideo,
+                },
+                &MediaType::parse("video/mp4").unwrap(),
+            ),
+            ArtifactInputTransport::Unsupported
+        );
     }
 
     #[test]

@@ -85,8 +85,6 @@ pub enum TaskAttachmentKind {
 /// Provenance for one activated edge reaching a terminal routine step.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RoutineHandoffSource {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routine_id: Option<Uuid>,
     pub source_step_slug: String,
     pub destination_step_slug: String,
     pub edge_condition: String,
@@ -183,6 +181,7 @@ impl ExecutionEventPayload {
 pub enum TaskExecutionState {
     Queued,
     Running,
+    WaitingForHuman,
     Completed,
     Failed { error: String },
     Cancelled,
@@ -949,6 +948,7 @@ mod tests {
             id: Some("msg-123".into()),
             content: "hello".into(),
             encrypted_content: None,
+            artifacts: Vec::new(),
             hidden: true,
             project: None,
             routine: None,
@@ -990,6 +990,7 @@ mod tests {
             id: None,
             content: String::new(),
             encrypted_content: Some(payload.clone()),
+            artifacts: Vec::new(),
             hidden: false,
             project: None,
             routine: None,
@@ -1335,7 +1336,7 @@ mod tests {
                 next_run_at: None,
                 assignment_revision: "2026-07-16T11:00:00Z".to_string(),
                 project: Some("demo".to_string()),
-                target: crate::TaskExecutionTarget::Routine("daily-review".to_string()),
+                target: crate::TaskExecutionTarget::routine("daily-review"),
             },
             revision: 2,
             recovered: false,
@@ -1388,7 +1389,7 @@ mod tests {
             project: Some("demo_project".into()),
             execution_run_id: Uuid::nil(),
             trigger: TaskExecutionTrigger::Manual,
-            target: crate::TaskExecutionTarget::Agent("coder".into()),
+            target: crate::TaskExecutionTarget::agent("coder"),
             payload: Some(crate::TaskExecuteContent {
                 title: "Fix bug".into(),
                 instructions: Some("In auth module".into()),
@@ -1396,6 +1397,7 @@ mod tests {
                 labels: vec!["urgent".into()],
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             }),
             encrypted_payload: None,
         };

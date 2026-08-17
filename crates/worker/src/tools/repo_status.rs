@@ -143,7 +143,7 @@ impl Tool for RepoStatusTool {
         if !self.is_repository() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(format!(
                     "The scoped working directory is not a Git repository: {}",
                     self.security.workspace_dir.display()
@@ -153,19 +153,19 @@ impl Tool for RepoStatusTool {
         if self.security.is_rate_limited() || !self.security.record_action() {
             return Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some("Rate limit exceeded: action budget exhausted".into()),
             });
         }
         match self.snapshot().await {
             Ok(status) => Ok(ToolResult {
                 success: true,
-                output: serde_json::to_string_pretty(&status)?,
+                output: serde_json::to_string_pretty(&status)?.into(),
                 error: None,
             }),
             Err(error) => Ok(ToolResult {
                 success: false,
-                output: String::new(),
+                output: String::new().into(),
                 error: Some(error.to_string()),
             }),
         }
@@ -333,7 +333,8 @@ mod tests {
 
         assert!(tool.is_available_to_model().await);
         let result = tool.execute(json!({})).await.unwrap();
-        let status: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let status: serde_json::Value =
+            serde_json::from_str(result.output.as_text().unwrap()).unwrap();
 
         assert!(result.success, "{:?}", result.error);
         assert_eq!(status["modified"], json!(["tracked.txt"]));
@@ -352,7 +353,8 @@ mod tests {
         let tool = test_tool(workspace.path());
 
         let result = tool.execute(json!({})).await.unwrap();
-        let status: serde_json::Value = serde_json::from_str(&result.output).unwrap();
+        let status: serde_json::Value =
+            serde_json::from_str(result.output.as_text().unwrap()).unwrap();
 
         assert!(result.success, "{:?}", result.error);
         assert!(status["head"].is_null());

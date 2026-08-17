@@ -162,6 +162,7 @@ impl ModelProvider for ReliableProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<super::ChatResponse> {
+        request.ensure_artifacts_prepared()?;
         let models = self.model_chain(model);
         let mut failures = Vec::new();
 
@@ -247,6 +248,7 @@ impl ModelProvider for ReliableProvider {
         temperature: f64,
         events: tokio::sync::mpsc::UnboundedSender<super::ProviderStreamEvent>,
     ) -> anyhow::Result<super::ChatResponse> {
+        request.ensure_artifacts_prepared()?;
         let models = self.model_chain(model);
         let mut failures = Vec::new();
 
@@ -348,6 +350,18 @@ impl ModelProvider for ReliableProvider {
             .unwrap_or(false)
     }
 
+    fn artifact_input_transport(
+        &self,
+        model: &str,
+        capability: super::ModelCapabilityId,
+        media_type: &super::MediaType,
+    ) -> super::ArtifactInputTransport {
+        self.providers
+            .first()
+            .map(|(_, provider)| provider.artifact_input_transport(model, capability, media_type))
+            .unwrap_or(super::ArtifactInputTransport::Unsupported)
+    }
+
     fn media_capabilities(&self) -> Option<ProviderMediaCapabilities> {
         self.providers
             .first()
@@ -391,7 +405,7 @@ impl ModelProvider for ReliableProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{ChatMessage, ChatRequest, ChatResponse, TokenUsage, one_shot};
+    use crate::traits::{ChatRequest, ChatResponse, ConversationMessage, TokenUsage, one_shot};
     use crate::{ProviderStreamEvent, ProviderToolTrace};
     use std::sync::Arc;
 
@@ -700,11 +714,15 @@ mod tests {
             1,
         );
 
-        let messages = vec![ChatMessage::system("system"), ChatMessage::user("hello")];
+        let messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::user("hello"),
+        ];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = provider.chat(request, "test", 0.0).await.unwrap();
         assert_eq!(result.text_or_empty(), "history ok");
@@ -727,11 +745,12 @@ mod tests {
             1,
         );
 
-        let messages = vec![ChatMessage::user("hello")];
+        let messages = vec![ConversationMessage::user("hello")];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
 
@@ -784,11 +803,12 @@ mod tests {
             1,
         );
 
-        let messages = vec![ChatMessage::user("hello")];
+        let messages = vec![ConversationMessage::user("hello")];
         let request = ChatRequest {
             messages: &messages,
             tools: None,
             native_tools: None,
+            prepared_artifacts: None,
         };
         let result = provider.chat(request, "test", 0.0).await.unwrap();
         assert_eq!(result.text_or_empty(), "fallback ok");

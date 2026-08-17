@@ -5,6 +5,10 @@ use reqwest::{Client, StatusCode, Url, header, multipart};
 use std::time::Duration;
 use uuid::Uuid;
 
+use crate::artifact_tools::{
+    ArtifactCatalogRecord, ArtifactDetailRecord, ArtifactRecord, ArtifactUploadGrant,
+    CreateArtifactUploadRequest, DownloadedArtifact,
+};
 use crate::manifest_contract::{
     AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, DomainPromptRecord, RoutineRecord,
 };
@@ -187,6 +191,9 @@ fn routine_graph_body<'a>(
                         RoutineEdgeCondition::Always => "always",
                         RoutineEdgeCondition::OnPass => "on_pass",
                         RoutineEdgeCondition::OnFail => "on_fail",
+                        RoutineEdgeCondition::Approved => "approved",
+                        RoutineEdgeCondition::ChangesRequested => "changes_requested",
+                        RoutineEdgeCondition::Rejected => "rejected",
                     }
                     .to_string(),
                 ),
@@ -2304,6 +2311,220 @@ impl PlatformManifestClient {
 
         bail!("knowledge document not found in pack {pack}: {reference}")
     }
+
+    /// Create an organization-scoped signed artifact upload session.
+    pub async fn create_artifact_upload(
+        &self,
+        request: &CreateArtifactUploadRequest,
+    ) -> Result<ArtifactUploadGrant> {
+        let response = self
+            .http
+            .post(format!("{}/api/v1/artifacts/uploads", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .json(request)
+            .send_with_platform_retry()
+            .await
+            .context("failed to create artifact upload")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("artifact upload initiation failed with status {status}: {body}");
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode artifact upload grant")
+    }
+
+    /// Upload encrypted bytes directly to a signed object-store URL.
+    pub async fn put_signed_artifact(
+        &self,
+        grant: &ArtifactUploadGrant,
+        ciphertext: Vec<u8>,
+    ) -> Result<()> {
+        if grant.already_ready {
+            return Ok(());
+        }
+        let content_length = u64::try_from(ciphertext.len())
+            .context("artifact ciphertext length does not fit u64")?;
+        if content_length != grant.content_length {
+            bail!(
+                "artifact ciphertext length {content_length} does not match signed length {}",
+                grant.content_length
+            );
+        }
+        let upload_url = grant
+            .upload_url
+            .as_deref()
+            .context("artifact upload grant is missing its signed URL")?;
+        let response = self
+            .http
+            .put(upload_url)
+            .header(header::CONTENT_TYPE, &grant.content_type)
+            .header(header::CONTENT_LENGTH, grant.content_length)
+            .header("x-amz-checksum-sha256", &grant.checksum_sha256)
+            .body(ciphertext)
+            .send()
+            .await
+            .context("failed to upload artifact to object storage")?;
+        if !response.status().is_success() {
+            bail!(
+                "signed artifact upload failed with status {}",
+                response.status()
+            );
+        }
+        Ok(())
+    }
+
+    /// Finalize a signed upload and return immutable artifact metadata.
+    pub async fn complete_artifact_upload(&self, upload_id: Uuid) -> Result<ArtifactRecord> {
+        let response = self
+            .http
+            .post(format!(
+                "{}/api/v1/artifacts/uploads/{upload_id}/complete",
+                self.base_url
+            ))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to finalize artifact upload")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("artifact upload finalization failed with status {status}: {body}");
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode finalized artifact")
+    }
+
+    /// List the organization artifact catalog around one directory.
+    pub async fn list_artifacts(&self, path: &str) -> Result<ArtifactCatalogRecord> {
+        let mut url = Url::parse(&format!("{}/api/v1/artifacts", self.base_url))?;
+        url.query_pairs_mut()
+            .append_pair("path", path)
+            .append_pair("depth", "1");
+        let response = self
+            .http
+            .get(url)
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to list artifacts")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("artifact catalog request failed with status {status}: {body}");
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode artifact catalog")
+    }
+
+    /// Fetch authoritative metadata for one immutable artifact revision.
+    pub async fn get_artifact(&self, artifact_id: Uuid) -> Result<ArtifactDetailRecord> {
+        let response = self
+            .http
+            .get(format!("{}/api/v1/artifacts/{artifact_id}", self.base_url))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to get artifact metadata")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("artifact metadata request failed with status {status}: {body}");
+        }
+        response
+            .json()
+            .await
+            .context("failed to decode artifact metadata")
+    }
+
+    /// Download one encrypted artifact envelope through a short-lived signed URL.
+    pub async fn download_artifact(
+        &self,
+        artifact_id: Uuid,
+        max_ciphertext_bytes: u64,
+    ) -> Result<DownloadedArtifact> {
+        #[derive(serde::Deserialize)]
+        struct DownloadGrant {
+            artifact: ArtifactRecord,
+            download_url: String,
+        }
+
+        let response = self
+            .http
+            .get(format!(
+                "{}/api/v1/artifacts/{artifact_id}/download",
+                self.base_url
+            ))
+            .header("X-API-Key", &self.api_key)
+            .send_with_platform_retry()
+            .await
+            .context("failed to request artifact download")?;
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            bail!("artifact download request failed with status {status}: {body}");
+        }
+        let grant: DownloadGrant = response
+            .json()
+            .await
+            .context("failed to decode artifact download grant")?;
+        if grant.artifact.id != artifact_id {
+            bail!("artifact download grant identity does not match the request");
+        }
+        let declared_size = u64::try_from(grant.artifact.ciphertext_size_bytes)
+            .context("artifact ciphertext size is negative")?;
+        if declared_size > max_ciphertext_bytes {
+            bail!("artifact encrypted envelope exceeds the harness download limit");
+        }
+        let response = self
+            .http
+            .get(&grant.download_url)
+            .send()
+            .await
+            .context("failed to download artifact content")?;
+        if !response.status().is_success() {
+            bail!(
+                "signed artifact download failed with status {}",
+                response.status()
+            );
+        }
+        if response
+            .content_length()
+            .is_some_and(|length| length > max_ciphertext_bytes || length != declared_size)
+        {
+            bail!("signed artifact download length does not match platform metadata");
+        }
+        let capacity = usize::try_from(declared_size)
+            .context("artifact ciphertext size does not fit this platform")?;
+        let mut response = response;
+        let mut ciphertext = Vec::with_capacity(capacity);
+        while let Some(chunk) = response
+            .chunk()
+            .await
+            .context("failed to read downloaded artifact content")?
+        {
+            let next_size = ciphertext.len().saturating_add(chunk.len());
+            if u64::try_from(next_size).unwrap_or(u64::MAX) > max_ciphertext_bytes {
+                bail!("downloaded artifact exceeds the harness download limit");
+            }
+            ciphertext.extend_from_slice(&chunk);
+        }
+        let actual_size = u64::try_from(ciphertext.len())
+            .context("downloaded artifact length does not fit u64")?;
+        if actual_size != declared_size || actual_size > max_ciphertext_bytes {
+            bail!("downloaded artifact length does not match platform metadata");
+        }
+        Ok(DownloadedArtifact {
+            artifact: grant.artifact,
+            ciphertext,
+        })
+    }
 }
 
 fn knowledge_doc_reference_paths(reference: &str) -> Vec<String> {
@@ -2442,6 +2663,78 @@ mod tests {
 
         assert_eq!(body.steps[0].position_x, Some(42.0));
         assert_eq!(body.steps[0].position_y, Some(99.0));
+    }
+
+    #[test]
+    fn routine_graph_body_supports_human_request_and_outcome_edges() {
+        let graph = RoutineGraphInput {
+            entry_steps: vec![Slug::derive("produce")],
+            steps: vec![
+                RoutineStepInput {
+                    id: None,
+                    slug: Slug::derive("produce"),
+                    name: "Produce".to_string(),
+                    step_type: RoutineStepType::Agent,
+                    council: None,
+                    agent: Some(Slug::derive("writer")),
+                    config: RoutineStepConfigInput::default(),
+                    encrypted_payload: None,
+                    position_x: None,
+                    position_y: None,
+                    order_index: 0,
+                },
+                RoutineStepInput {
+                    id: None,
+                    slug: Slug::derive("review"),
+                    name: "Review".to_string(),
+                    step_type: RoutineStepType::Human,
+                    council: None,
+                    agent: None,
+                    config: serde_json::from_value(serde_json::json!({
+                        "request": { "title": "Review {{ task.title }}" }
+                    }))
+                    .expect("valid human step config"),
+                    encrypted_payload: None,
+                    position_x: None,
+                    position_y: None,
+                    order_index: 1,
+                },
+            ],
+            edges: vec![
+                RoutineEdgeInput {
+                    source_step: Slug::derive("review"),
+                    target_step: Slug::derive("produce"),
+                    condition: RoutineEdgeCondition::ChangesRequested,
+                    metadata: serde_json::json!({}),
+                },
+                RoutineEdgeInput {
+                    source_step: Slug::derive("review"),
+                    target_step: Slug::derive("produce"),
+                    condition: RoutineEdgeCondition::Approved,
+                    metadata: serde_json::json!({}),
+                },
+                RoutineEdgeInput {
+                    source_step: Slug::derive("review"),
+                    target_step: Slug::derive("produce"),
+                    condition: RoutineEdgeCondition::Rejected,
+                    metadata: serde_json::json!({}),
+                },
+            ],
+        };
+
+        let body = routine_graph_body(None, None, None, &graph);
+
+        assert_eq!(
+            serde_json::to_value(&body.steps[1].config).expect("serialize config")["request"]["title"],
+            "Review {{ task.title }}"
+        );
+        assert_eq!(
+            body.edges
+                .iter()
+                .filter_map(|edge| edge.condition.as_deref())
+                .collect::<Vec<_>>(),
+            vec!["changes_requested", "approved", "rejected"]
+        );
     }
 
     #[tokio::test]

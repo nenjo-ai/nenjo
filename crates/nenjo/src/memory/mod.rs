@@ -1,8 +1,8 @@
 //! Memory system for persistent agent knowledge.
 //!
 //! The [`Memory`] trait defines the interface for storing and retrieving
-//! agent facts and artifacts. The default [`MarkdownMemory`] backend uses
-//! plain markdown files. Custom backends can implement the trait directly.
+//! agent facts. The default [`MarkdownMemory`] backend uses plain markdown
+//! files. Organization artifacts are provided by the platform artifact tools.
 //!
 //! # Usage
 //!
@@ -12,7 +12,7 @@
 //! let provider = Provider::builder()
 //!     .with_loader(client)
 //!     .with_model_factory(factory)
-//!     .with_memory(MarkdownMemory::new("./state/memory", "./state"))
+//!     .with_memory(MarkdownMemory::new("./state/memory"))
 //!     .build()
 //!     .await?;
 //! ```
@@ -23,18 +23,16 @@ pub mod tools;
 pub mod types;
 
 pub use markdown::MarkdownMemory;
-pub use prompt::{build_artifact_vars, build_memory_vars};
-pub use types::{ArtifactEntry, MemoryCategory, MemoryFact, MemoryScope};
+pub use prompt::build_memory_vars;
+pub use types::{MemoryCategory, MemoryFact, MemoryScope};
 
 use anyhow::Result;
 use std::sync::Arc;
 
-/// Trait for persistent agent memory and artifact backends.
+/// Trait for persistent agent memory backends.
 ///
 /// Memory operations are namespace-scoped. Namespaces isolate memory by
 /// agent, project, and scope (project/core/shared).
-///
-/// Artifact operations use `state/{ns}/artifacts/` paths for shared access.
 ///
 /// The default implementation is [`MarkdownMemory`] (file-based).
 #[async_trait::async_trait]
@@ -53,27 +51,6 @@ pub trait Memory: Send + Sync {
     /// Delete a specific fact from a category by exact text match.
     /// Returns true if the fact was found and removed.
     async fn delete_fact(&self, ns: &str, category: &str, fact: &str) -> Result<bool>;
-
-    // -- Artifacts (shared documents) --
-
-    /// Save an artifact file with provenance metadata.
-    async fn save_artifact(
-        &self,
-        ns: &str,
-        filename: &str,
-        description: &str,
-        created_by: &str,
-        content: &str,
-    ) -> Result<()>;
-
-    /// List all artifacts in a namespace.
-    async fn list_artifacts(&self, ns: &str) -> Result<Vec<ArtifactEntry>>;
-
-    /// Read an artifact file's content.
-    async fn read_artifact(&self, ns: &str, filename: &str) -> Result<Option<String>>;
-
-    /// Delete an artifact file. Returns true if it existed.
-    async fn delete_artifact(&self, ns: &str, filename: &str) -> Result<bool>;
 }
 
 #[async_trait::async_trait]
@@ -95,30 +72,5 @@ where
 
     async fn delete_fact(&self, ns: &str, category: &str, fact: &str) -> Result<bool> {
         self.as_ref().delete_fact(ns, category, fact).await
-    }
-
-    async fn save_artifact(
-        &self,
-        ns: &str,
-        filename: &str,
-        description: &str,
-        created_by: &str,
-        content: &str,
-    ) -> Result<()> {
-        self.as_ref()
-            .save_artifact(ns, filename, description, created_by, content)
-            .await
-    }
-
-    async fn list_artifacts(&self, ns: &str) -> Result<Vec<ArtifactEntry>> {
-        self.as_ref().list_artifacts(ns).await
-    }
-
-    async fn read_artifact(&self, ns: &str, filename: &str) -> Result<Option<String>> {
-        self.as_ref().read_artifact(ns, filename).await
-    }
-
-    async fn delete_artifact(&self, ns: &str, filename: &str) -> Result<bool> {
-        self.as_ref().delete_artifact(ns, filename).await
     }
 }

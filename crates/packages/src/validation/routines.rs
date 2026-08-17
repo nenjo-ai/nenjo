@@ -58,6 +58,8 @@ struct PackageRoutineStep {
     lambda: Option<String>,
     #[serde(default)]
     lambda_id: Option<String>,
+    #[serde(default)]
+    request: Option<serde_json::Value>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -68,6 +70,8 @@ struct PackageRoutineEdge {
     to: String,
     #[serde(default)]
     condition: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
     #[serde(default)]
     max_attempts: Option<u32>,
     #[serde(default)]
@@ -232,6 +236,15 @@ fn package_routine_graph(routine: &PackageRoutineManifest) -> anyhow::Result<Rou
                         .lambda_id
                         .as_ref()
                         .is_some_and(|value| !value.trim().is_empty()),
+                human_request: match &step.request {
+                    Some(request) => Some(
+                        nenjo::routines::human_review::HumanStepSpec::parse(request.clone())
+                            .with_context(|| {
+                                format!("steps[{index}] ref '{slug}' has invalid request")
+                            })?,
+                    ),
+                    None => None,
+                },
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -249,7 +262,14 @@ fn package_routine_graph(routine: &PackageRoutineManifest) -> anyhow::Result<Rou
             if to.is_empty() {
                 anyhow::bail!("edges[{index}] must define to");
             }
-            let condition = edge.condition.as_deref().unwrap_or("always");
+            if edge.condition.is_some() && edge.outcome.is_some() {
+                anyhow::bail!("edges[{index}] must define either condition or outcome, not both");
+            }
+            let condition = edge
+                .outcome
+                .as_deref()
+                .or(edge.condition.as_deref())
+                .unwrap_or("always");
             let condition =
                 RoutineGraphEdgeCondition::parse(condition.trim()).ok_or_else(|| {
                     anyhow::anyhow!("edges[{index}] has unsupported condition '{}'", condition)
@@ -353,4 +373,117 @@ fn format_routine_validation_error(error: &RoutineValidationError) -> String {
         })
         .collect::<Vec<_>>()
         .join("; ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn package(value: serde_json::Value) -> PackageRoutineManifest {
+        serde_json::from_value(value).unwrap()
+    }
+
+    #[test]
+    fn adapts_complete_human_package_with_outcome_aliases() {
+        let routine = package(json!({
+            "entry_steps": ["draft"],
+            "steps": [
+                {"ref": "draft", "name": "Draft", "type": "agent", "agent": "writer"},
+                {"ref": "review", "type": "human", "request": {
+                    "title": "Review {{ task.title }}",
+                    "approval": {"fields": [{"id": "selection", "label": "Selection", "type": "multi_select", "required": true, "min_items": 1,
+                        "options": {"type": "static", "values": [{"value": "api", "label": "API"}]}}]}
+                }},
+                {"ref": "done", "type": "terminal"},
+                {"ref": "revise", "type": "terminal"},
+                {"ref": "rejected", "type": "terminal_fail"}
+            ],
+            "edges": [
+                {"from": "draft", "to": "review", "metadata": {
+                    "purpose": "Release draft",
+                    "handoff_schema": {"type": "object", "required": ["summary"], "properties": {
+                        "summary": {"type": "string"}
+                    }, "additionalProperties": false}
+                }},
+                {"from": "review", "to": "done", "outcome": "approved"},
+                {"from": "review", "to": "revise", "outcome": "changes_requested"},
+                {"from": "review", "to": "rejected", "outcome": "rejected"}
+            ]
+        }));
+        let graph = package_routine_graph(&routine).unwrap();
+        validate_routine_graph(&graph).unwrap();
+        assert!(
+            graph
+                .steps
+                .iter()
+                .find(|step| step.step_type == RoutineGraphStepType::Human)
+                .and_then(|step| step.human_request.as_ref())
+                .is_some()
+        );
+    }
+
+    #[test]
+    fn rejects_forbidden_human_policy_fields_and_mixed_edge_forms() {
+        let routine = package(json!({
+            "entry_steps": ["draft"],
+            "steps": [{"ref": "review", "type": "human", "request": {
+                "title": "Review", "timeout": "1h"
+            }}, {"ref": "draft", "type": "agent", "agent": "writer"}],
+            "edges": [{"from": "draft", "to": "review", "metadata": {
+                "handoff_schema": {"type": "string"}
+            }}]
+        }));
+        assert!(
+            package_routine_graph(&routine)
+                .unwrap_err()
+                .to_string()
+                .contains("invalid request")
+        );
+
+        let routine = package(json!({
+            "entry_steps": ["done"],
+            "steps": [{"ref": "done", "type": "terminal"}],
+            "edges": [{"from": "done", "to": "done", "condition": "always", "outcome": "approved"}]
+        }));
+        assert!(
+            package_routine_graph(&routine)
+                .unwrap_err()
+                .to_string()
+                .contains("either condition or outcome")
+        );
+    }
+
+    #[test]
+    fn canonical_validation_rejects_missing_or_misplaced_human_request() {
+        let missing = package(json!({
+            "entry_steps": ["review"],
+            "steps": [{"ref": "review", "type": "human"}],
+            "edges": []
+        }));
+        let error = validate_routine_graph(&package_routine_graph(&missing).unwrap())
+            .expect_err("human step without request must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("must define a valid request contract")
+        );
+
+        let misplaced = package(json!({
+            "entry_steps": ["done"],
+            "steps": [{
+                "ref": "done",
+                "type": "terminal",
+                "request": {"title": "Review"}
+            }],
+            "edges": []
+        }));
+        let error = validate_routine_graph(&package_routine_graph(&misplaced).unwrap())
+            .expect_err("non-human step with request must fail");
+        assert!(
+            error
+                .to_string()
+                .contains("may not define a human request contract")
+        );
+    }
 }

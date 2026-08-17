@@ -92,6 +92,10 @@ impl TaskAttachmentEncoder for WorkerTaskAttachmentEncoder {
         )
         .await
     }
+
+    async fn decrypt_attachment(&self, payload: &EncryptedPayload) -> Result<String> {
+        decrypt_text_with_provider(&self.auth_provider, payload).await
+    }
 }
 
 #[async_trait]
@@ -253,6 +257,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         Command::ChatMessage {
             id,
             content,
+            artifacts,
             project,
             agent,
             target_type,
@@ -268,6 +273,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     ChatCommandRequest {
                         message_id: id.as_deref(),
                         content: &content,
+                        artifacts: &artifacts,
                         project: project.as_deref(),
                         agent: agent.as_deref(),
                         target_type: target_type.as_deref(),
@@ -286,6 +292,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             id,
             command,
             content,
+            artifacts,
             project,
             agent,
             target_type,
@@ -302,6 +309,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         message_id: id.as_deref(),
                         command: &command,
                         content: &content,
+                        artifacts: &artifacts,
                         project: project.as_deref(),
                         agent: agent.as_deref(),
                         target_type: target_type.as_deref(),
@@ -398,11 +406,14 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         labels: &payload.labels,
                         status: payload.status.as_deref(),
                         priority: payload.priority.as_deref(),
+                        artifacts: &payload.artifacts,
                         cancellation: tokio_util::sync::CancellationToken::new(),
                     },
                 )
                 .await?;
-            ctx.response_tx.send(result.artifacts)?;
+            if let Some(artifacts) = result.artifacts {
+                ctx.response_tx.send(artifacts)?;
+            }
             Ok(())
         }
 
@@ -425,6 +436,10 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                 .handle_execution_resume(&ctx.task_context(), execution_run_id)
                 .await
         }
+
+        Command::ExecutionContinue { .. } => Err(anyhow::anyhow!(
+            "execution.continue must be routed through the durable task runtime"
+        )),
 
         Command::RepoSync {
             project,
@@ -632,6 +647,7 @@ impl CommandContext {
             attachment_encoder: Arc::new(WorkerTaskAttachmentEncoder {
                 auth_provider: self.auth_provider.clone(),
             }),
+            platform_api: self.api.clone(),
             local_execution_watcher: self.local_execution_watcher.clone(),
         }
     }

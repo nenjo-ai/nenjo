@@ -16,9 +16,12 @@ use tokio::sync::Notify;
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-use super::{TaskContent, TaskExecutionTarget, TaskSchedule};
 #[cfg(feature = "local-runtime")]
-use super::{TaskExecutorOutcome, TaskRuntime, TaskSubmission, TaskTrigger};
+use super::{
+    ContinuationOutcome, TaskExecutorOutcome, TaskInboxAction, TaskRuntime, TaskSubmission,
+    TaskTrigger,
+};
+use super::{TaskContent, TaskExecutionTarget, TaskSchedule};
 #[cfg(feature = "local-runtime")]
 use crate::local_runtime::FileTaskRuntimeStore;
 
@@ -42,7 +45,7 @@ fn schedule(definition: TaskScheduleDefinition) -> TaskSchedule {
         enabled: true,
         runnable: true,
         project: None,
-        target: TaskExecutionTarget::Agent("coder".to_string()),
+        target: TaskExecutionTarget::agent("coder"),
         content: TaskContent {
             title: "task".to_string(),
             instructions: "work".to_string(),
@@ -50,6 +53,7 @@ fn schedule(definition: TaskScheduleDefinition) -> TaskSchedule {
             labels: Vec::new(),
             status: None,
             priority: None,
+            artifacts: Vec::new(),
         },
         revision: "1".to_string(),
     }
@@ -134,7 +138,7 @@ async fn manual_and_scheduled_tasks_share_one_concurrency_gate() {
     });
     let execute = {
         let executor = executor.clone();
-        move |submission, cancellation| {
+        move |submission, _action, cancellation| {
             let executor = executor.clone();
             async move { executor.execute(submission, cancellation).await }
         }
@@ -153,7 +157,7 @@ async fn manual_and_scheduled_tasks_share_one_concurrency_gate() {
             task_id: Uuid::new_v4(),
             execution_run_id: Uuid::new_v4(),
             project: None,
-            target: TaskExecutionTarget::Agent("coder".to_string()),
+            target: TaskExecutionTarget::agent("coder"),
             content: TaskContent {
                 title: "manual".to_string(),
                 instructions: "work".to_string(),
@@ -161,6 +165,7 @@ async fn manual_and_scheduled_tasks_share_one_concurrency_gate() {
                 labels: Vec::new(),
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             },
             trigger: TaskTrigger::Manual,
         })
@@ -185,7 +190,7 @@ async fn handled_executor_failure_is_persisted_as_failed() {
     let store = Arc::new(FileTaskRuntimeStore::open(dir.path().to_path_buf(), 10).unwrap());
     let runtime = TaskRuntime::new(
         store,
-        |_submission, _cancellation| async {
+        |_submission, _action, _cancellation| async {
             Ok(TaskExecutorOutcome::Failed("expected failure".to_string()))
         },
         1,
@@ -198,7 +203,7 @@ async fn handled_executor_failure_is_persisted_as_failed() {
             task_id: Uuid::new_v4(),
             execution_run_id: Uuid::new_v4(),
             project: None,
-            target: TaskExecutionTarget::Agent("coder".to_string()),
+            target: TaskExecutionTarget::agent("coder"),
             content: TaskContent {
                 title: "failing task".to_string(),
                 instructions: "fail".to_string(),
@@ -206,6 +211,7 @@ async fn handled_executor_failure_is_persisted_as_failed() {
                 labels: Vec::new(),
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             },
             trigger: TaskTrigger::Manual,
         })
@@ -233,6 +239,85 @@ async fn handled_executor_failure_is_persisted_as_failed() {
 
 #[cfg(feature = "local-runtime")]
 #[tokio::test]
+async fn human_continuation_uses_monotonic_inbox_revisions() {
+    let dir = tempdir().unwrap();
+    let store = Arc::new(FileTaskRuntimeStore::open(dir.path().to_path_buf(), 10).unwrap());
+    let requested_by = Uuid::new_v4();
+    let runtime = TaskRuntime::new(
+        store,
+        move |submission, action, _cancellation| async move {
+            assert_eq!(submission.requested_by, requested_by);
+            match action {
+                TaskInboxAction::Initial => Ok(TaskExecutorOutcome::WaitingForHuman),
+                TaskInboxAction::Continue { .. } => Ok(TaskExecutorOutcome::Completed),
+            }
+        },
+        1,
+    );
+    let mut events = runtime.events().await.unwrap();
+    runtime.start().await.unwrap();
+    let run_id = Uuid::new_v4();
+    runtime
+        .submit(TaskSubmission {
+            requested_by,
+            task_id: Uuid::new_v4(),
+            execution_run_id: run_id,
+            project: None,
+            target: TaskExecutionTarget::agent("coder"),
+            content: TaskContent {
+                title: "review me".to_string(),
+                instructions: "wait for approval".to_string(),
+                slug: None,
+                labels: Vec::new(),
+                status: None,
+                priority: None,
+                artifacts: Vec::new(),
+            },
+            trigger: TaskTrigger::Manual,
+        })
+        .await
+        .unwrap();
+
+    let waiting = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        loop {
+            let event = events.recv().await.expect("task runtime event stream");
+            if event.item.state == super::TaskExecutionState::WaitingForHuman {
+                break event.item;
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(waiting.revision, 2);
+
+    let request_id = Uuid::new_v4();
+    let outcome = runtime
+        .continue_execution(run_id, request_id, 2)
+        .await
+        .unwrap();
+    assert!(matches!(outcome, ContinuationOutcome::Queued(_)));
+
+    let queued = events.recv().await.unwrap().item;
+    let resumed = events.recv().await.unwrap().item;
+    let completed = events.recv().await.unwrap().item;
+    assert_eq!(queued.state, super::TaskExecutionState::Queued);
+    assert_eq!(queued.revision, 3);
+    assert_eq!(
+        queued.action,
+        TaskInboxAction::Continue {
+            request_id,
+            resolution_revision: 2,
+        }
+    );
+    assert_eq!(resumed.state, super::TaskExecutionState::Running);
+    assert_eq!(resumed.revision, 4);
+    assert_eq!(completed.state, super::TaskExecutionState::Completed);
+    assert_eq!(completed.revision, 5);
+    runtime.shutdown();
+}
+
+#[cfg(feature = "local-runtime")]
+#[tokio::test]
 async fn cancelling_running_work_flows_through_the_host_executor() {
     let dir = tempdir().unwrap();
     let store = Arc::new(FileTaskRuntimeStore::open(dir.path().to_path_buf(), 10).unwrap());
@@ -242,7 +327,7 @@ async fn cancelling_running_work_flows_through_the_host_executor() {
     });
     let execute = {
         let executor = executor.clone();
-        move |submission, cancellation| {
+        move |submission, _action, cancellation| {
             let executor = executor.clone();
             async move { executor.execute(submission, cancellation).await }
         }
@@ -257,7 +342,7 @@ async fn cancelling_running_work_flows_through_the_host_executor() {
             task_id: Uuid::new_v4(),
             execution_run_id: run_id,
             project: None,
-            target: TaskExecutionTarget::Agent("coder".to_string()),
+            target: TaskExecutionTarget::agent("coder"),
             content: TaskContent {
                 title: "cancel me".to_string(),
                 instructions: "wait".to_string(),
@@ -265,6 +350,7 @@ async fn cancelling_running_work_flows_through_the_host_executor() {
                 labels: Vec::new(),
                 status: None,
                 priority: None,
+                artifacts: Vec::new(),
             },
             trigger: TaskTrigger::Manual,
         })

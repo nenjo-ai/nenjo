@@ -27,9 +27,6 @@ pub struct RenderContextVars {
     // Pre-computed memory vars (memories, memories.core, etc.)
     pub memory_vars: HashMap<String, String>,
 
-    // Pre-computed artifact vars (artifacts, artifacts.project, artifacts.workspace)
-    pub artifact_vars: HashMap<String, String>,
-
     // Pre-computed knowledge vars keyed by template path.
     pub knowledge_vars: HashMap<String, String>,
 
@@ -173,9 +170,6 @@ impl RenderContextVars {
 
         // Memory vars (memories, memories.core, etc.)
         vars.extend(self.memory_vars.clone());
-
-        // Artifact vars (artifacts, artifacts.project, artifacts.workspace)
-        vars.extend(self.artifact_vars.clone());
 
         vars.extend(self.knowledge_vars.clone());
 

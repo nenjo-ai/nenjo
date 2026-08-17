@@ -132,8 +132,8 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// Set memory backend for this agent.
     ///
     /// When set, the runner will:
-    /// 1. Load memories and artifacts and inject them into prompts
-    /// 2. Include memory and artifact tools automatically
+    /// 1. Load memory facts and inject them into prompts
+    /// 2. Include memory tools automatically
     ///
     /// The memory scope is derived from the agent name and project context
     /// at `build()` time, so call `with_project_context()` before `build()`
@@ -346,7 +346,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         }
 
         // Build memory scope and inject tools. This is the single place
-        // where memory/artifact tools are added — scope is derived from the
+        // where memory tools are added — scope is derived from the
         // agent name and whatever project context was set via with_project_context().
         let memory_scope = if self.execution_mode.has_own_capability_surface()
             && let Some(ref mem) = self.memory
@@ -359,7 +359,6 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             self.tools.extend(crate::memory::tools::memory_tools(
                 mem.clone(),
                 scope.clone(),
-                &agent.name,
             ));
             Some(scope)
         } else {
@@ -384,7 +383,6 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                 context: prompt_context,
                 renderer: self.context_renderer,
                 memory_vars: self.memory_vars,
-                artifact_vars: HashMap::new(),
             },
             runtime: AgentRuntime {
                 tools: self.tools,

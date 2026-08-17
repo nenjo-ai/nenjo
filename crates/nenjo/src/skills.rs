@@ -144,7 +144,7 @@ impl Tool for UseSkillTool {
         let Some(skill) = self.provider.resolve_skill(name) else {
             return Ok(ToolResult {
                 success: false,
-                output: self.provider.unknown_skill_message(),
+                output: self.provider.unknown_skill_message().into(),
                 error: Some(format!("Unknown skill: {name}")),
             });
         };
@@ -154,7 +154,7 @@ impl Tool for UseSkillTool {
             Err(error) => {
                 return Ok(ToolResult {
                     success: false,
-                    output: String::new(),
+                    output: String::new().into(),
                     error: Some(error.to_string()),
                 });
             }
@@ -169,7 +169,7 @@ impl Tool for UseSkillTool {
 
         Ok(ToolResult {
             success: true,
-            output: render_loaded_skill_context(&loaded),
+            output: render_loaded_skill_context(&loaded).into(),
             error: None,
         })
     }
@@ -268,7 +268,7 @@ impl Tool for ListInstalledSkillsTool {
     async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
         Ok(ToolResult {
             success: true,
-            output: installed_skills_message(&self.provider.list_skills()),
+            output: installed_skills_message(&self.provider.list_skills()).into(),
             error: None,
         })
     }
