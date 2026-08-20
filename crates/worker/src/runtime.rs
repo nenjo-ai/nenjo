@@ -361,10 +361,10 @@ mod tests {
         let api = ApiClient::new(config.backend_api_url(), &config.api_key);
         let external_mcp = Arc::new(ExternalMcpPool::new());
         let skill_registry = Arc::new(SkillRegistry::default());
-        let provider_registry = Arc::new(ModelProviderRegistry::new(
-            &config.model_provider_api_keys,
-            &config.reliability,
-        ));
+        let provider_registry = Arc::new(
+            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability)
+                .with_vllm_config(config.vllm),
+        );
         let manifest_cache = Arc::new(WorkerManifestCache {
             manifests_dir: config.manifests_dir.clone(),
             workspace_dir: config.workspace_dir.clone(),

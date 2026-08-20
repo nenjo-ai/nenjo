@@ -2,6 +2,7 @@
 
 pub mod artifact_router;
 pub mod input_preparer;
+pub mod pdf;
 pub mod provider_analyzer;
 pub mod resolver;
 
@@ -13,6 +14,10 @@ pub use artifact_router::{
 };
 
 pub use input_preparer::WorkerArtifactInputPreparer;
+pub use pdf::{
+    PDF_DERIVATION_VERSION, PdfDerivationError, PdfDerivativeCache, PdfDocumentDerivatives,
+    PdfPageNumber, PdfPageText, RenderedPdfPage, derive_pdf,
+};
 pub use provider_analyzer::ProviderArtifactAnalyzer;
 pub use resolver::{
     AgentModelAssignments, AssignmentSource, MediaCapabilitySource, MediaProviderResolver,

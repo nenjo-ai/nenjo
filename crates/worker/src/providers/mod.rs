@@ -18,7 +18,7 @@ pub use nenjo_models::{
 
 pub use nenjo_models::{
     AnthropicProvider, GeminiProvider, OllamaProvider, OpenAiCompatibleProvider, OpenAiProvider,
-    OpenRouterProvider, ReliableProvider, RouterProvider, XAiProvider,
+    OpenRouterProvider, ReliableProvider, RouterProvider, VllmProvider, XAiProvider,
 };
 
 pub use nenjo_models::{sanitize_api_error, scrub_secret_patterns};
@@ -52,6 +52,7 @@ pub enum ModelProviders {
     GLM,
     Google,
     Minimax,
+    Vllm,
     #[serde(rename = "openai-compatible")]
     OpenAiCompatible,
 }
@@ -76,6 +77,7 @@ impl std::fmt::Display for ModelProviders {
             Self::GLM => "glm",
             Self::Google => "google",
             Self::Minimax => "minimax",
+            Self::Vllm => "vllm",
             Self::OpenAiCompatible => "openai-compatible",
         };
         write!(f, "{name}")
@@ -109,6 +111,7 @@ pub fn provider_env_vars() -> HashMap<ModelProviders, Vec<String>> {
     m.insert(ModelProviders::Moonshot, vec!["MOONSHOT_API_KEY".into()]);
     m.insert(ModelProviders::GLM, vec!["GLM_API_KEY".into()]);
     m.insert(ModelProviders::Minimax, vec!["MINIMAX_API_KEY".into()]);
+    m.insert(ModelProviders::Vllm, vec!["VLLM_API_KEY".into()]);
     m.insert(
         ModelProviders::Google,
         vec!["GOOGLE_AI_API_KEY".into(), "GEMINI_API_KEY".into()],

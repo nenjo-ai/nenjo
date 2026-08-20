@@ -77,6 +77,8 @@ x25519-dalek = { workspace = true, features = ["static_secrets"] }
 rand_core = { workspace = true, features = ["getrandom"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 glob = { workspace = true }
+hayro = { workspace = true }
+pdf-extract = { workspace = true }
 chrono-tz = { workspace = true }
 nanohtml2text = { workspace = true }
 urlencoding = { workspace = true }
@@ -91,3 +93,4 @@ rustls = { workspace = true, default-features = false, features = ["ring"] }
 # Testing
 tokio-test = { workspace = true }
 axum-test = { workspace = true }
+lopdf = { workspace = true }

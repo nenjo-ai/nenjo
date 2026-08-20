@@ -188,10 +188,10 @@ impl WorkerAssembly {
         let local_execution_watcher = LocalRoutineExecutionWatcher::default();
 
         let local_manifest_loader = LocalManifestStore::new(&config.manifests_dir);
-        let provider_registry = Arc::new(ModelProviderRegistry::new(
-            &config.model_provider_api_keys,
-            &config.reliability,
-        ));
+        let provider_registry = Arc::new(
+            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability)
+                .with_vllm_config(config.vllm),
+        );
         let provider = build_provider(ProviderBuildContext {
             config,
             local_manifest_loader,
@@ -276,6 +276,7 @@ pub(crate) async fn build_provider(
             materializer,
             config.manifests_dir.clone(),
             provider_registry.clone(),
+            config.pdf.clone(),
         )),
         (Some(_), None) | (None, Some(_)) | (None, None) => None,
     };
@@ -578,10 +579,10 @@ mod tests {
             Arc::new(WorkerAuthProvider::load_or_create(temp.path().join("crypto")).unwrap());
         let external_mcp = Arc::new(ExternalMcpPool::new());
         let skill_registry = Arc::new(SkillRegistry::default());
-        let provider_registry = Arc::new(ModelProviderRegistry::new(
-            &config.model_provider_api_keys,
-            &config.reliability,
-        ));
+        let provider_registry = Arc::new(
+            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability)
+                .with_vllm_config(config.vllm),
+        );
         let cache = Arc::new(WorkerManifestCache {
             manifests_dir: config.manifests_dir.clone(),
             workspace_dir: config.workspace_dir.clone(),
@@ -740,7 +741,8 @@ mod tests {
 
         let config = Config::default();
         let provider_registry =
-            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
+            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability)
+                .with_vllm_config(config.vllm);
         validate_runtime_media_requirements(&config, &provider_registry, &manifest)
             .expect("agent without model_assignments should not fail on legacy media");
     }
@@ -775,7 +777,8 @@ mod tests {
             ..Default::default()
         };
         let provider_registry =
-            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
+            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability)
+                .with_vllm_config(config.vllm);
 
         validate_runtime_media_requirements(&config, &provider_registry, &manifest)
             .expect("configured media provider should satisfy domain requirement");

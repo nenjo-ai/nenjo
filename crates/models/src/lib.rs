@@ -5,8 +5,8 @@
 //! This crate provides:
 //! - The [`ModelProvider`] trait for LLM integrations
 //! - Message types: [`ChatMessage`], [`ChatRequest`], [`ChatResponse`], [`ToolCall`]
-//! - Provider implementations: Anthropic, OpenAI, Gemini, Ollama, OpenRouter, and
-//!   OpenAI-compatible providers
+//! - Provider implementations: Anthropic, OpenAI, Gemini, Ollama, OpenRouter,
+//!   vLLM, and generic OpenAI-compatible providers
 //! - Reliability wrappers: [`ReliableProvider`] (retry/fallback), [`RouterProvider`] (model routing)
 
 pub mod anthropic;
@@ -24,6 +24,7 @@ pub mod openrouter;
 pub mod reliable;
 pub mod router;
 pub mod traits;
+pub mod vllm;
 pub mod xai;
 
 // Re-export core types at crate root.
@@ -64,6 +65,7 @@ pub use openai::OpenAiProvider;
 pub use openrouter::OpenRouterProvider;
 pub use reliable::ReliableProvider;
 pub use router::RouterProvider;
+pub use vllm::{VLLM_DEFAULT_BASE_URL, VllmProvider, VllmStreaming};
 pub use xai::{XAI_DEFAULT_BASE_URL, XAiProvider};
 
 use std::sync::Arc;

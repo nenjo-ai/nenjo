@@ -612,24 +612,7 @@ async fn current_org_id<E>(backend: &PlatformArtifactToolsBackend<E>) -> Result<
 }
 
 fn is_textual_media_type(media_type: &str) -> bool {
-    media_type.starts_with("text/")
-        || matches!(
-            media_type.split(';').next().map(str::trim),
-            Some(
-                "application/json"
-                    | "application/ld+json"
-                    | "application/xml"
-                    | "application/javascript"
-                    | "application/x-yaml"
-                    | "application/toml"
-                    | "image/svg+xml"
-            )
-        )
-        || media_type
-            .split(';')
-            .next()
-            .map(str::trim)
-            .is_some_and(|value| value.ends_with("+json") || value.ends_with("+xml"))
+    nenjo_content::is_utf8_text_media_type(media_type)
 }
 
 fn render_artifact_lines(contents: &str, start_line: usize, line_count: usize) -> Result<String> {
@@ -900,9 +883,16 @@ fn infer_media_type(file_name: &str) -> &'static str {
     {
         Some("pdf") => "application/pdf",
         Some("json") => "application/json",
+        Some("jsonld") => "application/ld+json",
         Some("md") => "text/markdown",
         Some("txt") => "text/plain",
         Some("csv") => "text/csv",
+        Some("html" | "htm") => "text/html",
+        Some("xml") => "application/xml",
+        Some("yaml" | "yml") => "application/yaml",
+        Some("toml") => "application/toml",
+        Some("js" | "mjs" | "cjs") => "application/javascript",
+        Some("svg") => "image/svg+xml",
         Some("png") => "image/png",
         Some("jpg" | "jpeg") => "image/jpeg",
         Some("webp") => "image/webp",
@@ -943,6 +933,10 @@ mod tests {
     #[test]
     fn media_type_inference_is_bounded_and_predictable() {
         assert_eq!(infer_media_type("report.PDF"), "application/pdf");
+        assert_eq!(infer_media_type("payload.jsonld"), "application/ld+json");
+        assert_eq!(infer_media_type("page.HTM"), "text/html");
+        assert_eq!(infer_media_type("config.yaml"), "application/yaml");
+        assert_eq!(infer_media_type("diagram.svg"), "image/svg+xml");
         assert_eq!(infer_media_type("archive.bin"), "application/octet-stream");
     }
 

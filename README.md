@@ -189,6 +189,55 @@ nenjo update
 
 The worker is resilient to service outages. Startup and the event loop use exponential backoff so the process can recover when platform services or NATS become available again.
 
+### vLLM response streaming
+
+The first-class vLLM provider requests streamed Chat Completions by default. This
+keeps long local generations active as long as response data continues to
+arrive and surfaces text deltas to the live session UI. Disable streaming when
+testing an endpoint that requires one buffered JSON response:
+
+```toml
+[vllm]
+streaming = true
+```
+
+`NENJO_VLLM_STREAMING` overrides the TOML value and accepts
+`true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off`.
+
+### PDF inputs
+
+For models whose provider accepts native PDFs, the worker preserves that native
+transport. Other providers, including vLLM, use a bounded local fallback: the
+worker extracts embedded text and renders every accepted page to PNG. A
+vision-capable primary model receives those page images directly. Otherwise,
+the worker sends pages in bounded batches to the agent's assigned
+`analyze_image` model. A text-only model can still use a PDF with embedded text;
+an image-only/scanned PDF requires one of those image-capable routes.
+
+PDF plaintext and rendered pages remain ephemeral request inputs. Durable
+conversation history retains the immutable source artifact reference, and a
+worker-process cache reuses deterministic derivatives for the same revision.
+That cache is capped at 256 MiB and 16 completed entries. Encrypted PDFs are
+rejected. Inputs are limited to 16 MiB, extracted text to 256 KiB, and each
+encoded page to 16 MiB.
+
+Defaults can be changed in `~/.nenjo/config.toml`:
+
+```toml
+[pdf]
+max_pages = 50              # allowed range: 1..=200
+render_concurrency = 4      # allowed range: 1..=16
+vision_batch_pages = 4      # allowed range: 1..=50
+render_max_edge = 1600      # allowed range: 256..=4096 pixels
+max_total_pixels = 100000000
+max_rendered_bytes = 134217728
+```
+
+The equivalent environment variables are `NENJO_PDF_MAX_PAGES`,
+`NENJO_PDF_RENDER_CONCURRENCY`, `NENJO_PDF_VISION_BATCH_PAGES`,
+`NENJO_PDF_RENDER_MAX_EDGE`, `NENJO_PDF_MAX_TOTAL_PIXELS`, and
+`NENJO_PDF_MAX_RENDERED_BYTES`.
+
 ### Worker Capabilities
 
 Workers can be scoped to handle only specific workloads:

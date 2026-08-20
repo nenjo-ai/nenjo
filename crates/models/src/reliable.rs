@@ -6,6 +6,7 @@ use crate::native::{
     NativeMediaJob, NativeMediaRequest, NativeMediaResponse, ProviderMediaCapabilities,
 };
 use async_trait::async_trait;
+use futures_util::future::{Either, select};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -206,6 +207,7 @@ impl ModelProvider for ReliableProvider {
                                 tracing::warn!(
                                     provider = provider_name,
                                     model = *current_model,
+                                    error = ?e,
                                     "Non-retryable error, moving on"
                                 );
                                 break;
@@ -218,6 +220,7 @@ impl ModelProvider for ReliableProvider {
                                     model = *current_model,
                                     attempt = attempt + 1,
                                     backoff_ms = wait,
+                                    error = ?e,
                                     "Provider call failed, retrying"
                                 );
                                 tokio::time::sleep(Duration::from_millis(wait)).await;
@@ -257,10 +260,38 @@ impl ModelProvider for ReliableProvider {
                 let mut backoff_ms = self.base_backoff_ms;
 
                 for attempt in 0..=self.max_retries {
-                    match provider
-                        .chat_stream(request, current_model, temperature, events.clone())
-                        .await
-                    {
+                    let (attempt_events_tx, mut attempt_events_rx) =
+                        tokio::sync::mpsc::unbounded_channel();
+                    let mut provider_call = Box::pin(provider.chat_stream(
+                        request,
+                        current_model,
+                        temperature,
+                        attempt_events_tx,
+                    ));
+                    let mut emitted_event = false;
+                    let result = loop {
+                        let event = Box::pin(attempt_events_rx.recv());
+                        let selected = select(provider_call, event).await;
+                        match selected {
+                            Either::Left((result, pending_event)) => {
+                                drop(pending_event);
+                                break result;
+                            }
+                            Either::Right((Some(event), pending_provider_call)) => {
+                                emitted_event = true;
+                                let _ = events.send(event);
+                                provider_call = pending_provider_call;
+                            }
+                            Either::Right((None, pending_provider_call)) => {
+                                break pending_provider_call.await;
+                            }
+                        }
+                    };
+                    while let Ok(event) = attempt_events_rx.try_recv() {
+                        emitted_event = true;
+                        let _ = events.send(event);
+                    }
+                    match result {
                         Ok(resp) => {
                             if attempt > 0 || *current_model != model {
                                 tracing::info!(
@@ -283,6 +314,18 @@ impl ModelProvider for ReliableProvider {
                                 self.max_retries + 1
                             ));
 
+                            if emitted_event {
+                                tracing::warn!(
+                                    provider = provider_name,
+                                    model = *current_model,
+                                    error = ?e,
+                                    "Streaming call failed after emitting output; suppressing retry to prevent duplicated deltas"
+                                );
+                                return Err(e.context(format!(
+                                    "{provider_name}/{current_model} streaming call failed after emitting output; retry suppressed to prevent duplicated output"
+                                )));
+                            }
+
                             if rate_limited && let Some(new_key) = self.rotate_key() {
                                 tracing::info!(
                                     provider = provider_name,
@@ -295,6 +338,7 @@ impl ModelProvider for ReliableProvider {
                                 tracing::warn!(
                                     provider = provider_name,
                                     model = *current_model,
+                                    error = ?e,
                                     "Non-retryable streaming error, moving on"
                                 );
                                 break;
@@ -307,6 +351,7 @@ impl ModelProvider for ReliableProvider {
                                     model = *current_model,
                                     attempt = attempt + 1,
                                     backoff_ms = wait,
+                                    error = ?e,
                                     "Provider streaming call failed, retrying"
                                 );
                                 tokio::time::sleep(Duration::from_millis(wait)).await;
@@ -440,6 +485,34 @@ mod tests {
     struct StreamingMockProvider {
         chat_calls: Arc<AtomicUsize>,
         stream_calls: Arc<AtomicUsize>,
+    }
+
+    struct PartialStreamingFailure {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for PartialStreamingFailure {
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            unreachable!("the streaming path must not fall back to chat")
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+            events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+        ) -> anyhow::Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let _ = events.send(ProviderStreamEvent::TextDelta("partial".to_string()));
+            anyhow::bail!("stream disconnected")
+        }
     }
 
     #[async_trait]
@@ -771,6 +844,42 @@ mod tests {
             }
             other => panic!("unexpected provider stream event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn chat_stream_does_not_retry_after_emitting_visible_output() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = ReliableProvider::new(
+            vec![(
+                "vllm".into(),
+                Box::new(PartialStreamingFailure {
+                    calls: Arc::clone(&calls),
+                }) as Box<dyn ModelProvider>,
+            )],
+            2,
+            1,
+        );
+        let messages = vec![ConversationMessage::user("hello")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let error = provider
+            .chat_stream(request, "test-model", 0.0, tx)
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("retry suppressed"));
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            rx.try_recv(),
+            Ok(ProviderStreamEvent::TextDelta(delta)) if delta == "partial"
+        ));
+        assert!(rx.try_recv().is_err());
     }
 
     #[tokio::test]

@@ -925,14 +925,14 @@ mod tests {
             ),
             crate::ArtifactInputTransport::Inline { .. }
         ));
-        assert_eq!(
+        assert!(matches!(
             provider.artifact_input_transport(
                 "gpt-4o",
                 crate::ModelCapabilityId::Chat,
                 &crate::MediaType::parse("image/svg+xml").unwrap()
             ),
-            crate::ArtifactInputTransport::Unsupported
-        );
+            crate::ArtifactInputTransport::InlineText { .. }
+        ));
         assert!(matches!(
             provider.artifact_input_transport(
                 "gpt-4o",

@@ -60,7 +60,7 @@
 use async_trait::async_trait;
 pub use nenjo_content::{
     ArtifactId, ArtifactInput, ArtifactInputSource, ArtifactInstruction, ArtifactRef, ArtifactSize,
-    MediaType, Sha256Digest,
+    MediaType, Sha256Digest, is_utf8_text_media_type,
 };
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;

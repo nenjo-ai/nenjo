@@ -14,11 +14,13 @@ use crate::openai_multimodal::{
 };
 use crate::openai_tools::{ProviderToolSpec, convert_tools};
 use crate::traits::{
-    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
+    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, ProviderStreamEvent,
+    TokenUsage, ToolCall,
 };
 use crate::{ArtifactInputTransport, MediaType, ModelCapabilityId};
 use anyhow::Context;
 use async_trait::async_trait;
+use futures_util::StreamExt;
 use reqwest::Client;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
@@ -36,6 +38,7 @@ pub struct OpenAiCompatibleProvider {
     /// When false, do not fall back to /v1/responses on chat completions 404.
     /// GLM/Zhipu does not support the responses API.
     supports_responses_fallback: bool,
+    artifact_dialect: ChatArtifactDialect,
     client: Client,
 }
 
@@ -52,14 +55,31 @@ pub enum AuthStyle {
 
 impl OpenAiCompatibleProvider {
     pub fn new(name: &str, base_url: &str, api_key: Option<&str>, auth_style: AuthStyle) -> Self {
+        Self::new_with_dialect(
+            name,
+            base_url,
+            api_key,
+            auth_style,
+            ChatArtifactDialect::OpenAi,
+        )
+    }
+
+    pub(crate) fn new_with_dialect(
+        name: &str,
+        base_url: &str,
+        api_key: Option<&str>,
+        auth_style: AuthStyle,
+        artifact_dialect: ChatArtifactDialect,
+    ) -> Self {
         Self {
             name: name.to_string(),
             base_url: base_url.trim_end_matches('/').to_string(),
             api_key: api_key.map(ToString::to_string),
             auth_header: auth_style,
             supports_responses_fallback: true,
+            artifact_dialect,
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .read_timeout(std::time::Duration::from_secs(120))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
@@ -80,8 +100,9 @@ impl OpenAiCompatibleProvider {
             api_key: api_key.map(ToString::to_string),
             auth_header: auth_style,
             supports_responses_fallback: false,
+            artifact_dialect: ChatArtifactDialect::OpenAi,
             client: Client::builder()
-                .timeout(std::time::Duration::from_secs(120))
+                .read_timeout(std::time::Duration::from_secs(120))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
@@ -170,9 +191,16 @@ struct NativeChatRequest {
     #[serde(skip_serializing_if = "Option::is_none")]
     stream: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    stream_options: Option<NativeStreamOptions>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     tools: Option<Vec<ProviderToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct NativeStreamOptions {
+    include_usage: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -242,6 +270,188 @@ struct ResponseToolCall {
 struct ResponseFunction {
     name: Option<String>,
     arguments: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiChatStreamChunk {
+    #[serde(default)]
+    choices: Vec<StreamChoice>,
+    #[serde(default)]
+    usage: Option<NativeUsage>,
+    #[serde(default)]
+    error: Option<StreamError>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamError {
+    message: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamChoice {
+    delta: StreamDelta,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct StreamDelta {
+    #[serde(default)]
+    content: Option<String>,
+    #[serde(default)]
+    tool_calls: Vec<StreamToolCall>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamToolCall {
+    index: usize,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    function: Option<StreamFunction>,
+}
+
+#[derive(Debug, Deserialize)]
+struct StreamFunction {
+    #[serde(default)]
+    name: Option<String>,
+    #[serde(default)]
+    arguments: Option<String>,
+}
+
+#[derive(Debug, Default)]
+struct ChatStreamState {
+    text: String,
+    tool_calls: Vec<StreamToolCallState>,
+    usage: TokenUsage,
+}
+
+#[derive(Debug, Default)]
+struct StreamToolCallState {
+    id: Option<String>,
+    name: String,
+    arguments: String,
+}
+
+impl ChatStreamState {
+    fn absorb(
+        &mut self,
+        chunk: ApiChatStreamChunk,
+        events: &tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+    ) -> anyhow::Result<()> {
+        if let Some(error) = chunk.error {
+            anyhow::bail!("OpenAI-compatible streaming error: {}", error.message);
+        }
+        if let Some(usage) = chunk.usage {
+            self.usage = TokenUsage {
+                input_tokens: usage.prompt_tokens,
+                output_tokens: usage.completion_tokens,
+            };
+        }
+        for choice in chunk.choices {
+            if let Some(content) = choice.delta.content
+                && !content.is_empty()
+            {
+                self.text.push_str(&content);
+                let _ = events.send(ProviderStreamEvent::TextDelta(content));
+            }
+            for tool_call in choice.delta.tool_calls {
+                if self.tool_calls.len() <= tool_call.index {
+                    self.tool_calls
+                        .resize_with(tool_call.index.saturating_add(1), Default::default);
+                }
+                let state = &mut self.tool_calls[tool_call.index];
+                if let Some(id) = tool_call.id {
+                    state.id = Some(id);
+                }
+                if let Some(function) = tool_call.function {
+                    if let Some(name) = function.name {
+                        state.name.push_str(&name);
+                    }
+                    if let Some(arguments) = function.arguments {
+                        state.arguments.push_str(&arguments);
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn into_response(self) -> ChatResponse {
+        let tool_calls = self
+            .tool_calls
+            .into_iter()
+            .filter(|call| !call.name.is_empty())
+            .map(|call| ToolCall {
+                id: call.id.unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
+                name: call.name,
+                arguments: if call.arguments.is_empty() {
+                    "{}".to_string()
+                } else {
+                    call.arguments
+                },
+            })
+            .collect();
+        ChatResponse {
+            text: (!self.text.is_empty()).then_some(self.text),
+            tool_calls,
+            provider_tool_calls: Vec::new(),
+            usage: self.usage,
+        }
+    }
+}
+
+fn take_sse_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
+    let lf = buffer
+        .windows(2)
+        .position(|window| window == b"\n\n")
+        .map(|index| (index, 2));
+    let crlf = buffer
+        .windows(4)
+        .position(|window| window == b"\r\n\r\n")
+        .map(|index| (index, 4));
+    let (index, delimiter_len) = match (lf, crlf) {
+        (Some(left), Some(right)) => {
+            if left.0 <= right.0 {
+                left
+            } else {
+                right
+            }
+        }
+        (Some(found), None) | (None, Some(found)) => found,
+        (None, None) => return None,
+    };
+    let remaining = buffer.split_off(index.saturating_add(delimiter_len));
+    let mut frame = std::mem::replace(buffer, remaining);
+    frame.truncate(index);
+    Some(frame)
+}
+
+fn absorb_sse_frame(
+    frame: &[u8],
+    state: &mut ChatStreamState,
+    events: &tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+) -> anyhow::Result<()> {
+    let frame = std::str::from_utf8(frame).context("streaming response contained invalid UTF-8")?;
+    let mut data = String::new();
+    for line in frame.lines() {
+        let Some(fragment) = line.strip_prefix("data:") else {
+            continue;
+        };
+        if !data.is_empty() {
+            data.push('\n');
+        }
+        data.push_str(fragment.trim_start());
+    }
+    let data = data.trim();
+    if data.is_empty() || data == "[DONE]" {
+        return Ok(());
+    }
+    let chunk: ApiChatStreamChunk = serde_json::from_str(data).with_context(|| {
+        format!(
+            "OpenAI-compatible streaming response decode error; data: {}",
+            &data[..data.floor_char_boundary(500)]
+        )
+    })?;
+    state.absorb(chunk, events)
 }
 
 #[derive(Debug, Serialize)]
@@ -506,9 +716,22 @@ impl OpenAiCompatibleProvider {
         convert_tools(tools, crate::sanitize_tool_name)
     }
 
+    #[cfg(test)]
     fn convert_messages(
         request: &ChatRequest<'_>,
         supports_developer_role: bool,
+    ) -> anyhow::Result<Vec<Message>> {
+        Self::convert_messages_for_dialect(
+            request,
+            supports_developer_role,
+            ChatArtifactDialect::OpenAi,
+        )
+    }
+
+    fn convert_messages_for_dialect(
+        request: &ChatRequest<'_>,
+        supports_developer_role: bool,
+        artifact_dialect: ChatArtifactDialect,
     ) -> anyhow::Result<Vec<Message>> {
         let mut native = Vec::new();
         for message in request.messages {
@@ -554,7 +777,7 @@ impl OpenAiCompatibleProvider {
                         "Inspect the attached artifact.",
                         references,
                         request.prepared_artifacts,
-                        ChatArtifactDialect::OpenAi,
+                        artifact_dialect,
                     )?;
                     if content.has_media() {
                         native.push(Message {
@@ -580,7 +803,7 @@ impl OpenAiCompatibleProvider {
                             )
                         }),
                         request.prepared_artifacts,
-                        ChatArtifactDialect::OpenAi,
+                        artifact_dialect,
                     )?),
                     tool_call_id: None,
                     tool_calls: None,
@@ -731,9 +954,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let tools = Self::convert_tools(request.tools);
         let chat_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(&request, self.supports_developer_role(model))?,
+            messages: Self::convert_messages_for_dialect(
+                &request,
+                self.supports_developer_role(model),
+                self.artifact_dialect,
+            )?,
             temperature,
             stream: Some(false),
+            stream_options: None,
             tool_choice: tools.as_ref().map(|_| "auto".to_string()),
             tools,
         };
@@ -853,6 +1081,72 @@ impl ModelProvider for OpenAiCompatibleProvider {
         })
     }
 
+    async fn chat_stream(
+        &self,
+        request: ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+    ) -> anyhow::Result<ChatResponse> {
+        if self.artifact_dialect != ChatArtifactDialect::Vllm {
+            return self.chat(request, model, temperature).await;
+        }
+        request.ensure_artifacts_prepared()?;
+        let api_key = self.api_key.as_ref().ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} API key not set. Run `nenjo onboard` or set the appropriate env var.",
+                self.name
+            )
+        })?;
+        let tools = Self::convert_tools(request.tools);
+        let chat_request = NativeChatRequest {
+            model: model.to_string(),
+            messages: Self::convert_messages_for_dialect(
+                &request,
+                self.supports_developer_role(model),
+                self.artifact_dialect,
+            )?,
+            temperature,
+            stream: Some(true),
+            stream_options: Some(NativeStreamOptions {
+                include_usage: true,
+            }),
+            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            tools,
+        };
+        let url = self.chat_completions_url();
+        let response = self
+            .apply_auth_header(self.client.post(&url).json(&chat_request), api_key)
+            .send()
+            .await?;
+        if !response.status().is_success() {
+            let status = response.status();
+            if status == reqwest::StatusCode::NOT_FOUND && self.responses_fallback_allowed(&request)
+            {
+                warn!(
+                    provider = %self.name,
+                    "Streaming chat completions returned 404 — falling back to the buffered provider path"
+                );
+                return self.chat(request, model, temperature).await;
+            }
+            return Err(crate::api_error(&self.name, response).await);
+        }
+
+        let mut state = ChatStreamState::default();
+        let mut buffer = Vec::new();
+        let mut stream = response.bytes_stream();
+        while let Some(chunk) = stream.next().await {
+            buffer.extend_from_slice(&chunk?);
+            while let Some(frame) = take_sse_frame(&mut buffer) {
+                absorb_sse_frame(&frame, &mut state, &events)?;
+            }
+        }
+        if !buffer.iter().all(u8::is_ascii_whitespace) {
+            absorb_sse_frame(&buffer, &mut state, &events)?;
+        }
+        Ok(state.into_response())
+    }
+
     fn context_window(&self, model: &str) -> Option<usize> {
         let m = model.to_lowercase();
         // Match known models served through OpenAI-compatible endpoints.
@@ -914,7 +1208,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             ModelCapabilityId::Chat
             | ModelCapabilityId::AnalyzeImage
             | ModelCapabilityId::AnalyzeDocument => {
-                chat_artifact_transport(ChatArtifactDialect::OpenAi, media_type.essence_str())
+                chat_artifact_transport(self.artifact_dialect, media_type.essence_str())
             }
             ModelCapabilityId::AnalyzeVideo => ArtifactInputTransport::Unsupported,
             ModelCapabilityId::TranscribeAudio => {
@@ -1085,6 +1379,88 @@ mod tests {
         (format!("http://{address}/v1"), receiver)
     }
 
+    async fn capture_one_sse_request() -> (String, tokio::sync::oneshot::Receiver<serde_json::Value>)
+    {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind mock compatible streaming endpoint");
+        let address = listener.local_addr().expect("mock endpoint address");
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.expect("accept provider request");
+            let mut request = Vec::new();
+            let header_end = loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream
+                    .read(&mut chunk)
+                    .await
+                    .expect("read provider request");
+                assert!(read > 0, "provider request ended before headers");
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                    break index + 4;
+                }
+            };
+            let headers = String::from_utf8(request[..header_end].to_vec())
+                .expect("provider request headers are UTF-8");
+            let content_length = headers
+                .lines()
+                .find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case("content-length")
+                        .then(|| value.trim().parse::<usize>().expect("content length"))
+                })
+                .expect("provider request content length");
+            while request.len() - header_end < content_length {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).await.expect("read provider body");
+                assert!(read > 0, "provider request body ended early");
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let body = serde_json::from_slice(&request[header_end..header_end + content_length])
+                .expect("provider request body is JSON");
+            sender.send(body).expect("return captured provider request");
+
+            let frames = [
+                json!({"choices": [{"delta": {
+                    "content": "hel",
+                    "tool_calls": [{
+                        "index": 0,
+                        "id": "call-1",
+                        "function": {"name": "read_", "arguments": "{\"start\":"}
+                    }]
+                }}]}),
+                json!({"choices": [{"delta": {
+                    "content": "lo",
+                    "tool_calls": [{
+                        "index": 0,
+                        "function": {"name": "artifact", "arguments": "1}"}
+                    }]
+                }}]}),
+                json!({
+                    "choices": [],
+                    "usage": {"prompt_tokens": 7, "completion_tokens": 2}
+                }),
+            ];
+            let mut response = frames
+                .iter()
+                .map(|frame| format!("data: {frame}\n\n"))
+                .collect::<String>();
+            response.push_str("data: [DONE]\n\n");
+            stream
+                .write_all(
+                    format!(
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                        response.len()
+                    )
+                    .as_bytes(),
+                )
+                .await
+                .expect("write streaming provider response");
+        });
+        (format!("http://{address}/v1"), receiver)
+    }
+
     #[test]
     fn creates_with_key() {
         let p = make_provider("venice", "https://api.venice.ai", Some("vn-key"));
@@ -1156,6 +1532,7 @@ mod tests {
             ],
             temperature: 0.4,
             stream: Some(false),
+            stream_options: None,
             tools: None,
             tool_choice: None,
         };
@@ -1279,6 +1656,82 @@ mod tests {
         assert_eq!(response.text.as_deref(), Some("grounded"));
         assert_eq!(response.usage.input_tokens, 7);
         assert_eq!(response.usage.output_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn compatible_streaming_accumulates_text_tools_and_usage() {
+        let (base_url, captured) = capture_one_sse_request().await;
+        let provider = OpenAiCompatibleProvider::new_with_dialect(
+            "vllm",
+            &base_url,
+            Some("test-key"),
+            AuthStyle::Bearer,
+            ChatArtifactDialect::Vllm,
+        );
+        let messages = vec![ConversationMessage::user("hello")];
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = provider
+            .chat_stream(
+                ChatRequest {
+                    messages: &messages,
+                    tools: None,
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "test-model",
+                0.0,
+                events_tx,
+            )
+            .await
+            .expect("streaming chat response");
+        let body = captured.await.expect("captured provider request");
+
+        assert_eq!(body["stream"], true);
+        assert_eq!(body["stream_options"]["include_usage"], true);
+        assert_eq!(response.text.as_deref(), Some("hello"));
+        assert_eq!(response.tool_calls.len(), 1);
+        assert_eq!(response.tool_calls[0].id, "call-1");
+        assert_eq!(response.tool_calls[0].name, "read_artifact");
+        assert_eq!(response.tool_calls[0].arguments, r#"{"start":1}"#);
+        assert_eq!(response.usage.input_tokens, 7);
+        assert_eq!(response.usage.output_tokens, 2);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(ProviderStreamEvent::TextDelta(delta)) if delta == "hel"
+        ));
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(ProviderStreamEvent::TextDelta(delta)) if delta == "lo"
+        ));
+    }
+
+    #[tokio::test]
+    async fn generic_compatible_provider_preserves_buffered_chat_behavior() {
+        let (base_url, captured) = capture_one_json_request().await;
+        let provider = make_provider("compatible", &base_url, Some("test-key"));
+        let messages = vec![ConversationMessage::user("hello")];
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+
+        let response = provider
+            .chat_stream(
+                ChatRequest {
+                    messages: &messages,
+                    tools: None,
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "test-model",
+                0.0,
+                events_tx,
+            )
+            .await
+            .expect("buffered compatible response");
+        let (_, body) = captured.await.expect("captured provider request");
+
+        assert_eq!(body["stream"], false);
+        assert_eq!(response.text.as_deref(), Some("grounded"));
+        assert!(events_rx.try_recv().is_err());
     }
 
     #[test]

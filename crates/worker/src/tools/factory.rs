@@ -146,10 +146,10 @@ where
         external_mcp: Arc<ExternalMcpPool>,
         skill_registry: Arc<SkillRegistry>,
     ) -> Self {
-        let provider_registry = Arc::new(ModelProviderRegistry::new(
-            &config.model_provider_api_keys,
-            &config.reliability,
-        ));
+        let provider_registry = Arc::new(
+            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability)
+                .with_vllm_config(config.vllm),
+        );
         Self::with_skill_registry_and_provider_registry(
             security,
             runtime,
