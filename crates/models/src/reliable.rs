@@ -249,7 +249,7 @@ impl ModelProvider for ReliableProvider {
         request: super::ChatRequest<'_>,
         model: &str,
         temperature: f64,
-        events: tokio::sync::mpsc::UnboundedSender<super::ProviderStreamEvent>,
+        events: tokio::sync::mpsc::Sender<super::ProviderStreamEvent>,
     ) -> anyhow::Result<super::ChatResponse> {
         request.ensure_artifacts_prepared()?;
         let models = self.model_chain(model);
@@ -260,8 +260,7 @@ impl ModelProvider for ReliableProvider {
                 let mut backoff_ms = self.base_backoff_ms;
 
                 for attempt in 0..=self.max_retries {
-                    let (attempt_events_tx, mut attempt_events_rx) =
-                        tokio::sync::mpsc::unbounded_channel();
+                    let (attempt_events_tx, mut attempt_events_rx) = tokio::sync::mpsc::channel(64);
                     let mut provider_call = Box::pin(provider.chat_stream(
                         request,
                         current_model,
@@ -279,7 +278,9 @@ impl ModelProvider for ReliableProvider {
                             }
                             Either::Right((Some(event), pending_provider_call)) => {
                                 emitted_event = true;
-                                let _ = events.send(event);
+                                events.send(event).await.map_err(|_| {
+                                    anyhow::anyhow!("provider stream consumer closed")
+                                })?;
                                 provider_call = pending_provider_call;
                             }
                             Either::Right((None, pending_provider_call)) => {
@@ -289,7 +290,10 @@ impl ModelProvider for ReliableProvider {
                     };
                     while let Ok(event) = attempt_events_rx.try_recv() {
                         emitted_event = true;
-                        let _ = events.send(event);
+                        events
+                            .send(event)
+                            .await
+                            .map_err(|_| anyhow::anyhow!("provider stream consumer closed"))?;
                     }
                     match result {
                         Ok(resp) => {
@@ -346,6 +350,30 @@ impl ModelProvider for ReliableProvider {
 
                             if attempt < self.max_retries {
                                 let wait = self.compute_backoff(backoff_ms, &e);
+                                events
+                                    .send(super::ProviderStreamEvent::RetryScheduled {
+                                        provider: provider_name.clone(),
+                                        model: (*current_model).to_string(),
+                                        attempt: attempt + 1,
+                                        max_attempts: self.max_retries + 1,
+                                        delay_ms: wait,
+                                        code: if rate_limited {
+                                            "rate_limited".to_string()
+                                        } else {
+                                            "provider_unavailable".to_string()
+                                        },
+                                        message: if rate_limited {
+                                            "The provider is rate limited. Retrying shortly."
+                                                .to_string()
+                                        } else {
+                                            "The provider request failed. Retrying shortly."
+                                                .to_string()
+                                        },
+                                    })
+                                    .await
+                                    .map_err(|_| {
+                                        anyhow::anyhow!("provider stream consumer closed")
+                                    })?;
                                 tracing::warn!(
                                     provider = provider_name,
                                     model = *current_model,
@@ -478,6 +506,7 @@ mod tests {
                 tool_calls: vec![],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop,
             })
         }
     }
@@ -507,10 +536,12 @@ mod tests {
             _request: ChatRequest<'_>,
             _model: &str,
             _temperature: f64,
-            events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+            events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
         ) -> anyhow::Result<ChatResponse> {
             self.calls.fetch_add(1, Ordering::SeqCst);
-            let _ = events.send(ProviderStreamEvent::TextDelta("partial".to_string()));
+            let _ = events
+                .send(ProviderStreamEvent::TextDelta("partial".to_string()))
+                .await;
             anyhow::bail!("stream disconnected")
         }
     }
@@ -529,6 +560,7 @@ mod tests {
                 tool_calls: vec![],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop,
             })
         }
 
@@ -537,7 +569,7 @@ mod tests {
             _request: ChatRequest<'_>,
             _model: &str,
             _temperature: f64,
-            events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+            events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
         ) -> anyhow::Result<ChatResponse> {
             self.stream_calls.fetch_add(1, Ordering::SeqCst);
             events
@@ -551,12 +583,14 @@ mod tests {
                         citations: vec![],
                     },
                 ))
+                .await
                 .ok();
             Ok(ChatResponse {
                 text: Some("streaming".to_string()),
                 tool_calls: vec![],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop,
             })
         }
     }
@@ -587,6 +621,7 @@ mod tests {
                 tool_calls: vec![],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop,
             })
         }
     }
@@ -825,7 +860,7 @@ mod tests {
             native_tools: None,
             prepared_artifacts: None,
         };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
 
         let result = provider
             .chat_stream(request, "grok-4.3", 0.0, tx)
@@ -866,7 +901,7 @@ mod tests {
             native_tools: None,
             prepared_artifacts: None,
         };
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
 
         let error = provider
             .chat_stream(request, "test-model", 0.0, tx)

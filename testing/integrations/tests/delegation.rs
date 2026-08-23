@@ -11,7 +11,7 @@ use nenjo::manifest::{
     model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
-use nenjo::{AgentConfig, Slug};
+use nenjo::{AgentConfig, Buffered, ChatInput, Slug};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
 
@@ -231,7 +231,13 @@ Do not answer directly. Do not skip tool calls."#,
         .unwrap();
 
     let output = runner
-        .chat("Run the native sub-agent smoke-test protocol now.")
+        .chat(
+            ChatInput::new("Run the native sub-agent smoke-test protocol now."),
+            Buffered,
+        )
+        .await
+        .expect("chat should start")
+        .output()
         .await
         .expect("chat should succeed");
 
@@ -337,10 +343,16 @@ Do not skip any step."#,
         .await
         .unwrap();
 
-    let output = tokio::time::timeout(
-        std::time::Duration::from_secs(240),
-        runner.chat("Run the native sub-agent tool integration protocol now."),
-    )
+    let output = tokio::time::timeout(std::time::Duration::from_secs(240), async {
+        runner
+            .chat(
+                ChatInput::new("Run the native sub-agent tool integration protocol now."),
+                Buffered,
+            )
+            .await?
+            .output()
+            .await
+    })
     .await
     .expect("sub-agent all-tools scenario timed out")
     .expect("chat should succeed");

@@ -209,7 +209,7 @@ pub(crate) fn task_runtime_responses(
 #[derive(Clone)]
 pub(crate) struct WorkerTaskExecutor {
     pub(crate) base_context: CommandContext,
-    pub(crate) response_tx: tokio::sync::mpsc::UnboundedSender<RoutedResponse>,
+    pub(crate) response_tx: tokio::sync::mpsc::Sender<RoutedResponse>,
     pub(crate) system_response_tx: ResponseSender,
     pub(crate) pending_artifacts: PendingTaskArtifacts,
 }

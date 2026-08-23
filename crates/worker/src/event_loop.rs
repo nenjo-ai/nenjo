@@ -24,6 +24,7 @@ use crate::task_runtime_adapter::{
 pub(crate) struct RoutedResponse {
     target: ResponseTarget,
     response: Response,
+    queued_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -34,17 +35,17 @@ enum ResponseTarget {
 
 #[derive(Clone)]
 pub struct ResponseSender {
-    tx: tokio::sync::mpsc::UnboundedSender<RoutedResponse>,
+    tx: tokio::sync::mpsc::Sender<RoutedResponse>,
     target: ResponseTarget,
 }
 
 #[derive(Debug, Error, Clone, Copy, PartialEq, Eq)]
-#[error("response channel closed")]
+#[error("response channel is closed or at capacity")]
 pub struct ResponseSenderError;
 
 impl ResponseSender {
     pub(crate) fn for_actor(
-        tx: tokio::sync::mpsc::UnboundedSender<RoutedResponse>,
+        tx: tokio::sync::mpsc::Sender<RoutedResponse>,
         actor_user_id: Uuid,
     ) -> Self {
         Self {
@@ -53,7 +54,7 @@ impl ResponseSender {
         }
     }
 
-    fn system(tx: tokio::sync::mpsc::UnboundedSender<RoutedResponse>, org_id: Uuid) -> Self {
+    fn system(tx: tokio::sync::mpsc::Sender<RoutedResponse>, org_id: Uuid) -> Self {
         Self {
             tx,
             target: ResponseTarget::System { org_id },
@@ -61,12 +62,26 @@ impl ResponseSender {
     }
 
     pub fn send(&self, response: Response) -> Result<(), ResponseSenderError> {
-        self.tx
-            .send(RoutedResponse {
-                target: self.target,
-                response,
-            })
-            .map_err(|_| ResponseSenderError)
+        let response_label = response.to_string();
+        match self.tx.try_send(RoutedResponse {
+            target: self.target,
+            response,
+            queued_at: Instant::now(),
+        }) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let channel_closed =
+                    matches!(error, tokio::sync::mpsc::error::TrySendError::Closed(_));
+                warn!(
+                    response = %response_label,
+                    queue_depth = self.tx.max_capacity().saturating_sub(self.tx.capacity()),
+                    queue_capacity = self.tx.max_capacity(),
+                    channel_closed,
+                    "Worker response queue rejected an event"
+                );
+                Err(ResponseSenderError)
+            }
+        }
     }
 }
 
@@ -147,6 +162,7 @@ where
     T: nenjo_eventbus::Transport + 'static,
 {
     let worker_id = bus.transport().worker_id();
+    let org_id = ctx.org_id;
     let capabilities = ctx.capabilities.clone();
 
     info!("Subscribing to eventbus");
@@ -157,8 +173,8 @@ where
         "Eventbus subscription details"
     );
 
-    let (response_tx, mut response_rx) = tokio::sync::mpsc::unbounded_channel::<RoutedResponse>();
-    let (command_tx, mut command_rx) = tokio::sync::mpsc::unbounded_channel::<ReceivedInput>();
+    let (response_tx, mut response_rx) = tokio::sync::mpsc::channel::<RoutedResponse>(1024);
+    let (command_tx, mut command_rx) = tokio::sync::mpsc::channel::<ReceivedInput>(256);
     let system_response_tx = ResponseSender::system(response_tx.clone(), ctx.org_id);
 
     let app_version = Some(env!("CARGO_PKG_VERSION").to_string());
@@ -174,6 +190,8 @@ where
     });
 
     let restore_ctx = runtime.command_context(
+        org_id,
+        worker_id,
         Uuid::nil(),
         system_response_tx.clone(),
         system_response_tx.clone(),
@@ -204,7 +222,6 @@ where
     });
 
     let response_bus = bus.publisher();
-    let org_id = ctx.org_id;
     let response_shutdown = runtime.shutdown_token();
     let response_handle = tokio::spawn(async move {
         loop {
@@ -213,6 +230,7 @@ where
                     match msg {
                         Some(routed) => {
                             let response_label = routed.response.to_string();
+                            let worker_queue_delay = routed.queued_at.elapsed();
                             let response_subject = match routed.target {
                                 ResponseTarget::Actor(actor_user_id) => {
                                     nenjo_events::response_subject(
@@ -225,6 +243,7 @@ where
                                     nenjo_events::responses_subject(org_id)
                                 }
                             };
+                            let publish_started_at = Instant::now();
                             let result = match routed.target {
                                 ResponseTarget::Actor(actor_user_id) => {
                                     response_bus.send_response_for(org_id, actor_user_id, routed.response)
@@ -257,24 +276,18 @@ where
                                     }
                                 }
                             } else {
-                                match routed.target {
-                                    ResponseTarget::Actor(actor_user_id) => {
-                                        debug!(
-                                            %actor_user_id,
-                                            %org_id,
-                                            subject = %response_subject,
-                                            response = %response_label,
-                                            "Published worker response"
-                                        );
-                                    }
-                                    ResponseTarget::System { org_id } => {
-                                        debug!(
-                                            %org_id,
-                                            subject = %response_subject,
-                                            response = %response_label,
-                                            "Published worker response"
-                                        );
-                                    }
+                                let worker_publish = publish_started_at.elapsed();
+                                if worker_queue_delay >= Duration::from_millis(100)
+                                    || worker_publish >= Duration::from_millis(100)
+                                {
+                                    debug!(
+                                        %org_id,
+                                        subject = %response_subject,
+                                        response = %response_label,
+                                        worker_queue_delay_us = worker_queue_delay.as_micros(),
+                                        worker_publish_us = worker_publish.as_micros(),
+                                        "Slow worker response delivery"
+                                    );
                                 }
                             }
                         }
@@ -293,7 +306,7 @@ where
                 result = bus.recv_command() => {
                     match result {
                         Ok(Some(item)) => {
-                            if command_tx.send(item).is_err() {
+                            if command_tx.send(item).await.is_err() {
                                 break;
                             }
                         }
@@ -318,6 +331,8 @@ where
     let (state_dir, max_concurrency, terminal_receipts) = runtime.task_inbox_settings();
     let task_store = Arc::new(FileTaskRuntimeStore::open(state_dir, terminal_receipts)?);
     let base_context = runtime.command_context(
+        org_id,
+        worker_id,
         Uuid::nil(),
         system_response_tx.clone(),
         system_response_tx.clone(),
@@ -558,6 +573,8 @@ where
                 ack_received_envelope(ack, message_id, "command");
 
                 let ctx = runtime.command_context(
+                    org_id,
+                    worker_id,
                     actor_user_id,
                     ResponseSender::for_actor(response_tx.clone(), actor_user_id),
                     system_response_tx.clone(),
@@ -588,10 +605,21 @@ where
                 }
                 ack_received_envelope(ack, message_id, "decode_failure");
                 if let Some(response) = response_for_decode_failure(&failure) {
-                    let _ = response_tx.send(RoutedResponse {
-                        target: ResponseTarget::Actor(actor_user_id),
-                        response,
-                    });
+                    if response_tx
+                        .send(RoutedResponse {
+                            target: ResponseTarget::Actor(actor_user_id),
+                            response,
+                            queued_at: Instant::now(),
+                        })
+                        .await
+                        .is_err()
+                    {
+                        warn!(
+                            actor_user_id = %actor_user_id,
+                            code = failure.code,
+                            "Failed to queue user-facing decode failure because the response channel closed"
+                        );
+                    }
                 } else {
                     warn!(
                         actor_user_id = %actor_user_id,
@@ -627,7 +655,30 @@ mod tests {
     use dashmap::DashMap;
     use uuid::Uuid;
 
-    use super::{SEEN_MESSAGE_TTL, SeenMessageIds, mark_message_seen};
+    use nenjo_events::Response;
+
+    use super::{ResponseSender, SEEN_MESSAGE_TTL, SeenMessageIds, mark_message_seen};
+
+    #[test]
+    fn response_queue_applies_bounded_backpressure() {
+        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        let sender = ResponseSender::for_actor(tx, Uuid::new_v4());
+
+        assert!(
+            sender
+                .send(Response::DeliveryReceipt {
+                    message_id: "first".to_string(),
+                })
+                .is_ok()
+        );
+        assert!(
+            sender
+                .send(Response::DeliveryReceipt {
+                    message_id: "second".to_string(),
+                })
+                .is_err()
+        );
+    }
 
     #[test]
     fn message_dedupe_rejects_seen_message_ids() {

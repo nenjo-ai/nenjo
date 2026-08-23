@@ -151,7 +151,7 @@ pub fn agent_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_agent".to_string(),
-            description: "Create or update one agent in a single backend-owned sequence. Omit `agent` to create; include `agent` to update by slug. On create, metadata.name is required. Omitted fields are unchanged on update. prompt_config is a partial merge patch. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `agent: AgentDocument`."
+            description: "Create or update one agent in a single backend-owned sequence. Omit `agent` to create; include `agent` to update by slug. On create, metadata.name is required. Omitted fields are unchanged on update. prompt_config is a partial merge patch. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns the full authoritative post-update `agent: AgentDocument`, not a patch echo."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

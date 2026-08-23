@@ -63,6 +63,8 @@ struct ApiChatResponse {
     prompt_eval_count: Option<u64>,
     #[serde(default)]
     eval_count: Option<u64>,
+    #[serde(default)]
+    done_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -196,6 +198,10 @@ impl ModelProvider for OllamaProvider {
                 }
             })
             .collect::<Vec<_>>();
+        let finish_reason = crate::FinishReason::from_provider(
+            chat_response.done_reason.as_deref(),
+            !tool_calls.is_empty(),
+        );
 
         Ok(ChatResponse {
             text: chat_response.message.content,
@@ -205,6 +211,7 @@ impl ModelProvider for OllamaProvider {
                 input_tokens: chat_response.prompt_eval_count.unwrap_or(0),
                 output_tokens: chat_response.eval_count.unwrap_or(0),
             },
+            finish_reason,
         })
     }
 

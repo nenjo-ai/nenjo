@@ -1,5 +1,7 @@
 //! AgentRunner — executes agent tasks through the turn loop.
+pub mod chat;
 pub(crate) mod compaction;
+mod tool_calls;
 pub(crate) mod turn_loop;
 pub mod types;
 
@@ -14,9 +16,8 @@ use tracing::{debug, info, trace};
 use uuid::Uuid;
 
 use super::abilities::{build_ability_tools, build_async_operation_tools, is_ability_tool};
-use super::async_ops::{AsyncOpChildHandle, AsyncOpManager};
+use super::async_ops::AsyncOpChildHandle;
 use super::delegation::{DELEGATE_TO_TOOL_NAME, build_delegation_tools, delegation_child_tools};
-use super::respond::RespondToUserTool;
 use super::sub_agents::{
     ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, SubAgentRuntimeOptions,
     child_tools, parent_tools,
@@ -24,13 +25,14 @@ use super::sub_agents::{
 use anyhow::Context;
 use nenjo_models::ModelProvider;
 
-use super::instance::{AgentExecutionMode, AgentInstance};
+use super::instance::AgentInstance;
 use crate::Slug;
 use crate::input::{AgentRun, AgentRunKind, ChatInput, TaskInput};
 use crate::manifest::{AbilityManifest, DomainManifest, Manifest};
 use crate::memory::{self, MemoryScope};
 use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
 use crate::types::ActiveDomain;
+use chat::{ChatDelivery, ChatHandle, ProviderResponseDelivery};
 use types::{TurnEvent, TurnOutput};
 
 /// Handle to a running agent execution.
@@ -144,22 +146,6 @@ pub(crate) fn build_instruction_messages(
     }
 }
 
-fn ensure_respond_to_user_tool(
-    tools: &mut Vec<Arc<dyn crate::tools::Tool>>,
-    async_ops: &AsyncOpManager,
-    execution_mode: AgentExecutionMode,
-) {
-    if !execution_mode.can_respond_to_user() {
-        return;
-    }
-    if !tools
-        .iter()
-        .any(|tool| tool.name() == super::respond::RESPOND_TO_USER_TOOL_NAME)
-    {
-        tools.push(Arc::new(RespondToUserTool::new(async_ops.clone())));
-    }
-}
-
 /// Wraps an [`AgentInstance`] and provides the execution API.
 ///
 /// Created via [`AgentBuilder::build()`](super::builder::AgentBuilder::build).
@@ -215,12 +201,6 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 .tools
                 .extend(build_delegation_tools(base_instance));
         }
-        ensure_respond_to_user_tool(
-            &mut instance.runtime.tools,
-            &instance.runtime.async_ops,
-            instance.runtime.execution_mode,
-        );
-
         let instance = Arc::new(instance);
 
         Ok(Self {
@@ -282,7 +262,11 @@ impl<P: ProviderRuntime> AgentRunner<P> {
     ///
     /// ```ignore
     /// let domain_runner = runner.domain_expansion("prd")?;
-    /// let output = domain_runner.chat("Create a PRD for auth").await?;
+    /// let output = domain_runner
+    ///     .chat(ChatInput::new("Create a PRD for auth"), Buffered)
+    ///     .await?
+    ///     .output()
+    ///     .await?;
     /// ```
     pub async fn domain_expansion(&self, domain_name: &str) -> Result<AgentRunner<P>> {
         let provider = self
@@ -405,68 +389,30 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         })
     }
 
-    /// Send a chat message and stream events as the agent works.
-    pub async fn chat_stream(&self, message: &str) -> Result<ExecutionHandle> {
-        self.chat_with_history_stream(message, Vec::new()).await
-    }
-
-    /// Send a chat message with prior conversation history and stream events.
-    pub async fn chat_with_history_stream(
+    /// Execute one chat turn using the caller-selected response delivery mode.
+    pub async fn chat<D: ChatDelivery>(
         &self,
-        message: &str,
-        history: Vec<ConversationMessage>,
-    ) -> Result<ExecutionHandle> {
-        self.run_stream(AgentRun::chat(ChatInput {
-            message: message.to_string(),
-            history,
-            project: None,
-            template_override: None,
-            artifacts: Vec::new(),
-        }))
-        .await
-    }
-
-    /// Send a chat message with a caller-supplied chat template override.
-    pub async fn chat_with_history_template_stream(
-        &self,
-        message: &str,
-        history: Vec<ConversationMessage>,
-        template_override: impl Into<String>,
-    ) -> Result<ExecutionHandle> {
-        self.run_stream(AgentRun::chat(ChatInput {
-            message: message.to_string(),
-            history,
-            project: None,
-            template_override: Some(template_override.into()),
-            artifacts: Vec::new(),
-        }))
-        .await
+        input: ChatInput,
+        _delivery: D,
+    ) -> Result<ChatHandle<D>> {
+        let handle = self
+            .execute_stream(
+                AgentRun::chat(input),
+                chat::provider_response_delivery::<D>(),
+            )
+            .await?;
+        Ok(ChatHandle::new(handle))
     }
 
     /// Execute a task and stream events as the agent works.
     pub async fn task_stream(&self, task: TaskInput) -> Result<ExecutionHandle> {
-        self.run_stream(AgentRun::task(task)).await
+        self.execute_stream(AgentRun::task(task), ProviderResponseDelivery::Buffered)
+            .await
     }
 
     /// Execute a composed agent run and stream events as the agent works.
     pub async fn run_stream(&self, run: AgentRun) -> Result<ExecutionHandle> {
-        self.execute_stream(run).await
-    }
-
-    /// Send a chat message and wait for the final output.
-    pub async fn chat(&self, message: &str) -> Result<TurnOutput> {
-        self.chat_stream(message).await?.output().await
-    }
-
-    /// Send a chat message with prior conversation history and wait for the final output.
-    pub async fn chat_with_history(
-        &self,
-        message: &str,
-        history: Vec<ConversationMessage>,
-    ) -> Result<TurnOutput> {
-        self.chat_with_history_stream(message, history)
-            .await?
-            .output()
+        self.execute_stream(run, ProviderResponseDelivery::Buffered)
             .await
     }
 
@@ -482,8 +428,13 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
     // -- Internal --
 
-    async fn execute_stream(&self, run: AgentRun) -> Result<ExecutionHandle> {
-        self.execute_stream_with_parent_handle(run, None).await
+    async fn execute_stream(
+        &self,
+        run: AgentRun,
+        response_delivery: ProviderResponseDelivery,
+    ) -> Result<ExecutionHandle> {
+        self.execute_stream_with_parent_handle(run, None, response_delivery)
+            .await
     }
 
     pub(crate) async fn task_stream_as_sub_agent(
@@ -494,6 +445,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         self.execute_stream_with_parent_handle(
             AgentRun::task(task),
             Some(ParentHandle::EphemeralSubAgent(child_handle)),
+            ProviderResponseDelivery::Buffered,
         )
         .await
     }
@@ -506,6 +458,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         self.execute_stream_with_parent_handle(
             AgentRun::task(task),
             Some(ParentHandle::Delegation(child_handle)),
+            ProviderResponseDelivery::Buffered,
         )
         .await
     }
@@ -514,6 +467,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         &self,
         run: AgentRun,
         parent_handle: Option<ParentHandle<P>>,
+        response_delivery: ProviderResponseDelivery,
     ) -> Result<ExecutionHandle> {
         let memory_vars = if let (Some(mem), Some(scope)) = (&self.memory, &self.memory_scope)
             && self.instance.prompt.memory_vars.is_empty()
@@ -666,11 +620,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         let cancel = inst.runtime.execution_cancel.clone();
         let join = tokio::spawn(async move {
-            let completion = if matches!(run.kind, AgentRunKind::Chat(_)) {
-                turn_loop::TurnCompletion::RequireTool(super::respond::RESPOND_TO_USER_TOOL_NAME)
-            } else {
-                turn_loop::TurnCompletion::Natural
-            };
+            let completion = turn_loop::TurnCompletion::Natural;
             let mut output = turn_loop::run(
                 &inst,
                 messages,
@@ -678,6 +628,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 Some(loop_pause),
                 Some(turn_input_rx),
                 completion,
+                response_delivery,
             )
             .await?;
             output.task_id = task_id;
@@ -777,82 +728,7 @@ fn resolve_active_abilities<P: ProviderRuntime>(
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
-    use anyhow::Result;
-
-    use super::{build_instruction_messages, ensure_respond_to_user_tool};
-    use crate::agents::AgentExecutionMode;
-    use crate::agents::abilities::FINISH_ABILITY_TOOL_NAME;
-    use crate::agents::async_ops::AsyncOpManager;
-    use crate::agents::respond::RESPOND_TO_USER_TOOL_NAME;
-    use crate::tools::{Tool, ToolCategory, ToolResult};
-
-    struct OtherTerminalTool;
-
-    struct FinishTerminalTool;
-
-    #[async_trait::async_trait]
-    impl Tool for OtherTerminalTool {
-        fn name(&self) -> &str {
-            "other_terminal"
-        }
-
-        fn description(&self) -> &str {
-            "test terminal"
-        }
-
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-
-        fn category(&self) -> ToolCategory {
-            ToolCategory::Read
-        }
-
-        fn is_terminal(&self) -> bool {
-            true
-        }
-
-        async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
-            Ok(ToolResult {
-                success: true,
-                output: "other".into(),
-                error: None,
-            })
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl Tool for FinishTerminalTool {
-        fn name(&self) -> &str {
-            FINISH_ABILITY_TOOL_NAME
-        }
-
-        fn description(&self) -> &str {
-            "test ability completion"
-        }
-
-        fn parameters_schema(&self) -> serde_json::Value {
-            serde_json::json!({"type": "object"})
-        }
-
-        fn category(&self) -> ToolCategory {
-            ToolCategory::Write
-        }
-
-        fn is_terminal(&self) -> bool {
-            true
-        }
-
-        async fn execute(&self, _args: serde_json::Value) -> Result<ToolResult> {
-            Ok(ToolResult {
-                success: true,
-                output: "finished".into(),
-                error: None,
-            })
-        }
-    }
+    use super::build_instruction_messages;
 
     #[test]
     fn instruction_messages_use_developer_when_supported() {
@@ -870,37 +746,5 @@ mod tests {
         let message = messages[0].as_chat().unwrap();
         assert_eq!(message.role, nenjo_models::ChatRole::System);
         assert_eq!(message.content, "root\n\napp rules");
-    }
-
-    #[test]
-    fn respond_to_user_is_registered_when_an_unrelated_terminal_tool_exists() {
-        let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(OtherTerminalTool)];
-
-        ensure_respond_to_user_tool(
-            &mut tools,
-            &AsyncOpManager::new(),
-            AgentExecutionMode::Parent,
-        );
-
-        assert!(
-            tools
-                .iter()
-                .any(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME)
-        );
-        assert_eq!(tools.len(), 2);
-    }
-
-    #[test]
-    fn respond_to_user_is_not_registered_when_finish_owns_completion() {
-        let mut tools: Vec<Arc<dyn Tool>> = vec![Arc::new(FinishTerminalTool)];
-
-        ensure_respond_to_user_tool(
-            &mut tools,
-            &AsyncOpManager::new(),
-            AgentExecutionMode::Ability,
-        );
-
-        assert_eq!(tools.len(), 1);
-        assert_eq!(tools[0].name(), FINISH_ABILITY_TOOL_NAME);
     }
 }

@@ -50,10 +50,10 @@ pub use traits::{
     ArtifactAnalysisAssignmentSource, ArtifactAnalysisAssignmentSourceParseError,
     ArtifactAnalysisMessage, ArtifactAnalyzerProvenance, ArtifactId, ArtifactInput,
     ArtifactInputSource, ArtifactInstruction, ArtifactRef, ArtifactSize, ChatMessage, ChatRequest,
-    ChatResponse, ChatRole, ChatRoleParseError, ConversationMessage, MediaType, ModelProvider,
-    ProviderStreamEvent, ProviderToolTrace, Sha256Digest, TokenUsage, ToolCall, ToolCategory,
-    ToolOutput, ToolOutputPart, ToolResultMessage, ToolSpec, UnresolvedArtifactInputError,
-    one_shot,
+    ChatResponse, ChatRole, ChatRoleParseError, ConversationMessage, FinishReason, MediaType,
+    ModelProvider, ProviderStreamEvent, ProviderToolTrace, Sha256Digest, TokenUsage, ToolCall,
+    ToolCategory, ToolOutput, ToolOutputPart, ToolResultMessage, ToolSpec,
+    UnresolvedArtifactInputError, one_shot,
 };
 
 // Re-export provider implementations.

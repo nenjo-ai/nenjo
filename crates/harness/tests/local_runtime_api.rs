@@ -4,8 +4,8 @@ use std::sync::Arc;
 
 use chrono::Utc;
 use nenjo_harness::{
-    FileSessionRuntime, FileSessionStores, Harness, Manifest, ModelProviderFactory,
-    NoopToolFactory, Provider,
+    Buffered, FileSessionRuntime, FileSessionStores, Harness, HarnessChatEvent, Manifest,
+    ModelProviderFactory, NoopToolFactory, Provider, Streaming,
 };
 use nenjo_sessions::{
     SessionKind, SessionOwnerKind, SessionRefs, SessionRuntimeEvent, SessionStatus, SessionStore,
@@ -26,18 +26,11 @@ impl nenjo_harness::ModelProvider for TestModelProvider {
         _temperature: f64,
     ) -> anyhow::Result<nenjo_models::ChatResponse> {
         Ok(nenjo_models::ChatResponse {
-            text: None,
-            tool_calls: vec![nenjo_models::ToolCall {
-                id: "test-response".into(),
-                name: "respond_to_user".into(),
-                arguments: serde_json::json!({
-                    "message": "ok",
-                    "status": "completed"
-                })
-                .to_string(),
-            }],
+            text: Some("ok".into()),
+            tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: nenjo_models::TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 }
@@ -227,19 +220,31 @@ async fn file_session_runtime_allows_sequential_chat_turns_in_same_session() {
         .build();
     let session_id = Uuid::new_v4();
 
-    let first = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        harness.chat(nenjo_harness::ChatRequest::new("system", "first").with_session(session_id)),
-    )
+    let first = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        harness
+            .chat(
+                nenjo_harness::ChatRequest::new("system", "first").with_session(session_id),
+                Buffered,
+            )
+            .await?
+            .output()
+            .await
+    })
     .await
     .expect("first chat turn should not hang")
     .expect("first chat turn succeeds");
     assert_eq!(first.text, "ok");
 
-    let second = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        harness.chat(nenjo_harness::ChatRequest::new("system", "second").with_session(session_id)),
-    )
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        harness
+            .chat(
+                nenjo_harness::ChatRequest::new("system", "second").with_session(session_id),
+                Buffered,
+            )
+            .await?
+            .output()
+            .await
+    })
     .await
     .expect("second chat turn should not hang")
     .expect("second chat turn succeeds");
@@ -257,8 +262,9 @@ async fn file_session_runtime_allows_sequential_streamed_chat_turns_in_same_sess
 
     for message in ["first", "second"] {
         let mut stream = harness
-            .chat_stream(
+            .chat(
                 nenjo_harness::ChatRequest::new("system", message).with_session(session_id),
+                Streaming,
             )
             .await
             .expect("chat stream starts");
@@ -267,7 +273,7 @@ async fn file_session_runtime_allows_sequential_streamed_chat_turns_in_same_sess
             while let Some(event) = stream.recv().await {
                 if matches!(
                     event,
-                    nenjo_harness::HarnessEvent::Turn {
+                    HarnessChatEvent::Turn {
                         event: nenjo::TurnEvent::Done { .. },
                         ..
                     }
@@ -298,14 +304,23 @@ async fn chat_stream_replaces_stale_active_execution_before_preparing_next_turn(
     let session_id = Uuid::new_v4();
 
     let _stale = harness
-        .chat_stream(nenjo_harness::ChatRequest::new("system", "first").with_session(session_id))
+        .chat(
+            nenjo_harness::ChatRequest::new("system", "first").with_session(session_id),
+            Streaming,
+        )
         .await
         .expect("first chat stream starts");
 
-    let second = tokio::time::timeout(
-        std::time::Duration::from_secs(2),
-        harness.chat(nenjo_harness::ChatRequest::new("system", "second").with_session(session_id)),
-    )
+    let second = tokio::time::timeout(std::time::Duration::from_secs(2), async {
+        harness
+            .chat(
+                nenjo_harness::ChatRequest::new("system", "second").with_session(session_id),
+                Buffered,
+            )
+            .await?
+            .output()
+            .await
+    })
     .await
     .expect("second chat turn should replace stale active execution before preparation")
     .expect("second chat turn succeeds");

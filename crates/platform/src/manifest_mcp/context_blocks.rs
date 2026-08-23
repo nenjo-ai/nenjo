@@ -63,7 +63,7 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_context_block".to_string(),
-            description: "Create or update one context block in a single backend-owned sequence. Omit `context_block` to create; include `context_block` to update by slug. On create, metadata.slug, metadata.name, and template are required. Omitted fields are unchanged on update. Returns `context_block: ContextBlockDocument`."
+            description: "Create or update one context block in a single backend-owned sequence. Omit `context_block` to create; include `context_block` to update by slug. On create, metadata.slug, metadata.name, and template are required. Omitted fields are unchanged on update. Returns the full authoritative post-update `context_block: ContextBlockDocument`, not a patch echo."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",

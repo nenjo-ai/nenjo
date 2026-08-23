@@ -224,6 +224,10 @@ pub enum TaskExecutionOrigin {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type")]
 pub enum Response {
+    /// Versioned, sequence-aware chat event used by workers and the platform.
+    #[serde(rename = "chat.stream_frame")]
+    ChatStreamFrame { frame: ChatStreamFrame },
+
     /// Wraps a [`StreamEvent`] for real-time streaming to the frontend.
     #[serde(rename = "agent_response")]
     AgentResponse {
@@ -344,6 +348,11 @@ pub enum Response {
 impl std::fmt::Display for Response {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::ChatStreamFrame { frame } => write!(
+                f,
+                "chat.stream_frame(v={}, run={}, seq={}, {})",
+                frame.protocol_version, frame.run_id, frame.sequence, frame.event
+            ),
             Self::AgentResponse {
                 session_id,
                 payload,
@@ -446,6 +455,73 @@ impl std::fmt::Display for Response {
 // Stream events (real-time agent execution)
 // ---------------------------------------------------------------------------
 
+/// Current worker/platform/dashboard chat stream contract version.
+pub const CHAT_STREAM_PROTOCOL_VERSION: u16 = 1;
+
+/// Correlated, reconnectable unit of chat progress.
+///
+/// Sequence numbers are strictly increasing within one run. Sensitive content
+/// remains inside the event's encrypted payload fields; correlation metadata is
+/// intentionally non-sensitive so the platform can authorize and order frames.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ChatStreamFrame {
+    pub protocol_version: u16,
+    pub organization_id: Uuid,
+    pub worker_id: Uuid,
+    pub session_id: Uuid,
+    pub run_id: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub input_message_id: Option<Uuid>,
+    pub sequence: u64,
+    pub timestamp: chrono::DateTime<chrono::Utc>,
+    pub event: StreamEvent,
+}
+
+impl ChatStreamFrame {
+    pub fn new(
+        organization_id: Uuid,
+        worker_id: Uuid,
+        session_id: Uuid,
+        run_id: impl Into<String>,
+        input_message_id: Option<Uuid>,
+        sequence: u64,
+        event: StreamEvent,
+    ) -> Self {
+        Self {
+            protocol_version: CHAT_STREAM_PROTOCOL_VERSION,
+            organization_id,
+            worker_id,
+            session_id,
+            run_id: run_id.into(),
+            input_message_id,
+            sequence,
+            timestamp: chrono::Utc::now(),
+            event,
+        }
+    }
+}
+
+/// Stable public error categories. Provider diagnostics never belong in these
+/// values and remain in worker logs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatStreamErrorCode {
+    Authentication,
+    RateLimited,
+    ProviderUnavailable,
+    InvalidRequest,
+    ContextLengthExceeded,
+    OutputLimitExceeded,
+    ContentFiltered,
+    ToolFailed,
+    EncryptionFailed,
+    Internal,
+}
+
+fn default_chat_stream_error_code() -> ChatStreamErrorCode {
+    ChatStreamErrorCode::Internal
+}
+
 /// Events streamed during agent execution and bridged to clients by the platform.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "event_type", content = "data")]
@@ -472,6 +548,11 @@ pub enum StreamEvent {
     RunFailed {
         run_id: String,
         session_id: String,
+        #[serde(default = "default_chat_stream_error_code")]
+        code: ChatStreamErrorCode,
+        message: String,
+        #[serde(default)]
+        retryable: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -497,15 +578,19 @@ pub enum StreamEvent {
     AssistantTextDelta {
         run_id: String,
         request_id: String,
+        /// True when the encrypted payload also carries a rolling text checkpoint.
+        #[serde(default)]
+        checkpoint: bool,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_payload: Option<EncryptedPayload>,
     },
 
-    /// User-visible assistant response emitted by the response tool.
-    AssistantResponse {
+    /// Assistant reasoning delta, emitted only when provider policy permits it.
+    AssistantReasoningDelta {
         run_id: String,
+        request_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -528,6 +613,16 @@ pub enum StreamEvent {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         parent_call_id: Option<String>,
         tool_name: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+    },
+
+    /// Incremental update to an already-started tool invocation.
+    ToolCallUpdated {
+        run_id: String,
+        call_id: String,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -557,6 +652,42 @@ pub enum StreamEvent {
         payload: Option<serde_json::Value>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         encrypted_payload: Option<EncryptedPayload>,
+    },
+
+    /// A retryable provider failure and the delay before the next attempt.
+    ProviderRetryScheduled {
+        run_id: String,
+        request_id: String,
+        provider: String,
+        model: String,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        code: ChatStreamErrorCode,
+        message: String,
+    },
+
+    /// User-visible progress that is neither a retry nor a terminal outcome.
+    ProgressUpdate {
+        run_id: String,
+        status: String,
+        message: String,
+    },
+
+    /// Authoritative final assistant message for the run.
+    AssistantMessageFinalized {
+        run_id: String,
+        message_id: Uuid,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        input_message_id: Option<Uuid>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        payload: Option<serde_json::Value>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        encrypted_payload: Option<EncryptedPayload>,
+        #[serde(default)]
+        total_input_tokens: u64,
+        #[serde(default)]
+        total_output_tokens: u64,
     },
 
     /// An active hook started executing.
@@ -704,19 +835,21 @@ impl std::fmt::Display for StreamEvent {
                 request_id,
                 payload,
                 encrypted_payload,
+                ..
             } => write!(
                 f,
                 "assistant_text_delta(run={run_id}, request={request_id}, payload={}, encrypted={})",
                 payload.is_some(),
                 encrypted_payload.is_some()
             ),
-            Self::AssistantResponse {
+            Self::AssistantReasoningDelta {
                 run_id,
+                request_id,
                 payload,
                 encrypted_payload,
             } => write!(
                 f,
-                "assistant_response(run={run_id}, payload={}, encrypted={})",
+                "assistant_reasoning_delta(run={run_id}, request={request_id}, payload={}, encrypted={})",
                 payload.is_some(),
                 encrypted_payload.is_some()
             ),
@@ -738,6 +871,9 @@ impl std::fmt::Display for StreamEvent {
                 f,
                 "tool_call_started(run={run_id}, batch={batch_id}, call={call_id}, tool={tool_name})"
             ),
+            Self::ToolCallUpdated {
+                run_id, call_id, ..
+            } => write!(f, "tool_call_updated(run={run_id}, call={call_id})"),
             Self::ToolOutputDelta {
                 run_id,
                 call_id,
@@ -761,6 +897,32 @@ impl std::fmt::Display for StreamEvent {
                 f,
                 "tool_call_completed(run={run_id}, batch={batch_id}, call={call_id}, parent={}, success={success})",
                 parent_call_id.as_deref().unwrap_or("-")
+            ),
+            Self::ProviderRetryScheduled {
+                run_id,
+                request_id,
+                attempt,
+                max_attempts,
+                delay_ms,
+                ..
+            } => write!(
+                f,
+                "provider_retry_scheduled(run={run_id}, request={request_id}, attempt={attempt}/{max_attempts}, delay_ms={delay_ms})"
+            ),
+            Self::ProgressUpdate { run_id, status, .. } => {
+                write!(f, "progress_update(run={run_id}, status={status})")
+            }
+            Self::AssistantMessageFinalized {
+                run_id,
+                message_id,
+                payload,
+                encrypted_payload,
+                ..
+            } => write!(
+                f,
+                "assistant_message_finalized(run={run_id}, message={message_id}, payload={}, encrypted={})",
+                payload.is_some(),
+                encrypted_payload.is_some()
             ),
             Self::HookStarted {
                 agent,
@@ -1092,6 +1254,7 @@ mod tests {
                 payload: StreamEvent::AssistantTextDelta {
                     run_id: "trace-run".to_string(),
                     request_id: "request-1".to_string(),
+                    checkpoint: false,
                     payload: Some(serde_json::json!({"text_preview": "Planning"})),
                     encrypted_payload: None,
                 },

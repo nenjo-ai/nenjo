@@ -16,7 +16,7 @@ Agent orchestration SDK for building agentic AI workflows with tool use, memory,
 ## Quick start
 
 ```rust
-use nenjo::Provider;
+use nenjo::{Buffered, ChatInput, Provider, Streaming};
 use nenjo_knowledge::tools::KnowledgePackEntry;
 
 let provider = Provider::builder()
@@ -33,11 +33,15 @@ let runner = provider
     .build()
     .await?;
 
-// Simple API
-let output = runner.chat("Hello").await?;
+// Buffered API
+let output = runner
+    .chat(ChatInput::new("Hello"), Buffered)
+    .await?
+    .output()
+    .await?;
 
 // Streaming API
-let mut handle = runner.chat_stream("Hello").await?;
+let mut handle = runner.chat(ChatInput::new("Hello"), Streaming).await?;
 while let Some(event) = handle.recv().await {
     // Process TurnEvent variants
 }

@@ -13,14 +13,13 @@ use crate::manifest_contract::{
     AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, DomainPromptRecord, RoutineRecord,
 };
 use crate::manifest_mcp::{
-    AbilityConfigureDocument, AbilityDocument, AgentConfigureDocument, AgentDocument,
-    CommandConfigureDocument, ContextBlockConfigureDocument, ContextBlockDocument, CouncilDocument,
-    CouncilMemberUpdateDocument, CouncilUpdateDocument, DomainConfigureDocument, DomainDocument,
-    KnowledgeDocCreateDocument, KnowledgeDocSummary, KnowledgeDocUpdateDocument,
-    KnowledgePackCreateDocument, KnowledgePackDocument, KnowledgePackUpdateDocument,
-    ModelCreateDocument, ModelDocument, ModelUpdateDocument, ProjectCreateDocument,
-    ProjectDocument, ProjectUpdateDocument, RoutineConfigureDocument, RoutineConfigureMetadata,
-    RoutineGraphInput, RoutineStepConfigInput,
+    AbilityConfigureDocument, AgentConfigureDocument, AgentDocument, CommandConfigureDocument,
+    ContextBlockConfigureDocument, CouncilDocument, CouncilMemberUpdateDocument,
+    CouncilUpdateDocument, DomainConfigureDocument, DomainDocument, KnowledgeDocCreateDocument,
+    KnowledgeDocSummary, KnowledgeDocUpdateDocument, KnowledgePackCreateDocument,
+    KnowledgePackDocument, KnowledgePackUpdateDocument, ModelCreateDocument, ModelDocument,
+    ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectUpdateDocument,
+    RoutineConfigureDocument, RoutineConfigureMetadata, RoutineGraphInput, RoutineStepConfigInput,
 };
 use crate::types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};
 use nenjo::Slug;
@@ -628,8 +627,11 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Fetch one ability document by slug.
-    pub async fn fetch_ability_document(&self, ability: &Slug) -> Result<Option<AbilityDocument>> {
+    /// Fetch one ability record by slug, retaining its protected prompt representation.
+    pub async fn fetch_ability_record(
+        &self,
+        ability: &Slug,
+    ) -> Result<Option<AbilityPromptRecord>> {
         let selector = ability.as_str();
         let response = self
             .http
@@ -640,21 +642,21 @@ impl PlatformManifestClient {
             .with_context(|| format!("failed to fetch ability {ability}"))?;
 
         match response.status() {
-            StatusCode::OK => {
-                let record: AbilityPromptRecord =
-                    response.json().await.context("failed to decode ability")?;
-                Ok(Some(record.to_document()))
-            }
+            StatusCode::OK => response
+                .json::<AbilityPromptRecord>()
+                .await
+                .map(Some)
+                .context("failed to decode ability"),
             StatusCode::NOT_FOUND => Ok(None),
             status => bail!("ability request failed with status {status}"),
         }
     }
 
-    /// Configure an ability in one backend-owned sequence and return the canonical document.
-    pub async fn configure_ability_document(
+    /// Configure an ability while retaining its protected prompt representation.
+    pub async fn configure_ability_record(
         &self,
         ability: &AbilityConfigureDocument,
-    ) -> Result<AbilityDocument> {
+    ) -> Result<AbilityPromptRecord> {
         if ability.prompt_config.is_some() && ability.encrypted_payload.is_none() {
             bail!("ability configure requires encrypted_payload for prompt_config");
         }
@@ -675,13 +677,10 @@ impl PlatformManifestClient {
             .context("failed to configure ability")?;
 
         match response.status() {
-            StatusCode::OK | StatusCode::CREATED => {
-                let record: AbilityPromptRecord = response
-                    .json()
-                    .await
-                    .context("failed to decode configured ability")?;
-                Ok(record.to_document())
-            }
+            StatusCode::OK | StatusCode::CREATED => response
+                .json::<AbilityPromptRecord>()
+                .await
+                .context("failed to decode configured ability"),
             status => bail!("ability configure failed with status {status}"),
         }
     }
@@ -2057,11 +2056,11 @@ impl PlatformManifestClient {
         }
     }
 
-    /// Configure a context block in one backend-owned sequence and return the canonical document.
-    pub async fn configure_context_block_document(
+    /// Configure a context block while retaining its protected template representation.
+    pub async fn configure_context_block_record(
         &self,
         context_block: &ContextBlockConfigureDocument,
-    ) -> Result<ContextBlockDocument> {
+    ) -> Result<ContextBlockContentRecord> {
         if context_block.template.is_some() && context_block.encrypted_payload.is_none() {
             bail!("context block configure requires encrypted_payload for template");
         }
@@ -2082,13 +2081,10 @@ impl PlatformManifestClient {
             .context("failed to configure context block")?;
 
         match response.status() {
-            StatusCode::OK | StatusCode::CREATED => {
-                let record: ContextBlockContentRecord = response
-                    .json()
-                    .await
-                    .context("failed to decode configured context block")?;
-                Ok(record.to_document())
-            }
+            StatusCode::OK | StatusCode::CREATED => response
+                .json::<ContextBlockContentRecord>()
+                .await
+                .context("failed to decode configured context block"),
             status => bail!("context block configure failed with status {status}"),
         }
     }

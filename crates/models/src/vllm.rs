@@ -78,7 +78,7 @@ impl ModelProvider for VllmProvider {
         request: ChatRequest<'_>,
         model: &str,
         temperature: f64,
-        events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+        events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
     ) -> anyhow::Result<ChatResponse> {
         match self.streaming {
             VllmStreaming::Enabled => {

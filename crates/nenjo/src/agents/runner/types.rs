@@ -93,8 +93,12 @@ impl AsyncOperationTranscriptEvent {
 pub type SubAgentTranscriptEvent = AsyncOperationTranscriptEvent;
 
 /// Events yielded by the turn loop during execution.
+///
+/// `Delta` defaults to [`String`] for ordinary execution streams. Typed chat
+/// handles replace it with an uninhabited type for buffered delivery, making
+/// assistant delta payloads impossible to construct in that mode.
 #[derive(Debug, Clone)]
-pub enum TurnEvent {
+pub enum TurnEvent<Delta = String> {
     /// A model provider request started.
     ModelRequestStarted {
         request_id: String,
@@ -103,7 +107,20 @@ pub enum TurnEvent {
         model: String,
     },
     /// Assistant prose was produced by a model request.
-    AssistantTextDelta { request_id: String, delta: String },
+    AssistantTextDelta { request_id: String, delta: Delta },
+    /// Provider reasoning was produced and policy permits displaying it.
+    AssistantReasoningDelta { request_id: String, delta: Delta },
+    /// A retryable provider failure is waiting before its next attempt.
+    ProviderRetryScheduled {
+        request_id: String,
+        provider: String,
+        model: String,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        code: String,
+        message: String,
+    },
     /// A model provider request completed.
     ModelRequestCompleted {
         request_id: String,
@@ -209,14 +226,247 @@ pub enum TurnEvent {
     },
     /// A transcript message was durably relevant to future turns.
     TranscriptMessage { message: ConversationMessage },
-    /// A user-visible assistant response emitted by the harness response tool.
-    AssistantResponse { message: String, status: String },
     /// Execution was paused by the caller.
     Paused,
     /// Execution was resumed after a pause.
     Resumed,
     /// Execution finished.
     Done { output: TurnOutput },
+}
+
+impl<Delta> TurnEvent<Delta> {
+    /// Transform assistant delta payloads while preserving every activity event.
+    ///
+    /// Returning `None` from `map_delta` removes only the delta-bearing event.
+    /// This is used by buffered chat handles to expose lifecycle and tool
+    /// activity without exposing token or reasoning deltas.
+    pub fn try_map_deltas<Mapped>(
+        self,
+        mut map_delta: impl FnMut(Delta) -> Option<Mapped>,
+    ) -> Option<TurnEvent<Mapped>> {
+        Some(match self {
+            Self::ModelRequestStarted {
+                request_id,
+                parent_call_id,
+                provider,
+                model,
+            } => TurnEvent::ModelRequestStarted {
+                request_id,
+                parent_call_id,
+                provider,
+                model,
+            },
+            Self::AssistantTextDelta { request_id, delta } => TurnEvent::AssistantTextDelta {
+                request_id,
+                delta: map_delta(delta)?,
+            },
+            Self::AssistantReasoningDelta { request_id, delta } => {
+                TurnEvent::AssistantReasoningDelta {
+                    request_id,
+                    delta: map_delta(delta)?,
+                }
+            }
+            Self::ProviderRetryScheduled {
+                request_id,
+                provider,
+                model,
+                attempt,
+                max_attempts,
+                delay_ms,
+                code,
+                message,
+            } => TurnEvent::ProviderRetryScheduled {
+                request_id,
+                provider,
+                model,
+                attempt,
+                max_attempts,
+                delay_ms,
+                code,
+                message,
+            },
+            Self::ModelRequestCompleted {
+                request_id,
+                parent_call_id,
+            } => TurnEvent::ModelRequestCompleted {
+                request_id,
+                parent_call_id,
+            },
+            Self::AbilityStarted {
+                call_id,
+                ability_tool_name,
+                ability_name,
+                task_input,
+                caller_history,
+            } => TurnEvent::AbilityStarted {
+                call_id,
+                ability_tool_name,
+                ability_name,
+                task_input,
+                caller_history,
+            },
+            Self::ToolCallStart {
+                batch_id,
+                parent_tool_name,
+                calls,
+            } => TurnEvent::ToolCallStart {
+                batch_id,
+                parent_tool_name,
+                calls,
+            },
+            Self::ToolCallEnd {
+                batch_id,
+                parent_tool_name,
+                tool_call_id,
+                tool_name,
+                tool_args,
+                result,
+                metadata,
+            } => TurnEvent::ToolCallEnd {
+                batch_id,
+                parent_tool_name,
+                tool_call_id,
+                tool_name,
+                tool_args,
+                result,
+                metadata,
+            },
+            Self::HookStarted {
+                hook,
+                hook_event,
+                hook_type,
+                source,
+            } => TurnEvent::HookStarted {
+                hook,
+                hook_event,
+                hook_type,
+                source,
+            },
+            Self::HookActivated {
+                hook,
+                hook_event,
+                hook_type,
+                source,
+            } => TurnEvent::HookActivated {
+                hook,
+                hook_event,
+                hook_type,
+                source,
+            },
+            Self::HookCompleted {
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                success,
+                blocked,
+                exit_code,
+                output,
+                error,
+                reason,
+            } => TurnEvent::HookCompleted {
+                hook,
+                hook_event,
+                hook_type,
+                source,
+                success,
+                blocked,
+                exit_code,
+                output,
+                error,
+                reason,
+            },
+            Self::AbilityCompleted {
+                call_id,
+                ability_tool_name,
+                ability_name,
+                success,
+                final_output,
+            } => TurnEvent::AbilityCompleted {
+                call_id,
+                ability_tool_name,
+                ability_name,
+                success,
+                final_output,
+            },
+            Self::SubAgentEvent {
+                slug,
+                agent_name,
+                kind,
+                summary,
+                model_visible,
+            } => TurnEvent::SubAgentEvent {
+                slug,
+                agent_name,
+                kind,
+                summary,
+                model_visible,
+            },
+            Self::SubAgentTranscript {
+                slug,
+                agent_name,
+                event,
+            } => TurnEvent::SubAgentTranscript {
+                slug,
+                agent_name,
+                event,
+            },
+            Self::AsyncOperationEvent {
+                operation_id,
+                kind,
+                label,
+                parent_operation_id,
+                parent_tool_name,
+                status,
+                signal,
+                summary,
+                payload,
+                model_visible,
+            } => TurnEvent::AsyncOperationEvent {
+                operation_id,
+                kind,
+                label,
+                parent_operation_id,
+                parent_tool_name,
+                status,
+                signal,
+                summary,
+                payload,
+                model_visible,
+            },
+            Self::AsyncOperationTranscript {
+                operation_id,
+                kind,
+                label,
+                event,
+            } => TurnEvent::AsyncOperationTranscript {
+                operation_id,
+                kind,
+                label,
+                event,
+            },
+            Self::MessageCompacted {
+                messages_before,
+                messages_after,
+            } => TurnEvent::MessageCompacted {
+                messages_before,
+                messages_after,
+            },
+            Self::TranscriptMessage { message } => TurnEvent::TranscriptMessage { message },
+            Self::Paused => TurnEvent::Paused,
+            Self::Resumed => TurnEvent::Resumed,
+            Self::Done { output } => TurnEvent::Done { output },
+        })
+    }
+
+    /// Transform assistant delta payloads without removing events.
+    pub fn map_deltas<Mapped>(
+        self,
+        mut map_delta: impl FnMut(Delta) -> Mapped,
+    ) -> TurnEvent<Mapped> {
+        self.try_map_deltas(|delta| Some(map_delta(delta)))
+            .unwrap_or_else(|| unreachable!("an infallible delta mapper removed an event"))
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -375,6 +625,9 @@ pub enum TurnLoopError {
     /// The model used every permitted turn without producing a final response.
     #[error("turn loop reached the maximum of {max_turns} turns without a final response")]
     MaxTurnsReached { max_turns: usize },
+    /// The provider ended without a complete assistant response.
+    #[error("provider ended the response with finish reason {reason}")]
+    ProviderIncomplete { reason: String },
 }
 
 /// Configuration for the turn loop.

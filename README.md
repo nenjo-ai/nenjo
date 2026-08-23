@@ -282,7 +282,7 @@ Platform-connected workers compose several crates:
 Use the core SDK directly when you want to run agents in your own application without the platform worker:
 
 ```rust
-use nenjo::Provider;
+use nenjo::{Buffered, ChatInput, Provider, Streaming};
 
 // Build a provider with your manifest, model factory, and tools.
 let provider = Provider::builder()
@@ -299,10 +299,16 @@ let runner = provider
     .build()
     .await?;
 
-let output = runner.chat("Refactor the auth module").await?;
+let output = runner
+    .chat(ChatInput::new("Refactor the auth module"), Buffered)
+    .await?
+    .output()
+    .await?;
 println!("{}", output.text);
 
-let mut handle = runner.chat_stream("Refactor the auth module").await?;
+let mut handle = runner
+    .chat(ChatInput::new("Refactor the auth module"), Streaming)
+    .await?;
 while let Some(event) = handle.recv().await {
     match event {
         nenjo::TurnEvent::ToolCallStart { calls } => {
@@ -357,8 +363,8 @@ Provider::builder()
 
 provider.agent_by_name("coder").await? -> AgentBuilder -> .build().await? -> AgentRunner
 provider.new_agent()                  -> AgentBuilder -> .build().await? -> AgentRunner
-runner.chat("task").await?       -> TurnOutput { text, messages, tokens, tool_calls }
-runner.chat_stream("task").await -> ExecutionHandle { recv(), output() }
+runner.chat(ChatInput::new("task"), Buffered).await?  -> ChatHandle<Buffered>
+runner.chat(ChatInput::new("task"), Streaming).await? -> ChatHandle<Streaming>
 
 nenjo run -> nenjo-cli -> nenjo-worker
           -> secure envelope event bus

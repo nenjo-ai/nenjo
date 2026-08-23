@@ -9,8 +9,12 @@
 //!
 //! ```ignore
 //! let output = harness
-//!     .chat(ChatRequest::new("coder", "Fix the failing test")
-//!         .with_session(session_id))
+//!     .chat(
+//!         ChatRequest::new("coder", "Fix the failing test").with_session(session_id),
+//!         Buffered,
+//!     )
+//!     .await?
+//!     .output()
 //!     .await?;
 //!
 //! let mut stream = harness
@@ -76,22 +80,25 @@ pub mod task_session;
 
 pub mod prelude {
     pub use crate::{
-        ChatRequest, Harness, HarnessBuilder, HarnessError, HarnessEvent, HarnessExecutionHandle,
-        HarnessSessions, Manifest, ModelProviderFactory, Provider, ProviderBuilder,
-        ProviderRuntime, Result, TaskRequest, ToolFactory, TypedModelProviderFactory,
+        ChatRequest, Harness, HarnessBuilder, HarnessChatEvent, HarnessChatHandle, HarnessError,
+        HarnessEvent, HarnessExecutionHandle, HarnessSessions, Manifest, ModelProviderFactory,
+        Provider, ProviderBuilder, ProviderRuntime, Result, TaskRequest, ToolFactory,
+        TypedModelProviderFactory,
     };
+    pub use nenjo::{Buffered, ChatDelivery, Streaming};
     pub use nenjo_sessions::{
         CheckpointRecord, SessionRuntimeEvent, SessionTranscriptRecord, SessionUpsert,
     };
 }
 
-pub use events::HarnessEvent;
-pub use handle::HarnessExecutionHandle;
+pub use events::{HarnessChatEvent, HarnessEvent};
+pub use handle::{HarnessChatHandle, HarnessExecutionHandle};
 #[cfg(feature = "local-runtime")]
 pub use local_runtime::{
     FileCheckpointStore, FileSessionRuntime, FileSessionStore, FileSessionStores, FileTraceStore,
     FileTranscriptStore, SessionRecoveryHandler,
 };
+pub use nenjo::{Buffered, ChatDelivery, Streaming};
 pub use request::{ChatDomainActivation, ChatRequest, TaskRequest};
 pub use session::HarnessSessions;
 pub use task_runtime::{
@@ -127,14 +134,13 @@ where
     P: ProviderRuntime,
     SessionRt: SessionRuntime + 'static,
 {
-    /// Send a chat message through the harness and wait for the final output.
-    pub async fn chat(&self, request: ChatRequest) -> Result<nenjo::TurnOutput> {
-        self.chat_stream(request).await?.output().await
-    }
-
-    /// Send a chat message through the harness and stream harness-native events.
-    pub async fn chat_stream(&self, request: ChatRequest) -> Result<HarnessExecutionHandle> {
-        crate::run::chat::chat_stream(self, request).await
+    /// Execute one chat turn using the caller-selected response delivery mode.
+    pub async fn chat<D: ChatDelivery>(
+        &self,
+        request: ChatRequest,
+        delivery: D,
+    ) -> Result<HarnessChatHandle<D>> {
+        crate::run::chat::chat(self, request, delivery).await
     }
 
     /// Queue a user message into an active chat turn for the same session.
@@ -226,6 +232,7 @@ mod tests {
                 tool_calls: vec![],
                 provider_tool_calls: vec![],
                 usage: nenjo_models::TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             })
         }
     }

@@ -256,6 +256,7 @@ mod tests {
                     input_tokens: 15,
                     output_tokens: 4,
                 },
+                finish_reason: nenjo_models::FinishReason::Stop,
             })
         }
     }

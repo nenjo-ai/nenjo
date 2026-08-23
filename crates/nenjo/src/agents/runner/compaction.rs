@@ -1103,6 +1103,7 @@ mod tests {
                 tool_calls: Vec::new(),
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             })
         }
 

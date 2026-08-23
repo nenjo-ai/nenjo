@@ -6,11 +6,11 @@
 //! (domains, abilities, bootstrap types), and the execution handle API.
 //!
 //! ```ignore
-//! use nenjo::{AgentRun, ChatInput};
+//! use nenjo::{ChatInput, Streaming};
 //!
 //! let agent = provider.agent("my-coder").await?.build().await?;
 //! let handle = agent
-//!     .run_stream(AgentRun::chat(ChatInput::new("Hello!").project("demo_project")))
+//!     .chat(ChatInput::new("Hello!").project("demo_project"), Streaming)
 //!     .await?;
 //! let output = handle.output().await?;
 //! println!("{}", output.text);
@@ -37,9 +37,10 @@ pub mod types;
 // Re-export key types at the crate root.
 pub use agents::{AgentBuilder, AgentError, AgentInstance, AgentRunner};
 pub use agents::{
-    AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent, ExecutionHandle,
-    StartAsyncOperation, SubAgentTranscriptEvent, TurnEvent, TurnLoopConfig, TurnLoopError,
-    TurnOutput, current_async_operation_runtime,
+    AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent, Buffered,
+    BufferedChatEvent, BufferedDelta, ChatDelivery, ChatHandle, ExecutionHandle,
+    StartAsyncOperation, Streaming, StreamingChatEvent, SubAgentTranscriptEvent, TurnEvent,
+    TurnLoopConfig, TurnLoopError, TurnOutput, current_async_operation_runtime,
 };
 pub use arguments::{
     ArgumentName, ArgumentScope, ArgumentSelector, ArgumentValue, ArgumentValueType,

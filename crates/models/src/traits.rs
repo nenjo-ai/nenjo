@@ -261,6 +261,41 @@ pub struct ChatResponse {
     pub provider_tool_calls: Vec<ProviderToolTrace>,
     /// Token usage reported by the provider (zeros when not available).
     pub usage: TokenUsage,
+    /// Why the provider ended this model turn.
+    pub finish_reason: FinishReason,
+}
+
+/// Provider-independent model finish reason retained by the turn loop.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FinishReason {
+    Stop,
+    ToolCalls,
+    Length,
+    ContentFilter,
+    Cancelled,
+    Other(String),
+    Unknown,
+}
+
+impl FinishReason {
+    pub fn from_provider(value: Option<&str>, has_tool_calls: bool) -> Self {
+        let raw = value.map(str::trim).filter(|value| !value.is_empty());
+        let normalized = raw.map(str::to_ascii_lowercase);
+        match normalized.as_deref() {
+            Some("stop" | "end_turn" | "completed") => Self::Stop,
+            Some("tool_calls" | "tool_use" | "function_call") => Self::ToolCalls,
+            Some("length" | "max_tokens" | "max_output_tokens") => Self::Length,
+            Some("content_filter" | "safety") => Self::ContentFilter,
+            Some("cancelled" | "canceled") => Self::Cancelled,
+            Some(_) => Self::Other(raw.unwrap_or_default().to_string()),
+            None if has_tool_calls => Self::ToolCalls,
+            None => Self::Unknown,
+        }
+    }
+
+    pub fn permits_natural_completion(&self) -> bool {
+        matches!(self, Self::Stop | Self::Unknown | Self::Other(_))
+    }
 }
 
 /// Incremental events emitted while a provider-native model request is running.
@@ -271,8 +306,18 @@ pub struct ChatResponse {
 #[derive(Debug, Clone)]
 pub enum ProviderStreamEvent {
     TextDelta(String),
+    ReasoningDelta(String),
     ProviderToolStarted(ProviderToolTrace),
     ProviderToolCompleted(ProviderToolTrace),
+    RetryScheduled {
+        provider: String,
+        model: String,
+        attempt: u32,
+        max_attempts: u32,
+        delay_ms: u64,
+        code: String,
+        message: String,
+    },
 }
 
 impl ChatResponse {
@@ -493,7 +538,7 @@ pub trait ModelProvider: Send + Sync {
         request: ChatRequest<'_>,
         model: &str,
         temperature: f64,
-        events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+        events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
     ) -> anyhow::Result<ChatResponse> {
         request.ensure_artifacts_prepared()?;
         let _ = events;
@@ -623,6 +668,7 @@ mod tests {
             tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
+            finish_reason: FinishReason::Stop,
         };
         assert!(!empty.has_tool_calls());
         assert_eq!(empty.text_or_empty(), "");
@@ -636,9 +682,35 @@ mod tests {
             }],
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
+            finish_reason: FinishReason::Stop,
         };
         assert!(with_tools.has_tool_calls());
         assert_eq!(with_tools.text_or_empty(), "Let me check");
+    }
+
+    #[test]
+    fn provider_finish_reasons_are_normalized() {
+        assert_eq!(
+            FinishReason::from_provider(Some("STOP"), false),
+            FinishReason::Stop
+        );
+        assert_eq!(
+            FinishReason::from_provider(Some("tool_use"), true),
+            FinishReason::ToolCalls
+        );
+        assert_eq!(
+            FinishReason::from_provider(Some("max_tokens"), false),
+            FinishReason::Length
+        );
+        assert_eq!(
+            FinishReason::from_provider(None, true),
+            FinishReason::ToolCalls
+        );
+        assert_eq!(
+            FinishReason::from_provider(None, false),
+            FinishReason::Unknown
+        );
+        assert!(!FinishReason::Length.permits_natural_completion());
     }
 
     #[test]

@@ -71,6 +71,8 @@ struct NativeChatResponse {
     content: Vec<NativeContentIn>,
     #[serde(default)]
     usage: Option<NativeUsage>,
+    #[serde(default)]
+    stop_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +239,7 @@ impl AnthropicProvider {
     }
 
     fn parse_native_response(response: NativeChatResponse) -> ChatResponse {
+        let finish_reason_raw = response.stop_reason.clone();
         let mut text_parts = Vec::new();
         let mut tool_calls = Vec::new();
 
@@ -275,6 +278,10 @@ impl AnthropicProvider {
             })
             .unwrap_or_default();
 
+        let finish_reason = crate::FinishReason::from_provider(
+            finish_reason_raw.as_deref(),
+            !tool_calls.is_empty(),
+        );
         ChatResponse {
             text: if text_parts.is_empty() {
                 None
@@ -284,6 +291,7 @@ impl AnthropicProvider {
             tool_calls,
             provider_tool_calls: vec![],
             usage,
+            finish_reason,
         }
     }
 }
@@ -503,6 +511,7 @@ mod tests {
     fn parse_tool_call_roundtrip() {
         // Simulate assistant response with tool_use, then tool result
         let response = NativeChatResponse {
+            stop_reason: Some("tool_use".into()),
             content: vec![
                 NativeContentIn {
                     kind: "text".into(),

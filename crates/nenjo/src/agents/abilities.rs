@@ -908,12 +908,11 @@ where
                             model,
                         });
                     }
-                    TurnEvent::AssistantTextDelta { .. } => {
-                        let _ = parent_tx.send(event);
-                    }
-                    TurnEvent::AssistantResponse { .. } => {
-                        let _ = parent_tx.send(event);
-                    }
+                    // The nested runner still consumes and accumulates provider deltas into its
+                    // final TurnOutput. Forwarding those token-sized events would make the parent
+                    // transport carry an internal agent-to-agent stream that no user consumes.
+                    TurnEvent::AssistantTextDelta { .. }
+                    | TurnEvent::AssistantReasoningDelta { .. } => {}
                     TurnEvent::ModelRequestCompleted {
                         request_id,
                         parent_call_id,
@@ -946,6 +945,7 @@ where
             None,
             None,
             turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+            crate::agents::runner::chat::ProviderResponseDelivery::Buffered,
         ) => result,
     };
 
@@ -1128,7 +1128,8 @@ async fn bridge_ability_transcript(
         | TurnEvent::AbilityCompleted { .. }
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
-        | TurnEvent::AssistantResponse { .. }
+        | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ProviderRetryScheduled { .. }
         | TurnEvent::ModelRequestCompleted { .. }
         | TurnEvent::HookStarted { .. }
         | TurnEvent::HookActivated { .. }
@@ -1360,7 +1361,6 @@ mod tests {
 
     use crate::agents::instance::AgentModel;
     use crate::agents::prompts::PromptContext;
-    use crate::agents::respond::RESPOND_TO_USER_TOOL_NAME;
     use crate::config::AgentConfig;
     use crate::context::{ContextRenderer, types::RenderContextBlock};
     use crate::manifest::{
@@ -1768,7 +1768,7 @@ mod tests {
 
         assert!(!tool_names.contains(&"list_agents"));
         assert!(!tool_names.contains(&"create_agent"));
-        assert!(!tool_names.contains(&RESPOND_TO_USER_TOOL_NAME));
+        assert!(!tool_names.contains(&"respond_to_user"));
         assert_eq!(
             sub_instance.runtime.execution_mode,
             AgentExecutionMode::Ability
@@ -1788,6 +1788,7 @@ mod tests {
                     tool_calls: Vec::new(),
                     provider_tool_calls: Vec::new(),
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 },
                 ChatResponse {
                     text: None,
@@ -1803,6 +1804,7 @@ mod tests {
                     }],
                     provider_tool_calls: Vec::new(),
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 },
             ],
             next: AtomicUsize::new(0),
@@ -1819,6 +1821,7 @@ mod tests {
             None,
             None,
             turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+            crate::agents::runner::chat::ProviderResponseDelivery::Buffered,
         )
         .await
         .unwrap();
@@ -1863,6 +1866,7 @@ mod tests {
                 ],
                 provider_tool_calls: Vec::new(),
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             }],
             next: AtomicUsize::new(0),
             seen_messages: Mutex::new(Vec::new()),
@@ -1878,6 +1882,7 @@ mod tests {
             None,
             None,
             turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+            crate::agents::runner::chat::ProviderResponseDelivery::Buffered,
         )
         .await
         .unwrap();
@@ -1905,6 +1910,7 @@ mod tests {
                     }],
                     provider_tool_calls: Vec::new(),
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 },
                 ChatResponse {
                     text: None,
@@ -1919,6 +1925,7 @@ mod tests {
                     }],
                     provider_tool_calls: Vec::new(),
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 },
             ],
             next: AtomicUsize::new(0),
@@ -1935,6 +1942,7 @@ mod tests {
             None,
             None,
             turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+            crate::agents::runner::chat::ProviderResponseDelivery::Buffered,
         )
         .await
         .unwrap();
@@ -1961,6 +1969,7 @@ mod tests {
             None,
             None,
             turn_loop::TurnCompletion::RequireTool(FINISH_ABILITY_TOOL_NAME),
+            crate::agents::runner::chat::ProviderResponseDelivery::Buffered,
         )
         .await
         .unwrap_err();
@@ -2003,6 +2012,7 @@ mod tests {
                 }],
                 provider_tool_calls: Vec::new(),
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             }],
             next: AtomicUsize::new(0),
             seen_messages: Mutex::new(Vec::new()),

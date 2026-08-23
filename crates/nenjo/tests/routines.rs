@@ -53,6 +53,7 @@ impl ModelProvider for MockLlm {
                 input_tokens: 10,
                 output_tokens: 5,
             },
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 
@@ -529,6 +530,7 @@ fn plain_response(text: &str) -> ChatResponse {
             input_tokens: 10,
             output_tokens: 5,
         },
+        finish_reason: nenjo_models::FinishReason::Stop,
     }
 }
 
@@ -636,6 +638,7 @@ fn route_response(
             input_tokens: 10,
             output_tokens: 5,
         },
+        finish_reason: nenjo_models::FinishReason::Stop,
     }
 }
 
@@ -652,6 +655,7 @@ fn progress_tool_response(text: &str) -> ChatResponse {
             input_tokens: 10,
             output_tokens: 5,
         },
+        finish_reason: nenjo_models::FinishReason::Stop,
     }
 }
 
@@ -1220,6 +1224,7 @@ async fn single_agent_step_retries_until_route_next_steps() {
                 input_tokens: 10,
                 output_tokens: 5,
             },
+            finish_reason: nenjo_models::FinishReason::Stop,
         },
         route_response(
             "Implementation complete.",
@@ -1317,6 +1322,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+            finish_reason: nenjo_models::FinishReason::Stop,
             },
             progress_tool_response("Writing the implementation now."),
             ChatResponse {
@@ -1327,6 +1333,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+            finish_reason: nenjo_models::FinishReason::Stop,
             },
             ChatResponse {
                 text: Some("I need one more verification pass.".into()),
@@ -1336,6 +1343,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+            finish_reason: nenjo_models::FinishReason::Stop,
             },
             route_response(
                 "Implementation complete.",
@@ -1804,6 +1812,7 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+                finish_reason: nenjo_models::FinishReason::Stop,
             },
         ]))
         .with_tool_factory(NoopToolFactory)

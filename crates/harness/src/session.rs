@@ -570,6 +570,8 @@ pub fn transcript_payloads_from_turn_event(
     match event {
         nenjo::TurnEvent::ModelRequestStarted { .. }
         | nenjo::TurnEvent::AssistantTextDelta { .. }
+        | nenjo::TurnEvent::AssistantReasoningDelta { .. }
+        | nenjo::TurnEvent::ProviderRetryScheduled { .. }
         | nenjo::TurnEvent::ModelRequestCompleted { .. } => Vec::new(),
         nenjo::TurnEvent::AbilityStarted {
             ability_tool_name,
@@ -622,7 +624,6 @@ pub fn transcript_payloads_from_turn_event(
                 message: message.clone(),
             }]
         }
-        nenjo::TurnEvent::AssistantResponse { .. } => Vec::new(),
         nenjo::TurnEvent::Done { output } => vec![SessionTranscriptEventPayload::TurnCompleted {
             final_output: preview(&output.text),
         }],
@@ -646,7 +647,8 @@ pub fn trace_events_from_turn_event(
     match event {
         nenjo::TurnEvent::ModelRequestStarted { .. }
         | nenjo::TurnEvent::AssistantTextDelta { .. }
-        | nenjo::TurnEvent::AssistantResponse { .. }
+        | nenjo::TurnEvent::AssistantReasoningDelta { .. }
+        | nenjo::TurnEvent::ProviderRetryScheduled { .. }
         | nenjo::TurnEvent::ModelRequestCompleted { .. } => Vec::new(),
         nenjo::TurnEvent::AbilityStarted {
             call_id,

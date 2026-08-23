@@ -247,6 +247,8 @@ struct ApiChatResponse {
 #[derive(Debug, Deserialize)]
 struct Choice {
     message: ResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -290,6 +292,8 @@ struct StreamError {
 #[derive(Debug, Deserialize)]
 struct StreamChoice {
     delta: StreamDelta,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -322,6 +326,7 @@ struct ChatStreamState {
     text: String,
     tool_calls: Vec<StreamToolCallState>,
     usage: TokenUsage,
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -332,10 +337,10 @@ struct StreamToolCallState {
 }
 
 impl ChatStreamState {
-    fn absorb(
+    async fn absorb(
         &mut self,
         chunk: ApiChatStreamChunk,
-        events: &tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+        events: &tokio::sync::mpsc::Sender<ProviderStreamEvent>,
     ) -> anyhow::Result<()> {
         if let Some(error) = chunk.error {
             anyhow::bail!("OpenAI-compatible streaming error: {}", error.message);
@@ -347,11 +352,17 @@ impl ChatStreamState {
             };
         }
         for choice in chunk.choices {
+            if choice.finish_reason.is_some() {
+                self.finish_reason = choice.finish_reason.clone();
+            }
             if let Some(content) = choice.delta.content
                 && !content.is_empty()
             {
                 self.text.push_str(&content);
-                let _ = events.send(ProviderStreamEvent::TextDelta(content));
+                events
+                    .send(ProviderStreamEvent::TextDelta(content))
+                    .await
+                    .map_err(|_| anyhow::anyhow!("provider stream consumer closed"))?;
             }
             for tool_call in choice.delta.tool_calls {
                 if self.tool_calls.len() <= tool_call.index {
@@ -376,7 +387,7 @@ impl ChatStreamState {
     }
 
     fn into_response(self) -> ChatResponse {
-        let tool_calls = self
+        let tool_calls: Vec<ToolCall> = self
             .tool_calls
             .into_iter()
             .filter(|call| !call.name.is_empty())
@@ -390,11 +401,16 @@ impl ChatStreamState {
                 },
             })
             .collect();
+        let finish_reason = crate::FinishReason::from_provider(
+            self.finish_reason.as_deref(),
+            !tool_calls.is_empty(),
+        );
         ChatResponse {
             text: (!self.text.is_empty()).then_some(self.text),
             tool_calls,
             provider_tool_calls: Vec::new(),
             usage: self.usage,
+            finish_reason,
         }
     }
 }
@@ -425,10 +441,10 @@ fn take_sse_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
     Some(frame)
 }
 
-fn absorb_sse_frame(
+async fn absorb_sse_frame(
     frame: &[u8],
     state: &mut ChatStreamState,
-    events: &tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+    events: &tokio::sync::mpsc::Sender<ProviderStreamEvent>,
 ) -> anyhow::Result<()> {
     let frame = std::str::from_utf8(frame).context("streaming response contained invalid UTF-8")?;
     let mut data = String::new();
@@ -451,7 +467,7 @@ fn absorb_sse_frame(
             &data[..data.floor_char_boundary(500)]
         )
     })?;
-    state.absorb(chunk, events)
+    state.absorb(chunk, events).await
 }
 
 #[derive(Debug, Serialize)]
@@ -1010,6 +1026,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
                         tool_calls: vec![],
                         provider_tool_calls: vec![],
                         usage: TokenUsage::default(),
+                        finish_reason: crate::FinishReason::Stop,
                     });
                 }
             }
@@ -1050,12 +1067,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
             })
             .unwrap_or_default();
 
-        let message = chat_response
+        let choice = chat_response
             .choices
             .into_iter()
             .next()
-            .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))?
-            .message;
+            .ok_or_else(|| anyhow::anyhow!("No response from {}", self.name))?;
+        let finish_reason = choice.finish_reason;
+        let message = choice.message;
 
         let tool_calls = message
             .tool_calls
@@ -1072,12 +1090,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 })
             })
             .collect::<Vec<_>>();
+        let finish_reason =
+            crate::FinishReason::from_provider(finish_reason.as_deref(), !tool_calls.is_empty());
 
         Ok(ChatResponse {
             text: message.content,
             tool_calls,
             provider_tool_calls: vec![],
             usage,
+            finish_reason,
         })
     }
 
@@ -1086,7 +1107,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
         request: ChatRequest<'_>,
         model: &str,
         temperature: f64,
-        events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+        events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
     ) -> anyhow::Result<ChatResponse> {
         if self.artifact_dialect != ChatArtifactDialect::Vllm {
             return self.chat(request, model, temperature).await;
@@ -1138,11 +1159,11 @@ impl ModelProvider for OpenAiCompatibleProvider {
         while let Some(chunk) = stream.next().await {
             buffer.extend_from_slice(&chunk?);
             while let Some(frame) = take_sse_frame(&mut buffer) {
-                absorb_sse_frame(&frame, &mut state, &events)?;
+                absorb_sse_frame(&frame, &mut state, &events).await?;
             }
         }
         if !buffer.iter().all(u8::is_ascii_whitespace) {
-            absorb_sse_frame(&buffer, &mut state, &events)?;
+            absorb_sse_frame(&buffer, &mut state, &events).await?;
         }
         Ok(state.into_response())
     }
@@ -1669,7 +1690,7 @@ mod tests {
             ChatArtifactDialect::Vllm,
         );
         let messages = vec![ConversationMessage::user("hello")];
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
 
         let response = provider
             .chat_stream(
@@ -1711,7 +1732,7 @@ mod tests {
         let (base_url, captured) = capture_one_json_request().await;
         let provider = make_provider("compatible", &base_url, Some("test-key"));
         let messages = vec![ConversationMessage::user("hello")];
-        let (events_tx, mut events_rx) = tokio::sync::mpsc::unbounded_channel();
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(64);
 
         let response = provider
             .chat_stream(

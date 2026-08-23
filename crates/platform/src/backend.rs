@@ -24,17 +24,13 @@ use crate::library_knowledge::{
     upsert_library_knowledge_entry_with_edges, write_library_document_content,
 };
 use crate::manifest_contract::{
-    AgentRecord, DomainPromptRecord, KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord,
-    RoutineRecord,
+    AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, DomainPromptRecord,
+    KnowledgeDocumentEdgeRecord, KnowledgeDocumentRecord, RoutineRecord,
 };
 use crate::manifest_kinds::{ContentScope, SensitiveContentKind};
 use crate::manifest_mcp::*;
 use crate::prompt_merge::merge_prompt_config;
 use crate::resource_ids::{PlatformResourceIdStore, PlatformResourceKind};
-
-fn string_to_manifest_path(path: String) -> Option<String> {
-    if path.is_empty() { None } else { Some(path) }
-}
 
 fn knowledge_edge_record_from_response(
     edge: KnowledgeDocEdgeResponse,
@@ -44,24 +40,6 @@ fn knowledge_edge_record_from_response(
 
 fn local_agent_from_record(agent: AgentRecord) -> AgentManifest {
     agent.to_manifest(agent.resolved_prompt_config())
-}
-
-fn local_ability_from_document(ability: AbilityDocument) -> AbilityManifest {
-    AbilityManifest {
-        slug: ability.summary.slug,
-        name: ability.summary.name,
-        path: string_to_manifest_path(ability.summary.path),
-        description: ability.summary.description,
-        activation_condition: ability.activation_condition,
-        prompt_config: ability.prompt_config,
-        platform_scopes: ability.platform_scopes,
-        mcp_servers: ability.mcp_servers,
-        script_tools: ability.script_tools,
-        media: Vec::new(),
-        source_type: "native".to_string(),
-        read_only: false,
-        metadata: serde_json::json!({}),
-    }
 }
 
 fn local_domain_from_document(domain: DomainDocument) -> DomainManifest {
@@ -398,6 +376,24 @@ where
             .cloned()
     }
 
+    async fn decode_manifest_payload(
+        &self,
+        payload: &nenjo_events::EncryptedPayload,
+        content_kind: SensitiveContentKind,
+    ) -> Result<Option<serde_json::Value>> {
+        let expected_object_type = content_kind.encrypted_object_type();
+        if payload.object_type != expected_object_type {
+            bail!(
+                "manifest record carried encrypted payload type {}; expected {expected_object_type}",
+                payload.object_type,
+            );
+        }
+
+        self.sensitive_payload_encoder
+            .decode_payload(&serde_json::to_value(payload)?)
+            .await
+    }
+
     async fn decode_domain_prompt_record(
         &self,
         mut record: DomainPromptRecord,
@@ -405,16 +401,8 @@ where
         let Some(payload) = record.encrypted_payload.as_ref() else {
             return Ok(record);
         };
-        if payload.object_type != SensitiveContentKind::DomainPrompt.encrypted_object_type() {
-            bail!(
-                "domain prompt record carried unsupported encrypted payload type {}",
-                payload.object_type
-            );
-        }
-
         let Some(decoded) = self
-            .sensitive_payload_encoder
-            .decode_payload(&serde_json::to_value(payload)?)
+            .decode_manifest_payload(payload, SensitiveContentKind::DomainPrompt)
             .await?
         else {
             return Ok(record);
@@ -423,6 +411,69 @@ where
         record.prompt_config = Some(
             serde_json::from_value(decoded)
                 .context("failed to decode encrypted domain prompt payload")?,
+        );
+        record.encrypted_payload = None;
+        Ok(record)
+    }
+
+    async fn decode_agent_prompt_record(&self, mut record: AgentRecord) -> Result<AgentRecord> {
+        let Some(payload) = record.encrypted_payload.as_ref() else {
+            return Ok(record);
+        };
+        let Some(decoded) = self
+            .decode_manifest_payload(payload, SensitiveContentKind::AgentPrompt)
+            .await?
+        else {
+            return Ok(record);
+        };
+
+        record.prompt_config = Some(
+            serde_json::from_value(decoded)
+                .context("failed to decode encrypted agent prompt payload")?,
+        );
+        record.encrypted_payload = None;
+        Ok(record)
+    }
+
+    async fn decode_ability_prompt_record(
+        &self,
+        mut record: AbilityPromptRecord,
+    ) -> Result<AbilityPromptRecord> {
+        let Some(payload) = record.encrypted_payload.as_ref() else {
+            return Ok(record);
+        };
+        let Some(decoded) = self
+            .decode_manifest_payload(payload, SensitiveContentKind::AbilityPrompt)
+            .await?
+        else {
+            return Ok(record);
+        };
+
+        record.prompt_config = Some(
+            serde_json::from_value(decoded)
+                .context("failed to decode encrypted ability prompt payload")?,
+        );
+        record.encrypted_payload = None;
+        Ok(record)
+    }
+
+    async fn decode_context_block_content_record(
+        &self,
+        mut record: ContextBlockContentRecord,
+    ) -> Result<ContextBlockContentRecord> {
+        let Some(payload) = record.encrypted_payload.as_ref() else {
+            return Ok(record);
+        };
+        let Some(decoded) = self
+            .decode_manifest_payload(payload, SensitiveContentKind::ContextBlockContent)
+            .await?
+        else {
+            return Ok(record);
+        };
+
+        record.template = Some(
+            serde_json::from_value(decoded)
+                .context("failed to decode encrypted context block template payload")?,
         );
         record.encrypted_payload = None;
         Ok(record)
@@ -567,7 +618,7 @@ where
 
         let Some(remote) = self
             .platform_client
-            .fetch_ability_document(ability_ref)
+            .fetch_ability_record(ability_ref)
             .await?
         else {
             return Err(anyhow!(
@@ -576,21 +627,10 @@ where
             ));
         };
 
-        let hydrated = AbilityManifest {
-            slug: remote.summary.slug,
-            name: remote.summary.name,
-            path: string_to_manifest_path(remote.summary.path),
-            description: remote.summary.description,
-            activation_condition: remote.activation_condition,
-            prompt_config: remote.prompt_config,
-            platform_scopes: remote.platform_scopes,
-            mcp_servers: remote.mcp_servers,
-            script_tools: remote.script_tools,
-            media: Vec::new(),
-            source_type: "native".to_string(),
-            read_only: false,
-            metadata: serde_json::json!({}),
-        };
+        let hydrated = self
+            .decode_ability_prompt_record(remote)
+            .await?
+            .to_manifest();
         self.local_store
             .cache_resource(&ManifestResource::Ability(hydrated.clone()))
             .await?;
@@ -890,12 +930,19 @@ where
             resolved_prompt_config = Some(merged_prompt_config);
         }
         let configured = self.platform_client.configure_agent_record(&data).await?;
+        // A submitted prompt patch is already merged locally before encryption, so
+        // decrypt only when the response is the sole source of the current prompt.
+        let configured = if resolved_prompt_config.is_some() {
+            configured
+        } else {
+            self.decode_agent_prompt_record(configured).await?
+        };
         let new_slug = Slug::derive(&configured.slug);
 
         let mut local_agent = local_agent_from_record(configured.clone());
         if let Some(prompt_config) = resolved_prompt_config {
             local_agent.prompt_config = prompt_config;
-        } else if configured.prompt_config.is_none()
+        } else if (configured.prompt_config.is_none() || configured.encrypted_payload.is_some())
             && let Some(existing_agent) = existing_agent.as_ref()
         {
             local_agent.prompt_config = existing_agent.prompt_config.clone();
@@ -1000,20 +1047,21 @@ where
             data.prompt_config = None;
         }
 
-        let configured = self
-            .platform_client
-            .configure_ability_document(&data)
-            .await?;
-        let mut local_ability = local_ability_from_document(configured);
+        let configured = self.platform_client.configure_ability_record(&data).await?;
+        // A submitted prompt is already available locally, so decrypt only when
+        // the platform response is the sole source of the current prompt.
+        let configured = if submitted_prompt_config.is_some() {
+            configured
+        } else {
+            self.decode_ability_prompt_record(configured).await?
+        };
+        let mut local_ability = configured.to_manifest();
         if let Some(prompt_config) = submitted_prompt_config {
             local_ability.prompt_config = prompt_config;
-        } else if let Some(existing_ability) = existing_ability.as_ref() {
+        } else if (configured.prompt_config.is_none() || configured.encrypted_payload.is_some())
+            && let Some(existing_ability) = existing_ability.as_ref()
+        {
             local_ability.prompt_config = existing_ability.prompt_config.clone();
-        }
-        if let Some(existing_ability) = existing_ability {
-            local_ability.source_type = existing_ability.source_type;
-            local_ability.read_only = existing_ability.read_only;
-            local_ability.metadata = existing_ability.metadata;
         }
         let new_slug = local_ability.manifest_slug().clone();
         let ability_document = AbilityDocument::from(local_ability.clone());
@@ -2157,22 +2205,23 @@ where
 
         let configured = self
             .platform_client
-            .configure_context_block_document(&data)
+            .configure_context_block_record(&data)
             .await?;
+        // A submitted template is already available locally, so decrypt only when
+        // the platform response is the sole source of the current template.
+        let configured = if submitted_template.is_some() {
+            configured
+        } else {
+            self.decode_context_block_content_record(configured).await?
+        };
         let template = submitted_template.unwrap_or_else(|| {
-            if configured.template.is_empty() {
-                fallback_template
+            if configured.encrypted_payload.is_none() {
+                configured.template.clone().unwrap_or(fallback_template)
             } else {
-                configured.template.clone()
+                fallback_template
             }
         });
-        let local_context_block = ContextBlockManifest {
-            slug: configured.summary.slug.clone(),
-            name: configured.summary.name.clone(),
-            path: configured.summary.path.clone(),
-            description: configured.summary.description.clone(),
-            template,
-        };
+        let local_context_block = configured.block.to_manifest(template);
         let new_slug = local_context_block.manifest_slug().clone();
         let context_block_document = ContextBlockDocument::from(local_context_block.clone());
         self.local_store
@@ -2340,9 +2389,23 @@ mod tests {
                 .get("object_type")
                 .and_then(serde_json::Value::as_str)
             {
+                Some("manifest.agent.prompt") => Ok(Some(json!({
+                    "system_prompt": "DECODED_AGENT_SYSTEM_PROMPT_123",
+                    "developer_prompt": "DECODED_AGENT_DEVELOPER_PROMPT_456",
+                    "templates": {
+                        "chat": "DECODED_AGENT_CHAT_TEMPLATE_789"
+                    },
+                    "memory_profile": {}
+                }))),
+                Some("manifest.ability.prompt") => Ok(Some(json!({
+                    "developer_prompt": "DECODED_ABILITY_PROMPT_123"
+                }))),
                 Some("manifest.domain.prompt") => Ok(Some(json!({
                     "developer_prompt_addon": "DECODED_DOMAIN_PROMPT_123"
                 }))),
+                Some("manifest.context_block.content") => {
+                    Ok(Some(json!("DECODED_CONTEXT_TEMPLATE_123")))
+                }
                 _ => Ok(None),
             }
         }
@@ -2777,6 +2840,115 @@ mod tests {
         assert!(body.get("encrypted_payload").is_some());
         assert!(!requests[0].body.contains("Sensitive agent prompt"));
         assert!(!requests[0].body.contains("Sensitive chat template"));
+    }
+
+    #[tokio::test]
+    async fn configure_agent_returns_full_decrypted_agent_after_metadata_patch() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let agent_id = Uuid::new_v4();
+        let (base_url, server) = spawn_single_request_server(
+            "POST",
+            "/api/v1/agents/configure",
+            "200 OK",
+            json!({
+                "id": agent_id,
+                "org_id": org_id,
+                "slug": "reviewer",
+                "name": "Reviewer",
+                "description": "Reviews implementation quality",
+                "color": "#0EA5E9",
+                "model": "ornith-qwen",
+                "model_id": Uuid::new_v4(),
+                "model_name": "Ornith Qwen",
+                "domains": ["engineering"],
+                "platform_scopes": ["tasks:read"],
+                "mcp_servers": ["github"],
+                "script_tools": ["lint"],
+                "abilities": ["review-code"],
+                "prompt_locked": true,
+                "source_type": "native",
+                "read_only": false,
+                "metadata": {},
+                // Older platform versions returned this empty database placeholder
+                // alongside the authoritative encrypted prompt.
+                "prompt_config": {
+                    "system_prompt": "",
+                    "developer_prompt": "",
+                    "templates": {},
+                    "memory_profile": {}
+                },
+                "encrypted_payload": {
+                    "account_id": org_id,
+                    "encryption_scope": "org",
+                    "object_id": agent_id,
+                    "object_type": "manifest.agent.prompt",
+                    "algorithm": "AES-256-GCM",
+                    "key_version": 1,
+                    "nonce": "nonce",
+                    "ciphertext": "encrypted-test-payload"
+                },
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:01:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        let configured = backend
+            .configure_agent(AgentConfigureParams {
+                data: AgentConfigureDocument {
+                    agent: Some(Slug::derive("reviewer")),
+                    metadata: Some(AgentConfigureMetadata {
+                        model: Some(Some(Slug::derive("ornith-qwen"))),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(configured.agent.summary.name, "Reviewer");
+        assert_eq!(
+            configured.agent.summary.description.as_deref(),
+            Some("Reviews implementation quality")
+        );
+        assert_eq!(
+            configured.agent.summary.model,
+            Some(Slug::derive("ornith-qwen"))
+        );
+        assert_eq!(configured.agent.domains, vec![Slug::derive("engineering")]);
+        assert_eq!(configured.agent.platform_scopes, vec!["tasks:read"]);
+        assert_eq!(configured.agent.mcp_servers, vec![Slug::derive("github")]);
+        assert_eq!(configured.agent.script_tools, vec![Slug::derive("lint")]);
+        assert_eq!(
+            configured.agent.abilities,
+            vec![Slug::derive("review-code")]
+        );
+        assert!(configured.agent.prompt_locked);
+        assert_eq!(
+            configured.agent.prompt_config.system_prompt,
+            "DECODED_AGENT_SYSTEM_PROMPT_123"
+        );
+        assert_eq!(
+            configured.agent.prompt_config.developer_prompt,
+            "DECODED_AGENT_DEVELOPER_PROMPT_456"
+        );
+        assert_eq!(
+            configured.agent.prompt_config.templates.chat_task,
+            "DECODED_AGENT_CHAT_TEMPLATE_789"
+        );
+
+        let requests = server.await.unwrap().unwrap();
+        let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
+        assert_eq!(body["agent"], "reviewer");
+        assert_eq!(body["metadata"]["model"], "ornith-qwen");
     }
 
     #[tokio::test]
@@ -3322,7 +3494,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configure_ability_with_uncached_explicit_ref_calls_platform() {
+    async fn configure_ability_returns_full_decrypted_document_without_cached_copy() {
         let temp = tempdir().unwrap();
         let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
         let org_id = Uuid::new_v4();
@@ -3338,13 +3510,26 @@ mod tests {
                 "name": "brand_review",
                 "path": "",
                 "description": "Updated ability",
-                "activation_condition": "",
-                "platform_scopes": [],
-                "mcp_servers": [],
-                "script_tools": [],
+                "activation_condition": "When reviewing brand work",
+                "platform_scopes": ["tasks:read"],
+                "mcp_servers": ["github"],
+                "script_tools": ["lint"],
                 "source_type": "native",
                 "read_only": false,
                 "metadata": {},
+                "prompt_config": {
+                    "developer_prompt": ""
+                },
+                "encrypted_payload": {
+                    "account_id": org_id,
+                    "encryption_scope": "org",
+                    "object_id": ability_id,
+                    "object_type": "manifest.ability.prompt",
+                    "algorithm": "AES-256-GCM",
+                    "key_version": 1,
+                    "nonce": "nonce",
+                    "ciphertext": "encrypted-test-payload"
+                },
                 "created_by": null,
                 "created_at": "2026-05-23T00:00:00Z",
                 "updated_at": "2026-05-23T00:00:00Z"
@@ -3356,7 +3541,7 @@ mod tests {
         let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
             .with_cached_org_id(Some(org_id));
 
-        backend
+        let result = backend
             .configure_ability(AbilityConfigureParams {
                 data: AbilityConfigureDocument {
                     ability: Some(Slug::derive("brand_review")),
@@ -3373,9 +3558,90 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(result.ability.summary.name, "brand_review");
+        assert_eq!(
+            result.ability.summary.description.as_deref(),
+            Some("Updated ability")
+        );
+        assert_eq!(
+            result.ability.activation_condition,
+            "When reviewing brand work"
+        );
+        assert_eq!(result.ability.platform_scopes, vec!["tasks:read"]);
+        assert_eq!(result.ability.mcp_servers, vec![Slug::derive("github")]);
+        assert_eq!(result.ability.script_tools, vec![Slug::derive("lint")]);
+        assert_eq!(
+            result.ability.prompt_config.developer_prompt,
+            "DECODED_ABILITY_PROMPT_123"
+        );
+
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
         assert_eq!(body["ability"], "brand_review");
+    }
+
+    #[tokio::test]
+    async fn get_ability_returns_full_decrypted_document_without_cached_copy() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let ability_id = Uuid::new_v4();
+        let (base_url, server) = spawn_single_request_server(
+            "GET",
+            "/api/v1/abilities/brand_review",
+            "200 OK",
+            json!({
+                "id": ability_id,
+                "org_id": org_id,
+                "slug": "brand_review",
+                "name": "brand_review",
+                "path": "",
+                "description": "Reviews brand work",
+                "activation_condition": "When reviewing brand work",
+                "platform_scopes": ["tasks:read"],
+                "mcp_servers": ["github"],
+                "script_tools": ["lint"],
+                "source_type": "native",
+                "read_only": false,
+                "metadata": {},
+                "encrypted_payload": {
+                    "account_id": org_id,
+                    "encryption_scope": "org",
+                    "object_id": ability_id,
+                    "object_type": "manifest.ability.prompt",
+                    "algorithm": "AES-256-GCM",
+                    "key_version": 1,
+                    "nonce": "nonce",
+                    "ciphertext": "encrypted-test-payload"
+                },
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend = PlatformManifestBackend::new(store, client, TestSensitivePayloadEncoder)
+            .with_cached_org_id(Some(org_id));
+
+        let result = backend
+            .get_ability(AbilitiesGetParams {
+                ability: Slug::derive("brand_review"),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.ability.summary.name, "brand_review");
+        assert_eq!(
+            result.ability.prompt_config.developer_prompt,
+            "DECODED_ABILITY_PROMPT_123"
+        );
+        assert_eq!(result.ability.mcp_servers, vec![Slug::derive("github")]);
+        assert_eq!(result.ability.script_tools, vec![Slug::derive("lint")]);
+
+        let requests = server.await.unwrap().unwrap();
+        assert_eq!(requests[0].path, "/api/v1/abilities/brand_review");
     }
 
     #[tokio::test]
@@ -3437,7 +3703,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configure_context_block_with_uncached_explicit_ref_calls_platform() {
+    async fn configure_context_block_returns_full_decrypted_document_without_cached_copy() {
         let temp = tempdir().unwrap();
         let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
         let org_id = Uuid::new_v4();
@@ -3453,10 +3719,20 @@ mod tests {
                 "name": "Brand Guidance",
                 "path": "",
                 "description": "Updated context",
-                "template": "Existing template",
+                "template": "",
                 "source_type": "native",
                 "read_only": false,
                 "metadata": {},
+                "encrypted_payload": {
+                    "account_id": org_id,
+                    "encryption_scope": "org",
+                    "object_id": block_id,
+                    "object_type": "manifest.context_block.content",
+                    "algorithm": "AES-256-GCM",
+                    "key_version": 1,
+                    "nonce": "nonce",
+                    "ciphertext": "encrypted-test-payload"
+                },
                 "created_by": null,
                 "created_at": "2026-05-23T00:00:00Z",
                 "updated_at": "2026-05-23T00:00:00Z"
@@ -3484,7 +3760,15 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(result.context_block.template, "Existing template");
+        assert_eq!(result.context_block.summary.name, "Brand Guidance");
+        assert_eq!(
+            result.context_block.summary.description.as_deref(),
+            Some("Updated context")
+        );
+        assert_eq!(
+            result.context_block.template,
+            "DECODED_CONTEXT_TEMPLATE_123"
+        );
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
         assert_eq!(body["context_block"], "brand-guidance");

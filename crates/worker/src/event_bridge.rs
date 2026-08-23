@@ -2,11 +2,11 @@
 
 use nenjo::manifest::Manifest;
 use nenjo_events::{
-    AsyncOperationTranscriptEvent, ExecutionEventPayload, ExecutionTaskArtifactsEvent,
-    ExecutionTraceRoutineStep, ExecutionWorkflowStepEvent, Response, StepAgent, StreamEvent,
+    AsyncOperationTranscriptEvent, ChatStreamErrorCode, ExecutionEventPayload,
+    ExecutionTaskArtifactsEvent, ExecutionTraceRoutineStep, ExecutionWorkflowStepEvent, Response,
+    StepAgent, StreamEvent,
 };
 use serde::Serialize;
-use tracing::{debug, trace};
 use uuid::Uuid;
 
 use nenjo_harness::preview::{PREVIEW_MAX_CHARS, summarize_preview, truncate_preview};
@@ -93,7 +93,7 @@ pub fn turn_event_to_stream_events(
     run_id: &str,
     session_id: Uuid,
 ) -> Vec<StreamEvent> {
-    let stream_events = match event {
+    match event {
         nenjo::TurnEvent::ModelRequestStarted {
             request_id,
             parent_call_id,
@@ -110,22 +110,47 @@ pub fn turn_event_to_stream_events(
             vec![StreamEvent::AssistantTextDelta {
                 run_id: run_id.to_string(),
                 request_id: request_id.clone(),
+                checkpoint: false,
                 payload: Some(serde_json::json!({
                     "delta": delta,
                 })),
                 encrypted_payload: None,
             }]
         }
-        nenjo::TurnEvent::AssistantResponse { message, status } => {
-            vec![StreamEvent::AssistantResponse {
+        nenjo::TurnEvent::AssistantReasoningDelta { request_id, delta } => {
+            vec![StreamEvent::AssistantReasoningDelta {
                 run_id: run_id.to_string(),
-                payload: Some(serde_json::json!({
-                    "message": message,
-                    "status": status,
-                })),
+                request_id: request_id.clone(),
+                payload: Some(serde_json::json!({ "delta": delta })),
                 encrypted_payload: None,
             }]
         }
+        nenjo::TurnEvent::ProviderRetryScheduled {
+            request_id,
+            provider,
+            model,
+            attempt,
+            max_attempts,
+            delay_ms,
+            code,
+            message,
+        } => vec![StreamEvent::ProviderRetryScheduled {
+            run_id: run_id.to_string(),
+            request_id: request_id.clone(),
+            provider: provider.clone(),
+            model: model.clone(),
+            attempt: *attempt,
+            max_attempts: *max_attempts,
+            delay_ms: *delay_ms,
+            code: match code.as_str() {
+                "rate_limited" => ChatStreamErrorCode::RateLimited,
+                "authentication" => ChatStreamErrorCode::Authentication,
+                "invalid_request" => ChatStreamErrorCode::InvalidRequest,
+                "context_length_exceeded" => ChatStreamErrorCode::ContextLengthExceeded,
+                _ => ChatStreamErrorCode::ProviderUnavailable,
+            },
+            message: message.clone(),
+        }],
         nenjo::TurnEvent::ModelRequestCompleted {
             request_id,
             parent_call_id,
@@ -347,41 +372,23 @@ pub fn turn_event_to_stream_events(
         nenjo::TurnEvent::Paused => vec![StreamEvent::Paused],
         nenjo::TurnEvent::Resumed => vec![StreamEvent::Resumed],
         nenjo::TurnEvent::Done { output } => vec![
+            StreamEvent::AssistantMessageFinalized {
+                run_id: run_id.to_string(),
+                message_id: Uuid::new_v4(),
+                input_message_id: None,
+                // The finalized assistant message is authoritative durable content,
+                // not a UI preview. It is encrypted by the secure-envelope codec.
+                payload: Some(serde_json::Value::String(output.text.clone())),
+                encrypted_payload: None,
+                total_input_tokens: output.input_tokens,
+                total_output_tokens: output.output_tokens,
+            },
             StreamEvent::RunCompleted {
                 run_id: run_id.to_string(),
                 session_id: session_id.to_string(),
             },
-            StreamEvent::Done {
-                run_id: Some(run_id.to_string()),
-                input_message_id: None,
-                payload: Some(serde_json::Value::String(event_text_preview(&output.text))),
-                encrypted_payload: None,
-                total_input_tokens: output.input_tokens,
-                total_output_tokens: output.output_tokens,
-                project: None,
-                agent: None,
-                session_id: None,
-            },
         ],
-    };
-
-    for stream_event in &stream_events {
-        trace!(
-            turn_event = %summarize_turn_event(event),
-            stream_event = %summarize_stream_event(stream_event),
-            agent = agent_name,
-            "Bridged turn event to pre-codec stream event"
-        );
     }
-    if stream_events.is_empty() {
-        debug!(
-            turn_event = %summarize_turn_event(event),
-            agent = agent_name,
-            "Turn event did not produce a stream event"
-        );
-    }
-
-    stream_events
 }
 
 pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
@@ -395,15 +402,29 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             "model_request_started(request={request_id}, parent={}, model={model})",
             parent_call_id.as_deref().unwrap_or("-")
         ),
-        nenjo::TurnEvent::AssistantTextDelta { request_id, delta } => {
+        nenjo::TurnEvent::AssistantTextDelta {
+            request_id, delta, ..
+        } => {
             format!(
                 "assistant_text_delta(request={request_id}, len={})",
                 delta.len()
             )
         }
-        nenjo::TurnEvent::AssistantResponse { message, status } => {
-            format!("assistant_response(status={status}, len={})", message.len())
+        nenjo::TurnEvent::AssistantReasoningDelta { request_id, delta } => {
+            format!(
+                "assistant_reasoning_delta(request={request_id}, len={})",
+                delta.len()
+            )
         }
+        nenjo::TurnEvent::ProviderRetryScheduled {
+            request_id,
+            attempt,
+            max_attempts,
+            delay_ms,
+            ..
+        } => format!(
+            "provider_retry_scheduled(request={request_id}, attempt={attempt}/{max_attempts}, delay_ms={delay_ms})"
+        ),
         nenjo::TurnEvent::ModelRequestCompleted {
             request_id,
             parent_call_id,
@@ -594,17 +615,19 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
             request_id,
             payload,
             encrypted_payload,
+            ..
         } => format!(
             "assistant_text_delta(run={run_id}, request={request_id}, payload={}, encrypted={})",
             payload.is_some(),
             encrypted_payload.is_some()
         ),
-        StreamEvent::AssistantResponse {
+        StreamEvent::AssistantReasoningDelta {
             run_id,
+            request_id,
             payload,
             encrypted_payload,
         } => format!(
-            "assistant_response(run={run_id}, payload={}, encrypted={})",
+            "assistant_reasoning_delta(run={run_id}, request={request_id}, payload={}, encrypted={})",
             payload.is_some(),
             encrypted_payload.is_some()
         ),
@@ -622,6 +645,9 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
         } => format!(
             "tool_call_started(run={run_id}, batch={batch_id}, call={call_id}, tool={tool_name})"
         ),
+        StreamEvent::ToolCallUpdated {
+            run_id, call_id, ..
+        } => format!("tool_call_updated(run={run_id}, call={call_id})"),
         StreamEvent::ToolOutputDelta {
             run_id,
             call_id,
@@ -630,6 +656,30 @@ pub fn summarize_stream_event(event: &StreamEvent) -> String {
             encrypted_payload,
         } => format!(
             "tool_output_delta(run={run_id}, call={call_id}, stream={stream}, payload={}, encrypted={})",
+            payload.is_some(),
+            encrypted_payload.is_some()
+        ),
+        StreamEvent::ProviderRetryScheduled {
+            run_id,
+            request_id,
+            attempt,
+            max_attempts,
+            delay_ms,
+            ..
+        } => format!(
+            "provider_retry_scheduled(run={run_id}, request={request_id}, attempt={attempt}/{max_attempts}, delay_ms={delay_ms})"
+        ),
+        StreamEvent::ProgressUpdate { run_id, status, .. } => {
+            format!("progress_update(run={run_id}, status={status})")
+        }
+        StreamEvent::AssistantMessageFinalized {
+            run_id,
+            message_id,
+            payload,
+            encrypted_payload,
+            ..
+        } => format!(
+            "assistant_message_finalized(run={run_id}, message={message_id}, payload={}, encrypted={})",
             payload.is_some(),
             encrypted_payload.is_some()
         ),
@@ -1169,7 +1219,8 @@ pub fn turn_event_to_workflow_step_response(
         | nenjo::TurnEvent::HookCompleted { .. }
         | nenjo::TurnEvent::ModelRequestStarted { .. }
         | nenjo::TurnEvent::AssistantTextDelta { .. }
-        | nenjo::TurnEvent::AssistantResponse { .. }
+        | nenjo::TurnEvent::AssistantReasoningDelta { .. }
+        | nenjo::TurnEvent::ProviderRetryScheduled { .. }
         | nenjo::TurnEvent::ModelRequestCompleted { .. } => None,
         nenjo::TurnEvent::Done { output } if context.emit_done => {
             Some(execution_workflow_step_response(
@@ -2263,6 +2314,35 @@ mod tests {
             "oversized JSON should remain a truncated string preview"
         );
         assert!(output_preview.chars().count() <= PREVIEW_MAX_CHARS + 3);
+    }
+
+    #[test]
+    fn finalized_chat_message_keeps_full_authoritative_text() {
+        let text = "response".repeat(PREVIEW_MAX_CHARS);
+        let events = turn_event_to_stream_events(
+            &nenjo::TurnEvent::Done {
+                output: nenjo::TurnOutput {
+                    task_id: None,
+                    text: text.clone(),
+                    input_tokens: 1,
+                    output_tokens: 2,
+                    tool_calls: 0,
+                    messages: Vec::new(),
+                },
+            },
+            "agent",
+            "run-1",
+            Uuid::new_v4(),
+        );
+
+        let StreamEvent::AssistantMessageFinalized { payload, .. } = &events[0] else {
+            panic!("expected finalized assistant message");
+        };
+        assert_eq!(
+            payload.as_ref().and_then(serde_json::Value::as_str),
+            Some(text.as_str())
+        );
+        assert!(matches!(events[1], StreamEvent::RunCompleted { .. }));
     }
 
     #[test]

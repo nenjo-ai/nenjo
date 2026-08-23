@@ -28,6 +28,7 @@ impl nenjo_models::ModelProvider for MockProvider {
             tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: nenjo_models::TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 }

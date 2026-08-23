@@ -1,4 +1,7 @@
-use std::sync::Arc;
+use std::{
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
@@ -166,6 +169,26 @@ impl SecureEnvelopeCodec {
         object_type: &str,
         payload: Option<Value>,
     ) -> Result<Option<EncryptedPayload>> {
+        self.encrypt_enc_payload_for_object(
+            key,
+            account_id,
+            encryption_scope,
+            Uuid::new_v4(),
+            object_type,
+            payload,
+        )
+        .await
+    }
+
+    async fn encrypt_enc_payload_for_object(
+        &self,
+        key: &ContentKey,
+        account_id: Uuid,
+        encryption_scope: Option<&str>,
+        object_id: Uuid,
+        object_type: &str,
+        payload: Option<Value>,
+    ) -> Result<Option<EncryptedPayload>> {
         let Some(payload) = payload else {
             return Ok(None);
         };
@@ -194,7 +217,7 @@ impl SecureEnvelopeCodec {
             key,
             scope,
             account_id,
-            Uuid::new_v4(),
+            object_id,
             object_type.to_string(),
             &plaintext,
             key_version,
@@ -267,10 +290,12 @@ impl SecureEnvelopeCodec {
         match event {
             StreamEvent::RunFailed { payload, .. }
             | StreamEvent::AssistantTextDelta { payload, .. }
-            | StreamEvent::AssistantResponse { payload, .. }
+            | StreamEvent::AssistantReasoningDelta { payload, .. }
             | StreamEvent::ToolCallStarted { payload, .. }
+            | StreamEvent::ToolCallUpdated { payload, .. }
             | StreamEvent::ToolOutputDelta { payload, .. }
             | StreamEvent::ToolCallCompleted { payload, .. }
+            | StreamEvent::AssistantMessageFinalized { payload, .. }
             | StreamEvent::HookStarted { payload, .. }
             | StreamEvent::HookCompleted { payload, .. }
             | StreamEvent::AsyncOperationEvent { payload, .. }
@@ -282,6 +307,8 @@ impl SecureEnvelopeCodec {
             | StreamEvent::RunCancelled { .. }
             | StreamEvent::ModelRequestStarted { .. }
             | StreamEvent::ModelRequestCompleted { .. }
+            | StreamEvent::ProviderRetryScheduled { .. }
+            | StreamEvent::ProgressUpdate { .. }
             | StreamEvent::DomainEntered { .. }
             | StreamEvent::DomainExited { .. }
             | StreamEvent::MessageCompacted { .. }
@@ -353,6 +380,39 @@ impl SecureEnvelopeCodec {
         }
     }
 
+    async fn encrypt_stream_payload_for_object(
+        &self,
+        scope: &StreamPayloadScope<'_>,
+        object_id: Uuid,
+        object_type: &str,
+        payload: Option<Value>,
+    ) -> Result<Option<EncryptedPayload>> {
+        match scope {
+            StreamPayloadScope::User { user_id, key } => {
+                self.encrypt_enc_payload_for_object(
+                    key,
+                    *user_id,
+                    None,
+                    object_id,
+                    object_type,
+                    payload,
+                )
+                .await
+            }
+            StreamPayloadScope::Org { key } => {
+                self.encrypt_enc_payload_for_object(
+                    key,
+                    self.org_id,
+                    Some("org"),
+                    object_id,
+                    object_type,
+                    payload,
+                )
+                .await
+            }
+        }
+    }
+
     async fn encode_stream_event(
         &self,
         scope: &StreamPayloadScope<'_>,
@@ -362,11 +422,17 @@ impl SecureEnvelopeCodec {
             StreamEvent::RunFailed {
                 run_id,
                 session_id,
+                code,
+                message,
+                retryable,
                 payload,
                 ..
             } => Ok(Some(StreamEvent::RunFailed {
                 run_id,
                 session_id,
+                code,
+                message,
+                retryable,
                 payload: None,
                 encrypted_payload: self
                     .encrypt_stream_payload(scope, "run_failed_payload", payload)
@@ -375,23 +441,29 @@ impl SecureEnvelopeCodec {
             StreamEvent::AssistantTextDelta {
                 run_id,
                 request_id,
+                checkpoint,
                 payload,
                 ..
             } => Ok(Some(StreamEvent::AssistantTextDelta {
                 run_id,
                 request_id,
+                checkpoint,
                 payload: None,
                 encrypted_payload: self
                     .encrypt_stream_payload(scope, "assistant_text_delta", payload)
                     .await?,
             })),
-            StreamEvent::AssistantResponse {
-                run_id, payload, ..
-            } => Ok(Some(StreamEvent::AssistantResponse {
+            StreamEvent::AssistantReasoningDelta {
                 run_id,
+                request_id,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::AssistantReasoningDelta {
+                run_id,
+                request_id,
                 payload: None,
                 encrypted_payload: self
-                    .encrypt_stream_payload(scope, "assistant_response", payload)
+                    .encrypt_stream_payload(scope, "assistant_reasoning_delta", payload)
                     .await?,
             })),
             StreamEvent::ToolCallStarted {
@@ -411,6 +483,19 @@ impl SecureEnvelopeCodec {
                 payload: None,
                 encrypted_payload: self
                     .encrypt_stream_payload(scope, "tool_call_payload", payload)
+                    .await?,
+            })),
+            StreamEvent::ToolCallUpdated {
+                run_id,
+                call_id,
+                payload,
+                ..
+            } => Ok(Some(StreamEvent::ToolCallUpdated {
+                run_id,
+                call_id,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_stream_payload(scope, "tool_call_update_payload", payload)
                     .await?,
             })),
             StreamEvent::ToolOutputDelta {
@@ -446,6 +531,25 @@ impl SecureEnvelopeCodec {
                 encrypted_payload: self
                     .encrypt_stream_payload(scope, "tool_result_payload", payload)
                     .await?,
+            })),
+            StreamEvent::AssistantMessageFinalized {
+                run_id,
+                message_id,
+                input_message_id,
+                payload,
+                total_input_tokens,
+                total_output_tokens,
+                ..
+            } => Ok(Some(StreamEvent::AssistantMessageFinalized {
+                run_id,
+                message_id,
+                input_message_id,
+                payload: None,
+                encrypted_payload: self
+                    .encrypt_stream_payload_for_object(scope, message_id, "agent_response", payload)
+                    .await?,
+                total_input_tokens,
+                total_output_tokens,
             })),
             StreamEvent::HookStarted {
                 agent,
@@ -866,6 +970,50 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
     ) -> CodecResult<Response> {
         let actor_user_id = ctx.actor_user_id;
         match response {
+            Response::ChatStreamFrame { mut frame } => {
+                if frame.organization_id != self.org_id {
+                    warn!(
+                        frame_org_id = %frame.organization_id,
+                        codec_org_id = %self.org_id,
+                        "Dropping chat stream frame with mismatched organization"
+                    );
+                    return Ok(None);
+                }
+                let key_started_at = Instant::now();
+                let Some(ack) = self.key_provider.load_user_key(actor_user_id).await? else {
+                    if Self::stream_event_requires_encryption(&frame.event) {
+                        warn!(%actor_user_id, run_id = %frame.run_id, "Dropping sensitive chat stream frame because actor content key is unavailable");
+                        return Ok(None);
+                    }
+                    return Ok(Some(Response::ChatStreamFrame { frame }));
+                };
+                let key_setup_us = key_started_at.elapsed().as_micros();
+                let crypto_started_at = Instant::now();
+                let Some(event) = self
+                    .encode_stream_event(
+                        &StreamPayloadScope::User {
+                            user_id: actor_user_id,
+                            key: &ack,
+                        },
+                        frame.event,
+                    )
+                    .await?
+                else {
+                    return Ok(None);
+                };
+                let crypto_time = crypto_started_at.elapsed();
+                if key_setup_us >= 25_000 || crypto_time >= Duration::from_millis(25) {
+                    debug!(
+                        run_id = %frame.run_id,
+                        sequence = frame.sequence,
+                        key_setup_us,
+                        crypto_time_us = crypto_time.as_micros(),
+                        "Slow chat stream frame encryption"
+                    );
+                }
+                frame.event = event;
+                Ok(Some(Response::ChatStreamFrame { frame }))
+            }
             Response::AgentResponse {
                 session_id,
                 payload,
@@ -1025,8 +1173,9 @@ mod tests {
     use async_trait::async_trait;
     use nenjo_crypto_auth::{ContentKey, ContentScope, EnvelopeKeyProvider};
     use nenjo_events::{
-        AsyncOperationTranscriptEvent, Command, ExecutionEventPayload, ExecutionWorkflowStepEvent,
-        ResourceAction, ResourceType, Response, StreamEvent, TaskExecuteContent,
+        AsyncOperationTranscriptEvent, ChatStreamFrame, Command, ExecutionEventPayload,
+        ExecutionWorkflowStepEvent, ResourceAction, ResourceType, Response, StreamEvent,
+        TaskExecuteContent,
     };
     use serde_json::Value;
     use tokio::sync::RwLock;
@@ -1362,6 +1511,7 @@ mod tests {
             payload: StreamEvent::AssistantTextDelta {
                 run_id: "run".into(),
                 request_id: "request".into(),
+                checkpoint: false,
                 payload: Some(serde_json::json!({ "delta": "plaintext model output" })),
                 encrypted_payload: None,
             },
@@ -1373,6 +1523,60 @@ mod tests {
             .expect("encode should classify missing actor key");
 
         assert!(encoded.is_none());
+    }
+
+    #[tokio::test]
+    async fn finalized_chat_frame_encrypts_with_the_message_identity() {
+        let actor_user_id = Uuid::new_v4();
+        let org_id = Uuid::new_v4();
+        let provider = StubKeyProvider {
+            user_keys: Arc::new(RwLock::new(HashMap::new())),
+        };
+        provider
+            .insert_user_key(actor_user_id, ContentKey::from_bytes([7_u8; 32]))
+            .await;
+        let codec = SecureEnvelopeCodec::new(provider, org_id);
+        let message_id = Uuid::new_v4();
+        let run_id = Uuid::new_v4().to_string();
+        let frame = ChatStreamFrame::new(
+            org_id,
+            Uuid::new_v4(),
+            Uuid::new_v4(),
+            run_id.clone(),
+            None,
+            1,
+            StreamEvent::AssistantMessageFinalized {
+                run_id,
+                message_id,
+                input_message_id: None,
+                payload: Some(Value::String("complete response".to_string())),
+                encrypted_payload: None,
+                total_input_tokens: 1,
+                total_output_tokens: 2,
+            },
+        );
+
+        let encoded = codec
+            .encode_response(
+                &CodecContext::for_actor(actor_user_id),
+                Response::ChatStreamFrame { frame },
+            )
+            .await
+            .expect("encode finalized chat frame")
+            .expect("actor key should permit the frame");
+        let Response::ChatStreamFrame { frame } = encoded else {
+            panic!("expected chat stream frame");
+        };
+        let StreamEvent::AssistantMessageFinalized {
+            encrypted_payload: Some(payload),
+            payload: None,
+            ..
+        } = frame.event
+        else {
+            panic!("expected encrypted finalized message");
+        };
+        assert_eq!(payload.object_id, message_id);
+        assert_eq!(payload.object_type, "agent_response");
     }
 
     #[tokio::test]

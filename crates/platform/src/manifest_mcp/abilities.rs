@@ -101,7 +101,7 @@ pub fn ability_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_ability".to_string(),
-            description: "Create or update one ability in a single backend-owned sequence. Omit `ability` to create; include `ability` to update by slug. On create, metadata.slug, metadata.name, and prompt_config.developer_prompt are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `ability: AbilityDocument`."
+            description: "Create or update one ability in a single backend-owned sequence. Omit `ability` to create; include `ability` to update by slug. On create, metadata.slug, metadata.name, and prompt_config.developer_prompt are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns the full authoritative post-update `ability: AbilityDocument`, not a patch echo."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
