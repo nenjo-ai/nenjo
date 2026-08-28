@@ -359,10 +359,7 @@ mod tests {
                 capability: MediaOperation::GenerateImage,
                 base_url: None,
             },
-            Arc::new(ModelProviderRegistry::new(
-                &Default::default(),
-                &Default::default(),
-            )),
+            Arc::new(ModelProviderRegistry::new(Default::default())),
         )
         .expect("tool supported");
 
@@ -389,10 +386,7 @@ mod tests {
                 capability: MediaOperation::GenerateImage,
                 base_url: None,
             },
-            Arc::new(ModelProviderRegistry::new(
-                &Default::default(),
-                &Default::default(),
-            )),
+            Arc::new(ModelProviderRegistry::new(Default::default())),
         )
         .expect("tool supported");
 
@@ -414,10 +408,7 @@ mod tests {
                 capability: MediaOperation::ExtendVideo,
                 base_url: None,
             },
-            Arc::new(ModelProviderRegistry::new(
-                &Default::default(),
-                &Default::default(),
-            )),
+            Arc::new(ModelProviderRegistry::new(Default::default())),
         )
         .expect("tool supported");
 
@@ -438,10 +429,7 @@ mod tests {
                 capability: MediaOperation::GenerateVideo,
                 base_url: None,
             },
-            Arc::new(ModelProviderRegistry::new(
-                &Default::default(),
-                &Default::default(),
-            )),
+            Arc::new(ModelProviderRegistry::new(Default::default())),
         )
         .expect("tool supported");
 

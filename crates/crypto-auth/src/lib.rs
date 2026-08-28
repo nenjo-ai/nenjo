@@ -13,6 +13,6 @@ pub use key_provider::{EnrollmentBackedKeyProvider, EnvelopeKeyProvider};
 /// Worker crypto identity, enrollment, and wrapped-key primitives.
 pub use provider::{
     ContentKey, ContentScope, EnrollmentStatus, StoredWorkerEnrollment, WorkerAuthProvider,
-    WorkerCertificate, WorkerEnrollmentRequest, WorkerIdentityPublic, WrappedAccountContentKey,
-    WrappedOrgContentKey,
+    WorkerCertificate, WorkerEnrollmentBinding, WorkerEnrollmentRequest, WorkerIdentityPublic,
+    WrappedAccountContentKey, WrappedOrgContentKey,
 };

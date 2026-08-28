@@ -117,11 +117,13 @@ mod tests {
         let provider = WorkerAuthProvider::load_or_create(dir.path()).unwrap();
         let identity = provider.identity().clone();
         let enrolled_org_id = Uuid::new_v4();
+        let binding = crate::crypto::WorkerEnrollmentBinding::new(enrolled_org_id, Uuid::new_v4());
         provider
             .store_enrollment(
+                binding,
                 Some(WorkerCertificate {
                     account_id: enrolled_org_id,
-                    api_key_id: Uuid::new_v4(),
+                    api_key_id: binding.api_key_id(),
                     issued_at: Utc::now(),
                     enc_public_key: identity.enc_public_key.clone(),
                     sign_public_key: identity.sign_public_key.clone(),

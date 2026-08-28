@@ -19,6 +19,7 @@ pub struct AgentsGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Parameters for `configure_agent`.
 pub struct AgentConfigureParams {
     #[serde(flatten)]
@@ -32,6 +33,7 @@ pub struct AbilitiesGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Parameters for `configure_ability`.
 pub struct AbilityConfigureParams {
     #[serde(flatten)]
@@ -45,6 +47,7 @@ pub struct CommandsGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Parameters for `configure_command`.
 pub struct CommandConfigureParams {
     #[serde(flatten)]
@@ -58,6 +61,7 @@ pub struct DomainsGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Parameters for `configure_domain`.
 pub struct DomainConfigureParams {
     #[serde(flatten)]
@@ -242,6 +246,7 @@ pub struct ContextBlocksGetParams {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// Parameters for `configure_context_block`.
 pub struct ContextBlockConfigureParams {
     #[serde(flatten)]

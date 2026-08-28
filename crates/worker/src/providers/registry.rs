@@ -25,12 +25,64 @@ use parking_lot::Mutex;
 use tracing::debug;
 
 use nenjo::ModelProviderFactory;
-use nenjo_models::ReliableProvider;
 use nenjo_models::{ArtifactInputTransport, MediaType, ModelProvider, ProviderMediaCapabilities};
+use nenjo_models::{ReliableProvider, VllmStreaming};
 
 use super::ModelProviders;
-use crate::config::{ReliabilityConfig, VllmConfig};
+use crate::config::{Config as WorkerConfig, ReliabilityConfig};
 use crate::media::{ArtifactTransportResolver, ArtifactTransportTarget, MediaCapabilitySource};
+
+/// Complete configuration required to construct a model provider registry.
+#[derive(Clone)]
+pub struct ModelProviderRegistryConfig {
+    api_keys: HashMap<String, String>,
+    reliability: ReliabilityConfig,
+    vllm_streaming: VllmStreaming,
+}
+
+impl ModelProviderRegistryConfig {
+    pub fn with_api_keys(mut self, keys: &HashMap<ModelProviders, String>) -> Self {
+        self.api_keys = keys
+            .iter()
+            .map(|(provider, key)| (provider.to_string(), key.clone()))
+            .collect();
+        self
+    }
+
+    pub fn with_api_key(mut self, provider: ModelProviders, key: impl Into<String>) -> Self {
+        self.api_keys.insert(provider.to_string(), key.into());
+        self
+    }
+
+    pub fn with_reliability(mut self, reliability: ReliabilityConfig) -> Self {
+        self.reliability = reliability;
+        self
+    }
+
+    pub fn with_vllm_streaming(mut self, streaming: VllmStreaming) -> Self {
+        self.vllm_streaming = streaming;
+        self
+    }
+}
+
+impl Default for ModelProviderRegistryConfig {
+    fn default() -> Self {
+        Self {
+            api_keys: HashMap::new(),
+            reliability: ReliabilityConfig::default(),
+            vllm_streaming: VllmStreaming::Enabled,
+        }
+    }
+}
+
+impl From<&WorkerConfig> for ModelProviderRegistryConfig {
+    fn from(config: &WorkerConfig) -> Self {
+        Self::default()
+            .with_api_keys(&config.model_provider_api_keys)
+            .with_reliability(config.reliability.clone())
+            .with_vllm_streaming(config.vllm.streaming.into())
+    }
+}
 
 /// Registry that creates LLM provider instances on demand.
 ///
@@ -40,7 +92,7 @@ use crate::media::{ArtifactTransportResolver, ArtifactTransportTarget, MediaCapa
 pub struct ModelProviderRegistry {
     api_keys: HashMap<String, String>,
     reliability: ReliabilityConfig,
-    vllm: VllmConfig,
+    vllm_streaming: VllmStreaming,
     cache: Mutex<HashMap<ProviderCacheKey, Arc<dyn ModelProvider>>>,
 }
 
@@ -60,27 +112,19 @@ impl ProviderCacheKey {
 }
 
 impl ModelProviderRegistry {
-    /// Create a new registry from the config's model provider API keys.
-    pub fn new(keys: &HashMap<ModelProviders, String>, reliability: &ReliabilityConfig) -> Self {
-        let api_keys: HashMap<String, String> = keys
-            .iter()
-            .map(|(k, v)| (k.to_string(), v.clone()))
-            .collect();
-
-        debug!(providers = api_keys.len(), "ProviderRegistry initialized");
+    /// Create a registry from one complete configuration value.
+    pub fn new(config: ModelProviderRegistryConfig) -> Self {
+        debug!(
+            providers = config.api_keys.len(),
+            "ProviderRegistry initialized"
+        );
 
         Self {
-            api_keys,
-            reliability: reliability.clone(),
-            vllm: VllmConfig::default(),
+            api_keys: config.api_keys,
+            reliability: config.reliability,
+            vllm_streaming: config.vllm_streaming,
             cache: Mutex::new(HashMap::new()),
         }
-    }
-
-    /// Apply worker-local vLLM response delivery behavior before providers are created.
-    pub fn with_vllm_config(mut self, config: VllmConfig) -> Self {
-        self.vllm = config;
-        self
     }
 
     /// Look up the API key for a provider name.
@@ -109,8 +153,7 @@ impl ModelProviderRegistry {
         let bare_name = provider_name
             .strip_prefix("openai-compatible:")
             .map_or(provider_name, |_| "openai-compatible");
-        Self::create_bare(bare_name, "", None, nenjo_models::VllmStreaming::Enabled)
-            .media_capabilities()
+        Self::create_bare(bare_name, "", None, VllmStreaming::Enabled).media_capabilities()
     }
 
     /// Candidate env var names for a provider, used as a runtime fallback when
@@ -136,7 +179,7 @@ impl ModelProviderRegistry {
         provider_name: &str,
         api_key: &str,
         base_url: Option<&str>,
-        vllm_streaming: nenjo_models::VllmStreaming,
+        vllm_streaming: VllmStreaming,
     ) -> Box<dyn ModelProvider> {
         let key = Some(api_key);
         match provider_name {
@@ -195,7 +238,7 @@ impl ModelProviderRegistry {
     ) -> Result<Arc<dyn ModelProvider>> {
         let mut providers: Vec<(String, Box<dyn ModelProvider>)> = vec![(
             provider_name.to_string(),
-            Self::create_bare(provider_name, api_key, base_url, self.vllm.streaming.into()),
+            Self::create_bare(provider_name, api_key, base_url, self.vllm_streaming),
         )];
 
         for fallback_name in &self.reliability.fallback_providers {
@@ -205,12 +248,7 @@ impl ModelProviderRegistry {
             if let Some(fallback_key) = self.api_keys.get(fallback_name.as_str()) {
                 providers.push((
                     fallback_name.clone(),
-                    Self::create_bare(
-                        fallback_name,
-                        fallback_key,
-                        None,
-                        self.vllm.streaming.into(),
-                    ),
+                    Self::create_bare(fallback_name, fallback_key, None, self.vllm_streaming),
                 ));
             }
         }
@@ -288,7 +326,7 @@ impl ArtifactTransportResolver for ModelProviderRegistry {
             .provider
             .strip_prefix("openai-compatible:")
             .map_or(target.provider, |_| "openai-compatible");
-        Self::create_bare(bare_name, "", target.base_url, self.vllm.streaming.into())
+        Self::create_bare(bare_name, "", target.base_url, self.vllm_streaming)
             .artifact_input_transport(target.model, target.capability, media_type)
     }
 }
@@ -350,7 +388,6 @@ impl ModelProviderFactory for ModelProviderRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::Arc;
 
     use nenjo::ModelProviderFactory;
@@ -358,9 +395,25 @@ mod tests {
     use super::*;
 
     fn registry_with_openai_key() -> ModelProviderRegistry {
-        let mut keys = HashMap::new();
-        keys.insert(ModelProviders::OpenAI, "test-key".to_string());
-        ModelProviderRegistry::new(&keys, &ReliabilityConfig::default())
+        ModelProviderRegistry::new(
+            ModelProviderRegistryConfig::default().with_api_key(ModelProviders::OpenAI, "test-key"),
+        )
+    }
+
+    #[test]
+    fn registry_config_loads_worker_settings_at_the_composition_boundary() {
+        let mut worker = WorkerConfig::default();
+        worker
+            .model_provider_api_keys
+            .insert(ModelProviders::OpenAI, "configured-key".to_string());
+        worker.reliability.max_retries = 7;
+        worker.vllm.streaming = false;
+
+        let config = ModelProviderRegistryConfig::from(&worker);
+
+        assert_eq!(config.api_keys["openai"], "configured-key");
+        assert_eq!(config.reliability.max_retries, 7);
+        assert_eq!(config.vllm_streaming, VllmStreaming::Disabled);
     }
 
     #[test]
@@ -389,10 +442,7 @@ mod tests {
 
     #[test]
     fn artifact_transport_discovery_does_not_require_provider_credentials() {
-        let registry = ModelProviderRegistry::new(
-            &HashMap::new(),
-            &crate::config::ReliabilityConfig::default(),
-        );
+        let registry = ModelProviderRegistry::new(ModelProviderRegistryConfig::default());
 
         assert!(matches!(
             registry.resolve_transport(
@@ -470,10 +520,7 @@ mod tests {
 
     #[test]
     fn vllm_provider_does_not_require_an_api_key() {
-        let registry = ModelProviderRegistry::new(
-            &HashMap::new(),
-            &crate::config::ReliabilityConfig::default(),
-        );
+        let registry = ModelProviderRegistry::new(ModelProviderRegistryConfig::default());
 
         assert!(
             registry
@@ -484,9 +531,10 @@ mod tests {
 
     #[test]
     fn openai_compatible_tags_have_distinct_cache_entries() {
-        let mut keys = HashMap::new();
-        keys.insert(ModelProviders::OpenAiCompatible, "default-key".to_string());
-        let registry = ModelProviderRegistry::new(&keys, &ReliabilityConfig::default());
+        let registry = ModelProviderRegistry::new(
+            ModelProviderRegistryConfig::default()
+                .with_api_key(ModelProviders::OpenAiCompatible, "default-key"),
+        );
 
         let first = registry
             .create_with_base_url("openai-compatible:first", Some("https://api.example/v1"))
@@ -500,9 +548,9 @@ mod tests {
 
     #[test]
     fn xai_provider_exposes_media_capabilities_through_registry() {
-        let mut keys = HashMap::new();
-        keys.insert(ModelProviders::XAI, "test-key".to_string());
-        let registry = ModelProviderRegistry::new(&keys, &ReliabilityConfig::default());
+        let registry = ModelProviderRegistry::new(
+            ModelProviderRegistryConfig::default().with_api_key(ModelProviders::XAI, "test-key"),
+        );
 
         let provider = registry.create("xai").unwrap();
         let capabilities = provider

@@ -581,7 +581,6 @@ impl ArtifactInputPreparer for WorkerArtifactInputPreparer {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::time::Duration;
 
@@ -599,7 +598,7 @@ mod tests {
 
     use super::*;
     use crate::bootstrap::{CachedAgentManifest, CachedModelManifest};
-    use crate::config::{PdfConfig, ReliabilityConfig};
+    use crate::config::PdfConfig;
 
     struct TestAnalyzer {
         calls: Arc<AtomicUsize>,
@@ -816,10 +815,7 @@ mod tests {
             ),
         ];
         let manifests = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
             materializer.clone(),
@@ -863,10 +859,7 @@ mod tests {
             )]),
         )];
         let manifests = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
             materializer.clone(),
@@ -948,10 +941,7 @@ mod tests {
             )),
         ];
         let manifests = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
             materializer.clone(),
@@ -1010,10 +1000,7 @@ mod tests {
             )]),
         )];
         let manifests = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
             materializer.clone(),
@@ -1067,10 +1054,7 @@ mod tests {
         )];
         let manifests = tempfile::tempdir().unwrap();
         install_image_analyzer_assignment(manifests.path());
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
             materializer.clone(),
@@ -1151,10 +1135,7 @@ mod tests {
             ChatMessage::user("Summarize the document").with_artifacts(vec![source_input]),
         )];
         let manifests = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
             materializer.clone(),
@@ -1213,10 +1194,7 @@ mod tests {
             )]),
         )];
         let manifests = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
             materializer.clone(),
@@ -1266,10 +1244,7 @@ mod tests {
             )]),
         )];
         let manifests = tempfile::tempdir().unwrap();
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
             materializer.clone(),
@@ -1313,10 +1288,7 @@ mod tests {
         )];
         let manifests = tempfile::tempdir().unwrap();
         install_image_analyzer_assignment(manifests.path());
-        let registry = Arc::new(ModelProviderRegistry::new(
-            &HashMap::new(),
-            &ReliabilityConfig::default(),
-        ));
+        let registry = Arc::new(ModelProviderRegistry::new(Default::default()));
         let analyzer_calls = Arc::new(AtomicUsize::new(0));
         let per_batch_usage = TokenUsage {
             input_tokens: 7,

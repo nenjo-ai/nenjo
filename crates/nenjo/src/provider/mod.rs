@@ -34,6 +34,7 @@ use crate::manifest::{
     Manifest, ManifestIdentity, ModelManifest, ProjectManifest,
 };
 use crate::memory::Memory;
+use crate::routines::RoutineExecutionConfig;
 use crate::tools::Tool;
 use crate::types::RenderContextVars;
 use crate::{IntoSlug, ManifestReader, Slug};
@@ -622,6 +623,7 @@ pub(crate) struct ProviderServices<
     pub(crate) tool_factory: Arc<ToolFactoryImpl>,
     pub(crate) memory: Option<Arc<Mem>>,
     pub(crate) agent_config: AgentConfig,
+    pub(crate) routine_execution_config: RoutineExecutionConfig,
     pub(crate) render_ctx_extra: RenderContextVars,
     pub(crate) argument_bindings: Vec<ResolvedArgumentBinding>,
     pub(crate) knowledge: ProviderKnowledgeState,
@@ -637,6 +639,7 @@ impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized, ArtifactPrepare
             tool_factory: self.tool_factory.clone(),
             memory: self.memory.clone(),
             agent_config: self.agent_config.clone(),
+            routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra.clone(),
             argument_bindings: self.argument_bindings.clone(),
             knowledge: self.knowledge.clone(),
@@ -731,6 +734,10 @@ where
     /// Access the agent config.
     pub fn agent_config(&self) -> &AgentConfig {
         &self.inner.services.agent_config
+    }
+
+    pub fn routine_execution_config(&self) -> RoutineExecutionConfig {
+        self.inner.services.routine_execution_config
     }
 
     /// Access the tool factory.
@@ -1063,6 +1070,10 @@ where
 
     fn tool_factory(&self) -> &Self::ToolFactory<'_> {
         self.tool_factory()
+    }
+
+    fn routine_execution_config(&self) -> RoutineExecutionConfig {
+        Provider::routine_execution_config(self)
     }
 
     fn artifact_input_preparer(&self) -> Option<&Self::ArtifactPreparer> {

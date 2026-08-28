@@ -13,7 +13,7 @@ use tracing::warn;
 use uuid::Uuid;
 
 use super::RoutineEvent;
-use super::handoff_schema::{compact_schema, edge_handoff_schema, validate_handoff_payload};
+use super::handoff_schema::{compact_schema, validate_handoff_payload, validate_handoff_schema};
 use crate::agents::runner::{AgentRunner, types::TurnOutput};
 use crate::input::{AgentRun, FollowUpInput};
 use crate::manifest::{RoutineEdgeCondition, RoutineEdgeManifest, RoutineStepManifest};
@@ -56,10 +56,17 @@ pub struct RouteOption {
 
 impl RouteOption {
     fn from_edge(edge: &RoutineEdgeManifest, target: Option<&RoutineStepManifest>) -> Result<Self> {
-        let handoff_schema = edge_handoff_schema(&edge.metadata)
+        let handoff_schema = edge
+            .handoff_schema
+            .as_ref()
+            .context("handoff_schema is required")
+            .and_then(|schema| {
+                validate_handoff_schema(schema)?;
+                Ok(schema)
+            })
             .with_context(|| {
                 format!(
-                    "edge {}:{} must define a valid metadata.handoff_schema",
+                    "edge {}:{} must define a valid handoff_schema",
                     edge.source_step, edge.target_step
                 )
             })?
@@ -758,18 +765,16 @@ where
 }
 
 fn edge_purpose(edge: &RoutineEdgeManifest) -> String {
-    edge.metadata
-        .get("purpose")
-        .and_then(|value| value.as_str())
+    edge.purpose
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Downstream branch from this routine step.")
         .to_string()
 }
 
 fn edge_handoff_instructions(edge: &RoutineEdgeManifest) -> String {
-    edge.metadata
-        .get("handoff_instructions")
-        .and_then(|value| value.as_str())
+    edge.handoff_instructions
+        .as_deref()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or("Pass the information this downstream step needs to continue.")
         .to_string()
@@ -800,17 +805,17 @@ mod tests {
             source_step: crate::Slug::derive("source"),
             target_step: crate::Slug::derive(target),
             condition,
-            metadata: serde_json::json!({
-                "purpose": format!("Send work to {target}"),
-                "handoff_schema": {
-                    "type": "object",
-                    "required": ["work"],
-                    "properties": {
-                        "work": {"type": "string", "minLength": 1}
-                    },
-                    "additionalProperties": false
-                }
-            }),
+            purpose: Some(format!("Send work to {target}")),
+            handoff_instructions: None,
+            handoff_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["work"],
+                "properties": {
+                    "work": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": false
+            })),
+            max_retries: None,
         }
     }
 
@@ -952,15 +957,13 @@ mod tests {
     #[test]
     fn human_target_uses_ordinary_edge_handoff_schema() {
         let mut incoming = edge("review");
-        incoming.metadata = serde_json::json!({
-            "handoff_instructions": "Produce the signed plan.",
-            "handoff_schema": {
-                "type": "object",
-                "required": ["plan"],
-                "properties": {"plan": {"type": "string", "minLength": 1}},
-                "additionalProperties": false
-            }
-        });
+        incoming.handoff_instructions = Some("Produce the signed plan.".to_string());
+        incoming.handoff_schema = Some(serde_json::json!({
+            "type": "object",
+            "required": ["plan"],
+            "properties": {"plan": {"type": "string", "minLength": 1}},
+            "additionalProperties": false
+        }));
         let target = RoutineStepManifest {
             slug: crate::Slug::derive("review"),
             routine: crate::Slug::derive("routine"),

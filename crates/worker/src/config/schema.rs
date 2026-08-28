@@ -56,6 +56,9 @@ pub struct Config {
     pub reliability: ReliabilityConfig,
 
     #[serde(default)]
+    pub routines: RoutineConfig,
+
+    #[serde(default)]
     pub vllm: VllmConfig,
 
     #[serde(default)]
@@ -475,6 +478,43 @@ impl Default for ReliabilityConfig {
             backoff_ms: default_backoff_ms(),
             fallback_providers: Vec::new(),
             model_fallbacks: std::collections::HashMap::new(),
+        }
+    }
+}
+
+// ── Routine execution ───────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RoutineConfig {
+    #[serde(default = "default_gate_max_retries")]
+    pub default_gate_max_retries: u32,
+    #[serde(default = "max_gate_max_retries")]
+    pub max_gate_max_retries: u32,
+}
+
+fn default_gate_max_retries() -> u32 {
+    3
+}
+
+fn max_gate_max_retries() -> u32 {
+    10
+}
+
+impl RoutineConfig {
+    pub fn execution_config(self) -> Result<nenjo::routines::RoutineExecutionConfig> {
+        nenjo::routines::RoutineExecutionConfig::new(
+            nenjo::routines::GateRetryLimit::new(self.default_gate_max_retries),
+            nenjo::routines::GateRetryLimit::new(self.max_gate_max_retries),
+        )
+        .map_err(Into::into)
+    }
+}
+
+impl Default for RoutineConfig {
+    fn default() -> Self {
+        Self {
+            default_gate_max_retries: default_gate_max_retries(),
+            max_gate_max_retries: max_gate_max_retries(),
         }
     }
 }
@@ -931,6 +971,7 @@ impl Default for Config {
             nats_url: None,
             autonomy: AutonomyConfig::default(),
             reliability: ReliabilityConfig::default(),
+            routines: RoutineConfig::default(),
             vllm: VllmConfig::default(),
             pdf: PdfConfig::default(),
             security: SecurityConfig::default(),
@@ -1071,6 +1112,14 @@ impl Config {
 
         apply_numeric_env("NENJO_PDF_MAX_PAGES", &mut self.pdf.max_pages)?;
         apply_numeric_env(
+            "NENJO_ROUTINES_DEFAULT_GATE_MAX_RETRIES",
+            &mut self.routines.default_gate_max_retries,
+        )?;
+        apply_numeric_env(
+            "NENJO_ROUTINES_MAX_GATE_MAX_RETRIES",
+            &mut self.routines.max_gate_max_retries,
+        )?;
+        apply_numeric_env(
             "NENJO_PDF_RENDER_CONCURRENCY",
             &mut self.pdf.render_concurrency,
         )?;
@@ -1109,6 +1158,7 @@ impl Config {
         }
         self.validate_media_providers()?;
         self.pdf.validate()?;
+        self.routines.execution_config()?;
         Ok(())
     }
 
@@ -1142,9 +1192,10 @@ where
     let Ok(raw) = std::env::var(name) else {
         return Ok(());
     };
-    *target = raw.trim().parse().map_err(|error: T::Err| {
-        anyhow::anyhow!("{name} must be a valid positive integer: {error}")
-    })?;
+    *target = raw
+        .trim()
+        .parse()
+        .map_err(|error: T::Err| anyhow::anyhow!("{name} must be a valid integer: {error}"))?;
     Ok(())
 }
 
@@ -1163,8 +1214,8 @@ fn apply_bool_env(name: &str, target: &mut bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MediaProviderConfig, PdfConfig, SecureBusConfig, SecurityConfig, SessionConfig,
-        VllmConfig,
+        Config, MediaProviderConfig, PdfConfig, RoutineConfig, SecureBusConfig, SecurityConfig,
+        SessionConfig, VllmConfig,
     };
     use nenjo::Slug;
     use nenjo_models::MediaOperation;
@@ -1185,6 +1236,36 @@ mod tests {
         assert_eq!(config.vision_batch_pages, 4);
         assert_eq!(config.render_max_edge, 1_600);
         config.validate().unwrap();
+    }
+
+    #[test]
+    fn routine_retry_config_deserializes_independently_from_provider_reliability() {
+        let config: Config = toml::from_str(
+            r#"
+api_key = "test"
+
+[model_provider_api_keys]
+
+[routines]
+default_gate_max_retries = 4
+max_gate_max_retries = 7
+"#,
+        )
+        .unwrap();
+
+        let execution = config.routines.execution_config().unwrap();
+        assert_eq!(execution.default_gate_max_retries.get(), 4);
+        assert_eq!(execution.max_gate_max_retries.get(), 7);
+    }
+
+    #[test]
+    fn routine_retry_config_rejects_default_above_ceiling() {
+        let config = RoutineConfig {
+            default_gate_max_retries: 8,
+            max_gate_max_retries: 7,
+        };
+
+        assert!(config.execution_config().is_err());
     }
 
     #[test]

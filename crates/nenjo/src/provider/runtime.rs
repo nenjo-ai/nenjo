@@ -106,6 +106,11 @@ pub trait ProviderRuntime: Clone + Send + Sync + 'static {
     /// Borrow the runtime's tool factory.
     fn tool_factory(&self) -> &Self::ToolFactory<'_>;
 
+    /// Return the immutable routine retry policy for executions started by this runtime.
+    fn routine_execution_config(&self) -> crate::routines::RoutineExecutionConfig {
+        crate::routines::RoutineExecutionConfig::default()
+    }
+
     /// Host-side artifact preparation service when this runtime supports media inputs.
     fn artifact_input_preparer(&self) -> Option<&Self::ArtifactPreparer> {
         None

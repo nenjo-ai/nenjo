@@ -24,7 +24,7 @@ pub use nenjo_models::{
 pub use nenjo_models::{sanitize_api_error, scrub_secret_patterns};
 
 // Re-export registry.
-pub use registry::ModelProviderRegistry;
+pub use registry::{ModelProviderRegistry, ModelProviderRegistryConfig};
 
 // ---------------------------------------------------------------------------
 // ModelProviders enum — config-level concern for API key management

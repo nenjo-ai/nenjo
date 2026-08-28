@@ -1457,7 +1457,7 @@ mod tests {
     use super::*;
     use nenjo::Slug;
     use nenjo::manifest::{
-        AgentManifest, Manifest, PromptConfig, PromptTemplates, RoutineManifest, RoutineMetadata,
+        AgentManifest, Manifest, PromptConfig, PromptTemplates, RoutineManifest,
         RoutineStepManifest, RoutineStepType,
     };
 
@@ -1798,7 +1798,7 @@ mod tests {
                 name: "Code Generation".to_string(),
                 slug: routine_slug.clone(),
                 description: None,
-                metadata: RoutineMetadata::default(),
+                entry_steps: Vec::new(),
                 steps: vec![RoutineStepManifest {
                     slug: step_slug.clone(),
                     routine: routine_slug,

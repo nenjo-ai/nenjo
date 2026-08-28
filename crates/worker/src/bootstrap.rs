@@ -10,6 +10,7 @@
 //! Other resource types remain as flat JSON arrays.
 
 use anyhow::{Context, Result, anyhow};
+use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -47,6 +48,25 @@ use crate::handlers::manifest::{ManifestCacheMutation, ManifestStore};
 use crate::media::{AgentModelAssignments, ModelRuntimeConfig};
 
 static CACHE_WRITE_COUNTER: AtomicU64 = AtomicU64::new(0);
+const BOOTSTRAP_CREDENTIAL_BINDING_FILE: &str = "credential-binding.json";
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+struct BootstrapCredentialBinding {
+    fingerprint: String,
+}
+
+impl BootstrapCredentialBinding {
+    fn new(backend_api_url: &str, api_key: &str) -> Self {
+        let mut digest = Sha256::new();
+        digest.update(b"nenjo-bootstrap-credential-v1\0");
+        digest.update(backend_api_url.trim_end_matches('/').as_bytes());
+        digest.update(b"\0");
+        digest.update(api_key.as_bytes());
+        Self {
+            fingerprint: format!("sha256:{:x}", digest.finalize()),
+        }
+    }
+}
 
 #[derive(Debug, Deserialize)]
 struct BootstrapManifestResponse {
@@ -334,7 +354,7 @@ struct BootstrapRoutineManifest {
     slug: Option<Slug>,
     description: Option<String>,
     #[serde(default)]
-    metadata: nenjo::manifest::RoutineMetadata,
+    entry_steps: Vec<Slug>,
     #[serde(default)]
     steps: Vec<BootstrapRoutineStepManifest>,
     #[serde(default)]
@@ -367,7 +387,13 @@ struct BootstrapRoutineEdgeManifest {
     target_step: String,
     condition: nenjo::manifest::RoutineEdgeCondition,
     #[serde(default)]
-    metadata: serde_json::Value,
+    purpose: Option<String>,
+    #[serde(default)]
+    handoff_instructions: Option<String>,
+    #[serde(default)]
+    handoff_schema: Option<serde_json::Value>,
+    #[serde(default)]
+    max_retries: Option<nenjo::routines::GateRetryLimit>,
 }
 
 /// Trait for manifest items that can be stored as tree files.
@@ -494,6 +520,73 @@ pub async fn sync(
     sync_bootstrap_manifest(api, manifests_dir, state_dir, nenjo_home, bootstrap).await
 }
 
+/// Refresh bootstrap state for worker startup and bind any offline fallback to
+/// the exact backend credential that produced the cache.
+///
+/// An API key selects both the platform org and the NATS account. Reusing
+/// cached auth after the key changes would connect with one org's NATS
+/// credentials while subscribing with another org's cached subjects.
+pub async fn sync_for_startup(
+    api: &ApiClient,
+    manifests_dir: &Path,
+    state_dir: &Path,
+    nenjo_home: &Path,
+    backend_api_url: &str,
+    api_key: &str,
+) -> Result<()> {
+    std::fs::create_dir_all(manifests_dir).with_context(|| {
+        format!(
+            "Failed to create manifests directory: {}",
+            manifests_dir.display()
+        )
+    })?;
+    let binding = BootstrapCredentialBinding::new(backend_api_url, api_key);
+
+    match api.fetch_manifest_json().await {
+        Ok(bootstrap) => {
+            sync_bootstrap_manifest(api, manifests_dir, state_dir, nenjo_home, bootstrap).await?;
+            atomic_write_json(manifests_dir, BOOTSTRAP_CREDENTIAL_BINDING_FILE, &binding)
+        }
+        Err(error) => {
+            require_matching_bootstrap_credential(manifests_dir, &binding).with_context(|| {
+                format!(
+                    "Bootstrap fetch failed for the configured API key ({error}); refusing to \
+                     reuse bootstrap auth from another or unknown credential"
+                )
+            })?;
+            warn!(
+                error = %error,
+                "Bootstrap fetch failed — continuing with cache bound to this API key"
+            );
+            Ok(())
+        }
+    }
+}
+
+fn require_matching_bootstrap_credential(
+    manifests_dir: &Path,
+    expected: &BootstrapCredentialBinding,
+) -> Result<()> {
+    let path = manifests_dir.join(BOOTSTRAP_CREDENTIAL_BINDING_FILE);
+    let content = std::fs::read_to_string(&path).with_context(|| {
+        format!(
+            "Failed to read bootstrap credential binding: {}",
+            path.display()
+        )
+    })?;
+    let actual: BootstrapCredentialBinding = serde_json::from_str(&content).with_context(|| {
+        format!(
+            "Failed to parse bootstrap credential binding: {}",
+            path.display()
+        )
+    })?;
+    anyhow::ensure!(
+        actual == *expected,
+        "cached bootstrap credential does not match the configured backend and API key"
+    );
+    Ok(())
+}
+
 /// Fetch and apply bootstrap data, failing when the worker cannot observe the
 /// platform state it just wrote.
 ///
@@ -534,6 +627,7 @@ async fn sync_bootstrap_manifest(
         api,
         state_dir,
         Some(auth.auth.user_id),
+        Some(auth.auth.org_id),
         auth.auth.api_key_id,
     )
     .await
@@ -1073,7 +1167,7 @@ fn bootstrap_routine_manifest(
         name: routine.name,
         slug: routine_slug.clone(),
         description: routine.description,
-        metadata: routine.metadata,
+        entry_steps: routine.entry_steps,
         steps: routine
             .steps
             .into_iter()
@@ -1096,7 +1190,10 @@ fn bootstrap_routine_manifest(
                 source_step: Slug::derive(edge.source_step),
                 target_step: Slug::derive(edge.target_step),
                 condition: edge.condition,
-                metadata: edge.metadata,
+                purpose: edge.purpose,
+                handoff_instructions: edge.handoff_instructions,
+                handoff_schema: edge.handoff_schema,
+                max_retries: edge.max_retries,
             })
             .collect(),
     }
@@ -1760,16 +1857,23 @@ async fn ensure_worker_ack(
     api: &ApiClient,
     state_dir: &Path,
     ack_actor_user_id: Option<Uuid>,
+    org_id: Option<Uuid>,
     api_key_id: Option<Uuid>,
 ) -> Result<crate::crypto::ContentKey> {
     let ack_actor_user_id = ack_actor_user_id
         .context("Bootstrap response did not include auth.user_id for ACK routing")?;
     let api_key_id =
         api_key_id.context("Bootstrap response did not include auth.api_key_id for enrollment")?;
+    let org_id = org_id.context("Bootstrap response did not include auth.org_id for enrollment")?;
     let auth_provider = WorkerAuthProvider::load_or_create(state_dir.join("crypto"))
         .context("Failed to load worker auth provider for bootstrap")?;
     auth_provider
-        .sync_worker_enrollment(api, api_key_id, ack_actor_user_id, None)
+        .sync_worker_enrollment(
+            api,
+            crate::crypto::WorkerEnrollmentBinding::new(org_id, api_key_id),
+            ack_actor_user_id,
+            None,
+        )
         .await
         .context("Failed to sync worker enrollment before bootstrap")?;
     auth_provider
@@ -2203,6 +2307,40 @@ mod tests {
             self.refreshes.fetch_add(1, Ordering::SeqCst);
             Ok(())
         }
+    }
+
+    #[test]
+    fn bootstrap_cache_binding_changes_with_api_key_or_backend() {
+        let original = BootstrapCredentialBinding::new("https://api.example.com/", "key-one");
+
+        assert_eq!(
+            original,
+            BootstrapCredentialBinding::new("https://api.example.com", "key-one")
+        );
+        assert_ne!(
+            original,
+            BootstrapCredentialBinding::new("https://api.example.com", "key-two")
+        );
+        assert_ne!(
+            original,
+            BootstrapCredentialBinding::new("https://other.example.com", "key-one")
+        );
+    }
+
+    #[test]
+    fn offline_bootstrap_rejects_cache_from_another_api_key() {
+        let root = tempfile::tempdir().unwrap();
+        let cached = BootstrapCredentialBinding::new("https://api.example.com", "key-one");
+        atomic_write_json(root.path(), BOOTSTRAP_CREDENTIAL_BINDING_FILE, &cached).unwrap();
+
+        assert!(require_matching_bootstrap_credential(root.path(), &cached).is_ok());
+        let changed = BootstrapCredentialBinding::new("https://api.example.com", "key-two");
+        let error = require_matching_bootstrap_credential(root.path(), &changed).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cached bootstrap credential does not match")
+        );
     }
 
     #[test]

@@ -34,8 +34,6 @@ use crate::context::{
     RoutineContext, RoutineHandoffContext, RoutineHandoffsContext, RoutineStepContext,
 };
 
-const DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS: u32 = 3;
-
 /// Build `RoutineContext` and `RoutineStepContext` from the current execution state.
 fn build_routine_ctx(
     state: &RoutineState,
@@ -137,9 +135,14 @@ where
 {
     validate_routine_manifest(routine)
         .map_err(|error| anyhow::anyhow!("Routine graph is invalid: {error}"))?;
+    let retry_policy = checkpoint
+        .as_ref()
+        .map(|checkpoint| checkpoint.retry_policy)
+        .unwrap_or_else(|| provider.routine_execution_config());
+    validate_retry_policy(routine, retry_policy)?;
     let mut scheduler = match checkpoint {
         Some(checkpoint) => HumanReviewScheduler::restore(routine, checkpoint, &identity)?,
-        None => HumanReviewScheduler::new(routine, identity),
+        None => HumanReviewScheduler::new_with_config(routine, identity, retry_policy),
     };
     for resolution in resolutions {
         scheduler.apply_resolution(resolution)?;
@@ -223,22 +226,22 @@ where
                 .record_step(&slug, result.input_tokens, result.output_tokens);
             let activated = activated_edges(&step, &route_edges, result.passed)?;
             if let Some(edge) = activated.iter().find(|edge| {
-                edge_max_attempts(&step, edge).is_some_and(|max_attempts| {
+                edge_max_retries(&step, edge, retry_policy).is_some_and(|max_retries| {
                     scheduler
                         .checkpoint()
                         .traversal_counts
                         .get(&edge_key(edge))
                         .copied()
                         .unwrap_or_default()
-                        >= max_attempts
+                        >= max_retries
                 })
             }) {
-                let max_attempts =
-                    edge_max_attempts(&step, edge).expect("exhausted edge has a gate retry limit");
+                let max_retries = edge_max_retries(&step, edge, retry_policy)
+                    .expect("exhausted edge has a gate retry limit");
                 return Ok(RoutineExecutionOutcome::Failed(RoutineFailure {
                     code: "retry_exhausted".to_string(),
                     summary: format!(
-                        "Routine gate retry edge {} exhausted after {max_attempts} attempts",
+                        "Routine gate retry edge {} exhausted after {max_retries} retries",
                         edge_key(edge)
                     ),
                     step_slug: Some(slug),
@@ -287,6 +290,8 @@ where
     }
     validate_routine_manifest(routine)
         .map_err(|error| anyhow::anyhow!("Routine graph is invalid: {error}"))?;
+    let retry_policy = provider.routine_execution_config();
+    validate_retry_policy(routine, retry_policy)?;
 
     let mut last_result = StepResult::default();
     let mut edge_traversals: HashMap<String, u32> = HashMap::new();
@@ -307,7 +312,7 @@ where
             .push(edge.clone());
     }
 
-    let mut ready: VecDeque<_> = routine.metadata.entry_steps.iter().cloned().collect();
+    let mut ready: VecDeque<_> = routine.entry_steps.iter().cloned().collect();
     let mut scheduled: HashSet<_> = HashSet::new();
     let mut completed: HashSet<_> = HashSet::new();
     let mut traversed_edges: HashSet<String> = HashSet::new();
@@ -425,7 +430,8 @@ where
             let activated = activated_edges(&step, &outgoing, last_result.passed)?;
 
             for edge in activated {
-                if let Some(result) = exhausted_failure_for_edge(&step, edge, &mut edge_traversals)
+                if let Some(result) =
+                    exhausted_failure_for_edge(&step, edge, &mut edge_traversals, retry_policy)
                 {
                     last_result = result;
                     stop_after_wave = true;
@@ -673,7 +679,7 @@ fn routine_handoff_for_edge(
             }),
             summary: None,
         });
-    let purpose = edge_metadata_string(edge, "purpose");
+    let purpose = edge.purpose.clone();
 
     Some(RoutineHandoff {
         source_step: step.slug.clone(),
@@ -712,10 +718,6 @@ fn route_next_step_handoff(result: &StepResult, target_step: &Slug) -> Option<Dy
         })
 }
 
-fn edge_metadata_string(edge: &RoutineEdgeManifest, key: &str) -> Option<String> {
-    json_string_field(&edge.metadata, key)
-}
-
 fn json_string_field(value: &serde_json::Value, key: &str) -> Option<String> {
     value
         .get(key)
@@ -729,19 +731,20 @@ fn exhausted_failure_for_edge(
     step: &RoutineStepManifest,
     edge: &RoutineEdgeManifest,
     edge_traversals: &mut HashMap<String, u32>,
+    retry_policy: crate::routines::RoutineExecutionConfig,
 ) -> Option<StepResult> {
     let key = edge_key(edge);
     let traversal_count = edge_traversals.entry(edge_key(edge)).or_default();
-    if let Some(max_attempts) = edge_max_attempts(step, edge)
-        && *traversal_count >= max_attempts
+    if let Some(max_retries) = edge_max_retries(step, edge, retry_policy)
+        && *traversal_count >= max_retries
     {
         return Some(StepResult {
             passed: false,
-            output: format!("Routine edge {key} exhausted after {max_attempts} attempts"),
+            output: format!("Routine edge {key} exhausted after {max_retries} retries"),
             data: serde_json::json!({
                 "reason": "retry_exhausted",
                 "edge": key,
-                "max_attempts": max_attempts,
+                "max_retries": max_retries,
             }),
             step_slug: step.slug.clone(),
             step_name: step.name.clone(),
@@ -794,22 +797,39 @@ fn target_is_ready(
     Ok(true)
 }
 
-fn edge_max_attempts(
+fn edge_max_retries(
     current_step: &RoutineStepManifest,
     edge: &RoutineEdgeManifest,
+    retry_policy: crate::routines::RoutineExecutionConfig,
 ) -> Option<u32> {
     if current_step.step_type != RoutineStepType::Gate
         || edge.condition != RoutineEdgeCondition::OnFail
     {
         return None;
     }
-    let configured = edge
-        .metadata
-        .get("max_attempts")
-        .and_then(|value| value.as_u64())
-        .and_then(|value| u32::try_from(value).ok());
+    Some(
+        retry_policy
+            .effective_limit(edge.max_retries)
+            .expect("routine retry policy is validated before execution")
+            .get(),
+    )
+}
 
-    configured.or(Some(DEFAULT_GATE_ON_FAIL_MAX_ATTEMPTS))
+fn validate_retry_policy(
+    routine: &RoutineManifest,
+    retry_policy: crate::routines::RoutineExecutionConfig,
+) -> Result<()> {
+    for edge in &routine.edges {
+        retry_policy
+            .effective_limit(edge.max_retries)
+            .map_err(|error| {
+                anyhow::anyhow!(
+                    "Routine edge {} has an invalid gate retry override: {error}",
+                    edge_key(edge)
+                )
+            })?;
+    }
+    Ok(())
 }
 
 fn edge_key(edge: &RoutineEdgeManifest) -> String {
@@ -1156,4 +1176,41 @@ fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {
         run.execution.project_location = Some(ProjectLocation::from_git(git));
     }
     run
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::routines::{GateRetryLimit, RoutineExecutionConfig};
+
+    #[test]
+    fn retry_override_above_worker_ceiling_is_rejected_before_execution() {
+        let routine_slug = crate::Slug::derive("bounded-retries");
+        let routine = RoutineManifest {
+            name: "Bounded retries".to_string(),
+            slug: routine_slug.clone(),
+            description: None,
+            entry_steps: Vec::new(),
+            steps: Vec::new(),
+            edges: vec![RoutineEdgeManifest {
+                routine: routine_slug,
+                source_step: crate::Slug::derive("review"),
+                target_step: crate::Slug::derive("implement"),
+                condition: RoutineEdgeCondition::OnFail,
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: Some(GateRetryLimit::new(5)),
+            }],
+        };
+        let policy =
+            RoutineExecutionConfig::new(GateRetryLimit::new(2), GateRetryLimit::new(4)).unwrap();
+
+        let error = validate_retry_policy(&routine, policy)
+            .expect_err("override above the worker ceiling must fail before any step runs");
+        let error_chain = format!("{error:#}");
+
+        assert!(error_chain.contains("gate retry override 5"));
+        assert!(error_chain.contains("worker maximum 4"));
+    }
 }

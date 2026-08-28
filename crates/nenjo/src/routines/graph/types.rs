@@ -1,5 +1,3 @@
-use serde_json::Value;
-
 use crate::Slug;
 use crate::manifest::{
     RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest,
@@ -123,7 +121,8 @@ pub struct RoutineGraphEdge {
     pub source_step: Slug,
     pub target_step: Slug,
     pub condition: RoutineGraphEdgeCondition,
-    pub metadata: Value,
+    pub handoff_schema: Option<serde_json::Value>,
+    pub max_retries: Option<crate::routines::GateRetryLimit>,
 }
 
 impl RoutineGraphEdge {
@@ -132,7 +131,8 @@ impl RoutineGraphEdge {
             source_step: edge.source_step.clone(),
             target_step: edge.target_step.clone(),
             condition: edge.condition.into(),
-            metadata: edge.metadata.clone(),
+            handoff_schema: edge.handoff_schema.clone(),
+            max_retries: edge.max_retries,
         }
     }
 }
@@ -147,7 +147,7 @@ pub struct RoutineGraph {
 impl RoutineGraph {
     pub fn from_manifest(routine: &RoutineManifest) -> Self {
         Self {
-            entry_steps: routine.metadata.entry_steps.clone(),
+            entry_steps: routine.entry_steps.clone(),
             steps: routine
                 .steps
                 .iter()

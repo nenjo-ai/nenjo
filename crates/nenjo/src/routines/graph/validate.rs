@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 
 use crate::Slug;
-use crate::routines::handoff_schema::{HANDOFF_SCHEMA_METADATA_KEY, validate_handoff_schema};
+use crate::routines::handoff_schema::{HANDOFF_SCHEMA_KEY, validate_handoff_schema};
 
 use super::error::{RoutineValidationError, RoutineValidationIssue};
 use super::types::{
@@ -47,7 +47,6 @@ pub fn validate_routine_graph(graph: &RoutineGraph) -> ValidationResult {
     validate_at_least_one_terminal(&graph.steps)?;
     validate_terminal_no_outgoing(&graph.steps, &graph.edges)?;
     validate_non_terminal_have_outgoing(&graph.steps, &graph.edges)?;
-    validate_no_retry_exhaustion_branches(&graph.edges)?;
     validate_cycles_only_use_on_fail_edges(&graph.steps, &graph.edges)?;
     validate_entry_steps(&graph.steps, &graph.edges, &graph.entry_steps)?;
     validate_all_reachable(&graph.steps, &graph.edges, &graph.entry_steps)?;
@@ -60,7 +59,7 @@ fn validate_retry_limits(
 ) -> ValidationResult {
     let step_map = steps_by_slug(steps);
     for edge in edges {
-        let Some(value) = edge.metadata.get("max_attempts") else {
+        let Some(_) = edge.max_retries else {
             continue;
         };
         let source_is_gate = step_map
@@ -69,21 +68,8 @@ fn validate_retry_limits(
         if !source_is_gate || edge.condition != RoutineGraphEdgeCondition::OnFail {
             return Err(RoutineValidationError::single(
                 RoutineValidationIssue::new(format!(
-                    "Edge {} may define max_attempts only for a gate on_fail retry",
+                    "Edge {} may define max_retries only for a gate on_fail retry",
                     edge_key(edge)
-                ))
-                .edge(edge_key(edge)),
-            ));
-        }
-        if value
-            .as_u64()
-            .is_none_or(|attempts| attempts == 0 || u32::try_from(attempts).is_err())
-        {
-            return Err(RoutineValidationError::single(
-                RoutineValidationIssue::new(format!(
-                    "Edge {} must define max_attempts as an integer from 1 through {}",
-                    edge_key(edge),
-                    u32::MAX
                 ))
                 .edge(edge_key(edge)),
             ));
@@ -212,10 +198,10 @@ fn validate_routable_edge_handoff_schemas(
         ) {
             continue;
         }
-        let Some(schema) = edge.metadata.get(HANDOFF_SCHEMA_METADATA_KEY) else {
+        let Some(schema) = edge.handoff_schema.as_ref() else {
             return Err(RoutineValidationError::single(
                 RoutineValidationIssue::new(format!(
-                    "{} edge {} must define metadata.{HANDOFF_SCHEMA_METADATA_KEY}",
+                    "{} edge {} must define {HANDOFF_SCHEMA_KEY}",
                     step_type_label(source.step_type),
                     edge_key(edge)
                 ))
@@ -226,7 +212,7 @@ fn validate_routable_edge_handoff_schemas(
         if let Err(error) = validate_handoff_schema(schema) {
             return Err(RoutineValidationError::single(
                 RoutineValidationIssue::new(format!(
-                    "{} edge {} has invalid metadata.{HANDOFF_SCHEMA_METADATA_KEY}: {error}",
+                    "{} edge {} has invalid {HANDOFF_SCHEMA_KEY}: {error}",
                     step_type_label(source.step_type),
                     edge_key(edge)
                 ))
@@ -521,24 +507,6 @@ fn validate_non_terminal_have_outgoing(
     Ok(())
 }
 
-fn validate_no_retry_exhaustion_branches(edges: &[RoutineGraphEdge]) -> ValidationResult {
-    for edge in edges {
-        if edge.metadata.get("on_exhausted").is_some()
-            || edge.metadata.get("on_exhausted_step").is_some()
-            || edge.metadata.get("on_exhausted_step_id").is_some()
-        {
-            return Err(RoutineValidationError::single(
-                RoutineValidationIssue::new(format!(
-                    "Edge {} must not define on_exhausted metadata; retry exhaustion fails the routine directly",
-                    edge_key(edge)
-                ))
-                .edge(edge_key(edge)),
-            ));
-        }
-    }
-    Ok(())
-}
-
 fn validate_cycles_only_use_on_fail_edges(
     steps: &[RoutineGraphStep],
     edges: &[RoutineGraphEdge],
@@ -706,16 +674,15 @@ mod tests {
             source_step: Slug::derive(source),
             target_step: Slug::derive(target),
             condition,
-            metadata: serde_json::json!({
-                "handoff_schema": {
-                    "type": "object",
-                    "required": ["work"],
-                    "properties": {
-                        "work": {"type": "string", "minLength": 1}
-                    },
-                    "additionalProperties": false
-                }
-            }),
+            handoff_schema: Some(serde_json::json!({
+                "type": "object",
+                "required": ["work"],
+                "properties": {
+                    "work": {"type": "string", "minLength": 1}
+                },
+                "additionalProperties": false
+            })),
+            max_retries: None,
         }
     }
 
@@ -739,7 +706,8 @@ mod tests {
             source_step: Slug::derive(source),
             target_step: Slug::derive(target),
             condition,
-            metadata: serde_json::json!({}),
+            handoff_schema: None,
+            max_retries: None,
         }
     }
 
@@ -834,9 +802,9 @@ mod tests {
     #[test]
     fn rejects_agent_edge_without_handoff_schema() {
         let mut graph = valid_linear_graph();
-        graph.edges[0].metadata = serde_json::json!({});
+        graph.edges[0].handoff_schema = None;
 
-        assert_invalid(graph, "must define metadata.handoff_schema");
+        assert_invalid(graph, "must define handoff_schema");
     }
 
     #[test]
@@ -851,13 +819,14 @@ mod tests {
                 source_step: Slug::derive("gate"),
                 target_step: Slug::derive("done"),
                 condition: RoutineGraphEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                handoff_schema: None,
+                max_retries: None,
             }],
         };
 
         assert_invalid(
             graph,
-            "Gate edge gate:on_pass:done must define metadata.handoff_schema",
+            "Gate edge gate:on_pass:done must define handoff_schema",
         );
     }
 
@@ -1212,30 +1181,9 @@ mod tests {
     }
 
     #[test]
-    fn rejects_retry_exhaustion_branch_metadata() {
-        let mut retry = edge("gate", "work", RoutineGraphEdgeCondition::OnFail);
-        retry.metadata["on_exhausted"] = serde_json::json!("missing");
-        let graph = RoutineGraph {
-            entry_steps: vec![Slug::derive("work")],
-            steps: vec![
-                step("work", RoutineGraphStepType::Agent),
-                step("gate", RoutineGraphStepType::Gate),
-                step("done", RoutineGraphStepType::Terminal),
-            ],
-            edges: vec![
-                edge("work", "gate", RoutineGraphEdgeCondition::Always),
-                edge("gate", "done", RoutineGraphEdgeCondition::OnPass),
-                retry,
-            ],
-        };
-
-        assert_invalid(graph, "must not define on_exhausted metadata");
-    }
-
-    #[test]
     fn retry_limits_apply_only_to_gate_on_fail_edges() {
         let mut retry = edge("gate", "work", RoutineGraphEdgeCondition::OnFail);
-        retry.metadata["max_attempts"] = serde_json::json!(2);
+        retry.max_retries = Some(crate::routines::GateRetryLimit::new(2));
         let valid = RoutineGraph {
             entry_steps: vec![Slug::derive("work")],
             steps: vec![
@@ -1271,14 +1219,14 @@ mod tests {
                 human_edge("review", "rejected", RoutineGraphEdgeCondition::Rejected),
             ],
         };
-        human.edges[2].metadata["max_attempts"] = serde_json::json!(2);
+        human.edges[2].max_retries = Some(crate::routines::GateRetryLimit::new(2));
         assert_invalid(human, "only for a gate on_fail retry");
     }
 
     #[test]
-    fn rejects_zero_gate_retry_limit() {
+    fn accepts_zero_gate_retry_limit_to_disable_retries() {
         let mut retry = edge("gate", "work", RoutineGraphEdgeCondition::OnFail);
-        retry.metadata["max_attempts"] = serde_json::json!(0);
+        retry.max_retries = Some(crate::routines::GateRetryLimit::new(0));
         let graph = RoutineGraph {
             entry_steps: vec![Slug::derive("work")],
             steps: vec![
@@ -1293,7 +1241,7 @@ mod tests {
             ],
         };
 
-        assert_invalid(graph, "integer from 1");
+        validate_routine_graph(&graph).expect("zero retries disables retry traversal");
     }
 
     #[test]

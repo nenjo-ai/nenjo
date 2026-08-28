@@ -3,8 +3,8 @@
 use chrono::{DateTime, Utc};
 use nenjo::Slug;
 use nenjo::manifest::{
-    RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineMetadata,
-    RoutineStepManifest, RoutineStepType,
+    RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest,
+    RoutineStepType,
 };
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
@@ -60,8 +60,14 @@ pub struct RoutineEdgeRecord {
     pub target_step_id: Uuid,
     pub target_step: String,
     pub condition: String,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<nenjo::routines::GateRetryLimit>,
     pub created_at: DateTime<Utc>,
 }
 
@@ -76,12 +82,10 @@ pub struct RoutineRecord {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
-    pub is_active: bool,
     pub is_default: bool,
-    pub max_retries: i32,
     pub step_count: i64,
     #[serde(default)]
-    pub metadata: serde_json::Value,
+    pub entry_steps: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub encrypted_payload: Option<serde_json::Value>,
     #[serde(default)]
@@ -120,22 +124,25 @@ impl RoutineEdgeRecord {
             source_step: slug_from_str(&self.source_step),
             target_step: slug_from_str(&self.target_step),
             condition: RoutineEdgeCondition::from_str_value(&self.condition),
-            metadata: self.metadata.clone(),
+            purpose: self.purpose.clone(),
+            handoff_instructions: self.handoff_instructions.clone(),
+            handoff_schema: self.handoff_schema.clone(),
+            max_retries: self.max_retries,
         }
     }
 }
 
 impl RoutineRecord {
-    fn routine_metadata(&self) -> RoutineMetadata {
-        serde_json::from_value(self.metadata.clone()).unwrap_or_default()
-    }
-
     pub fn to_manifest(&self) -> RoutineManifest {
         RoutineManifest {
             name: self.name.clone(),
             slug: slug_from_str(&self.slug),
             description: self.description.clone(),
-            metadata: self.routine_metadata(),
+            entry_steps: self
+                .entry_steps
+                .iter()
+                .map(|value| slug_from_str(value))
+                .collect(),
             steps: self
                 .steps
                 .iter()
@@ -169,7 +176,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn routine_record_to_manifest_preserves_edge_handoff_metadata() {
+    fn routine_record_to_manifest_preserves_explicit_edge_handoff_fields() {
         let now = Utc::now();
         let routine_id = Uuid::new_v4();
         let record = RoutineRecord {
@@ -179,11 +186,9 @@ mod tests {
             slug: "handoff-routine".to_string(),
             name: "Handoff Routine".to_string(),
             description: None,
-            is_active: true,
             is_default: false,
-            max_retries: 3,
             step_count: 0,
-            metadata: serde_json::json!({ "entry_steps": ["source"] }),
+            entry_steps: vec!["source".to_string()],
             encrypted_payload: None,
             steps: Vec::new(),
             edges: vec![RoutineEdgeRecord {
@@ -195,10 +200,10 @@ mod tests {
                 target_step_id: Uuid::new_v4(),
                 target_step: "target".to_string(),
                 condition: "always".to_string(),
-                metadata: serde_json::json!({
-                    "purpose": "batch_1",
-                    "handoff_instructions": "Send the first batch only"
-                }),
+                purpose: Some("batch_1".to_string()),
+                handoff_instructions: Some("Send the first batch only".to_string()),
+                handoff_schema: None,
+                max_retries: None,
                 created_at: now,
             }],
             last_run_at: None,
@@ -210,10 +215,10 @@ mod tests {
 
         let manifest = record.to_manifest();
 
-        assert_eq!(manifest.edges[0].metadata["purpose"], "batch_1");
+        assert_eq!(manifest.edges[0].purpose.as_deref(), Some("batch_1"));
         assert_eq!(
-            manifest.edges[0].metadata["handoff_instructions"],
-            "Send the first batch only"
+            manifest.edges[0].handoff_instructions.as_deref(),
+            Some("Send the first batch only")
         );
     }
 }

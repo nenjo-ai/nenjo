@@ -1,3 +1,4 @@
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -9,7 +10,10 @@ use rand_core::OsRng;
 use serde::Serialize;
 use x25519_dalek::{PublicKey as X25519PublicKey, StaticSecret};
 
-use super::types::{CURRENT_CRYPTO_VERSION, StoredWorkerEnrollment, StoredWorkerIdentity};
+use super::types::{
+    BoundWorkerEnrollment, CURRENT_CRYPTO_VERSION, StoredWorkerEnrollment, StoredWorkerEnrollments,
+    StoredWorkerIdentity, WorkerEnrollmentBinding,
+};
 
 pub(super) const IDENTITY_FILE: &str = "identity.json";
 pub(super) const ENROLLMENT_FILE: &str = "enrollment.json";
@@ -42,17 +46,82 @@ pub(super) fn generate_verification_code() -> String {
     format!("{:06}", uuid::Uuid::new_v4().as_u128() % 1_000_000)
 }
 
-pub(super) fn load_enrollment(root: &Path) -> Result<StoredWorkerEnrollment> {
+pub(super) fn load_enrollments(root: &Path) -> Result<StoredWorkerEnrollments> {
     let path = root.join(ENROLLMENT_FILE);
-    if path.exists() {
-        read_json(&path)
-    } else {
-        Ok(StoredWorkerEnrollment::default())
+    if !path.exists() {
+        return Ok(StoredWorkerEnrollments::default());
     }
+
+    let raw = fs::read_to_string(&path)
+        .with_context(|| format!("Failed to read crypto state file: {}", path.display()))?;
+    let value: serde_json::Value = serde_json::from_str(&raw)
+        .with_context(|| format!("Failed to parse crypto state file: {}", path.display()))?;
+
+    if value.get("schema_version").is_some() {
+        let stored: StoredWorkerEnrollments = serde_json::from_value(value)
+            .with_context(|| format!("Failed to parse crypto state file: {}", path.display()))?;
+        anyhow::ensure!(
+            stored.schema_version == 2,
+            "Unsupported worker enrollment schema version {}",
+            stored.schema_version
+        );
+        validate_enrollments(&stored)?;
+        return Ok(stored);
+    }
+
+    // Migrate the original single-slot format. Only a certificate can prove
+    // which account and API key own the wrapped material; unbound material is
+    // intentionally not carried into the account-indexed store.
+    let legacy: StoredWorkerEnrollment = serde_json::from_value(value).with_context(|| {
+        format!(
+            "Failed to parse legacy crypto state file: {}",
+            path.display()
+        )
+    })?;
+    let mut stored = StoredWorkerEnrollments::default();
+    if let Some(certificate) = legacy.certificate.as_ref() {
+        let binding = WorkerEnrollmentBinding::new(certificate.account_id, certificate.api_key_id);
+        stored.selected_binding = Some(binding);
+        stored.entries.push(BoundWorkerEnrollment {
+            binding,
+            enrollment: legacy,
+        });
+    }
+    persist_enrollments(root, &stored)?;
+    Ok(stored)
 }
 
-pub(super) fn persist_enrollment(root: &Path, enrollment: &StoredWorkerEnrollment) -> Result<()> {
-    write_json_atomic(&root.join(ENROLLMENT_FILE), enrollment)
+fn validate_enrollments(stored: &StoredWorkerEnrollments) -> Result<()> {
+    let mut bindings = HashSet::with_capacity(stored.entries.len());
+    for entry in &stored.entries {
+        anyhow::ensure!(
+            bindings.insert(entry.binding),
+            "Duplicate persisted worker enrollment binding for account {} and API key {}",
+            entry.binding.account_id(),
+            entry.binding.api_key_id()
+        );
+        if let Some(certificate) = entry.enrollment.certificate.as_ref() {
+            anyhow::ensure!(
+                certificate.account_id == entry.binding.account_id()
+                    && certificate.api_key_id == entry.binding.api_key_id(),
+                "Persisted worker certificate did not match its enrollment binding"
+            );
+        }
+    }
+    if let Some(selected) = stored.selected_binding {
+        anyhow::ensure!(
+            bindings.contains(&selected),
+            "Selected worker enrollment binding does not have a persisted entry"
+        );
+    }
+    Ok(())
+}
+
+pub(super) fn persist_enrollments(
+    root: &Path,
+    enrollments: &StoredWorkerEnrollments,
+) -> Result<()> {
+    write_json_atomic(&root.join(ENROLLMENT_FILE), enrollments)
 }
 
 fn read_json<T: serde::de::DeserializeOwned>(path: &Path) -> Result<T> {

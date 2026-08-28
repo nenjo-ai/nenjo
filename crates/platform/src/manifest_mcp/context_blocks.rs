@@ -1,35 +1,18 @@
 use nenjo::{ToolCategory, ToolSpec};
 
 fn context_block_ref_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "string",
-        "description": "Existing context block slug. Use `slug` from list_context_blocks or get_context_block, not the path-like selector. For configure_context_block, omit `context_block` to create a new context block."
-    })
+    slug_schema(
+        "Existing context block slug. Use `slug` from list_context_blocks or get_context_block, not the path-like selector.",
+    )
 }
 
-fn configure_metadata_schema() -> serde_json::Value {
+fn slug_schema(description: &str) -> serde_json::Value {
     serde_json::json!({
-        "type": "object",
-        "description": "Context block metadata patch. metadata.slug and metadata.name are required when creating; omitted fields are unchanged on update.",
-        "properties": {
-            "slug": {
-                "type": "string",
-                "description": "Stable context block slug. Required when creating a new context block."
-            },
-            "name": {
-                "type": "string",
-                "description": "Context block runtime/display name. Required when creating a new context block."
-            },
-            "path": {
-                "type": "string",
-                "description": "Folder path for this context block. Omit to leave unchanged."
-            },
-            "description": {
-                "type": ["string", "null"],
-                "description": "Human-readable description. Omit to leave unchanged; set null to clear."
-            }
-        },
-        "additionalProperties": false
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 255,
+        "pattern": "^[a-z0-9](?:[a-z0-9_-]{0,253}[a-z0-9])?$",
+        "description": description
     })
 }
 
@@ -63,13 +46,26 @@ pub fn context_block_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_context_block".to_string(),
-            description: "Create or update one context block in a single backend-owned sequence. Omit `context_block` to create; include `context_block` to update by slug. On create, metadata.slug, metadata.name, and template are required. Omitted fields are unchanged on update. Returns the full authoritative post-update `context_block: ContextBlockDocument`, not a patch echo."
+            description: "Create or update one context block atomically by required stable slug. If the slug does not exist, `name` and `template` are required. Omitted fields are unchanged; set description to null to clear it. Returns the same canonical `context_block: ContextBlockDocument` as get_context_block, not a patch echo."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
+                "required": ["slug"],
                 "properties": {
-                    "context_block": context_block_ref_schema(),
-                    "metadata": configure_metadata_schema(),
+                    "slug": slug_schema("Required stable context block slug. Configure never renames this slug."),
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Context block runtime/display name. Required when the slug does not exist; omit on update to leave unchanged."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Folder path for this context block. Omit to leave unchanged."
+                    },
+                    "description": {
+                        "type": ["string", "null"],
+                        "description": "Human-readable description. Omit to leave unchanged; set null to clear."
+                    },
                     "template": {
                         "type": "string",
                         "description": "MiniJinja template content for this context block. Omit to leave unchanged on update."
@@ -101,5 +97,14 @@ mod tests {
             )
         );
         assert!(configure_context_block.description.contains("template"));
+        assert_eq!(
+            configure_context_block.parameters["required"],
+            serde_json::json!(["slug"])
+        );
+        assert!(
+            configure_context_block.parameters["properties"]
+                .get("metadata")
+                .is_none()
+        );
     }
 }

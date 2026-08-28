@@ -570,7 +570,8 @@ pub struct RoutineManifest {
     pub name: String,
     pub slug: Slug,
     pub description: Option<String>,
-    pub metadata: RoutineMetadata,
+    #[serde(default)]
+    pub entry_steps: Vec<Slug>,
     pub steps: Vec<RoutineStepManifest>,
     pub edges: Vec<RoutineEdgeManifest>,
 }
@@ -582,12 +583,6 @@ impl RoutineManifest {
 }
 
 impl_manifest_identity!(RoutineManifest);
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct RoutineMetadata {
-    #[serde(default)]
-    pub entry_steps: Vec<Slug>,
-}
 
 /// A single step in a routine DAG (agent, gate, council, or terminal).
 #[derive(Debug, Clone, Serialize, Deserialize, Builder)]
@@ -648,8 +643,14 @@ pub struct RoutineEdgeManifest {
     pub source_step: Slug,
     pub target_step: Slug,
     pub condition: RoutineEdgeCondition,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_schema: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<crate::routines::GateRetryLimit>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -684,6 +685,20 @@ impl RoutineEdgeCondition {
             Self::OnFail => !passed,
             Self::Approved | Self::ChangesRequested | Self::Rejected => false,
         }
+    }
+}
+
+impl std::fmt::Display for RoutineEdgeCondition {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let value = match self {
+            Self::Always => "always",
+            Self::OnPass => "on_pass",
+            Self::OnFail => "on_fail",
+            Self::Approved => "approved",
+            Self::ChangesRequested => "changes_requested",
+            Self::Rejected => "rejected",
+        };
+        f.write_str(value)
     }
 }
 

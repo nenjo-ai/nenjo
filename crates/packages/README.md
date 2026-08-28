@@ -36,6 +36,13 @@ Supported resource schemas are:
 - `nenjo.mcp_server.v1`
 - `nenjo.routine.v1`
 
+Routine modules keep graph control fields explicit. `entry_steps` is a
+top-level list, and edges use `purpose`, `handoff_instructions`,
+`handoff_schema`, and optional `max_retries`. The legacy
+`metadata.max_attempts` spelling is accepted only while reading older package
+manifests; new manifests should use `max_retries`, which counts retry-edge
+traversals after the initial gate evaluation.
+
 ## Catalog Example
 
 ```yaml

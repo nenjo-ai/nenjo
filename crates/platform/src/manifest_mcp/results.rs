@@ -29,8 +29,6 @@ pub struct AgentGetResult {
 pub struct AgentConfigureResult {
     /// Manifest-facing agent document after all requested changes.
     pub agent: AgentDocument,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -56,8 +54,6 @@ pub struct AbilityGetResult {
 pub struct AbilityConfigureResult {
     /// Manifest-facing ability document after all requested changes.
     pub ability: AbilityDocument,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -76,8 +72,6 @@ pub struct CommandGetResult {
 /// Result for `configure_command`.
 pub struct CommandConfigureResult {
     pub command: CommandManifest,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -96,8 +90,6 @@ pub struct DomainGetResult {
 /// Result for `configure_domain`.
 pub struct DomainConfigureResult {
     pub domain: DomainDocument,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -152,8 +144,6 @@ pub struct RoutineGetResult {
 /// Result for `configure_routine`.
 pub struct RoutineConfigureResult {
     pub routine: RoutineDocument,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +199,4 @@ pub struct ContextBlockGetResult {
 pub struct ContextBlockConfigureResult {
     /// Manifest-facing context block document after all requested changes.
     pub context_block: ContextBlockDocument,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub warnings: Vec<String>,
 }

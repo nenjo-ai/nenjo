@@ -9,7 +9,7 @@ use async_trait::async_trait;
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest, CouncilManifest,
     DomainManifest, Manifest, ManifestIdentity, ManifestResource, ManifestResourceKind,
-    ModelManifest, ProjectManifest, RoutineManifest, context_block_slug, domain_slug,
+    ModelManifest, ProjectManifest, RoutineManifest,
 };
 use nenjo::{ManifestReader, ManifestWriter, Slug};
 use uuid::Uuid;
@@ -102,18 +102,14 @@ fn local_routine_from_document(routine: &RoutineDocument) -> RoutineManifest {
                 source_step: edge.source_step.clone(),
                 target_step: edge.target_step.clone(),
                 condition: edge.condition,
-                metadata: edge.metadata.clone(),
+                purpose: edge.purpose.clone(),
+                handoff_instructions: edge.handoff_instructions.clone(),
+                handoff_schema: edge.handoff_schema.clone(),
+                max_retries: edge.max_retries,
             })
             .collect(),
-        metadata: routine.metadata.clone(),
+        entry_steps: routine.entry_steps.clone(),
     }
-}
-
-fn routine_encrypted_payload_object_id(payload: Option<&serde_json::Value>) -> Option<Uuid> {
-    payload?
-        .get("object_id")?
-        .as_str()
-        .and_then(|value| Uuid::parse_str(value).ok())
 }
 
 fn preserve_existing_routine_step_state(
@@ -199,12 +195,6 @@ fn context_block_matches_ref(
 
 fn project_matches_ref(project: &ProjectManifest, project_ref: &Slug) -> bool {
     project.manifest_slug() == project_ref
-}
-
-fn configure_name_slug(name: Option<&String>) -> Option<Slug> {
-    name.map(|value| value.trim())
-        .filter(|value| !value.is_empty())
-        .map(Slug::derive)
 }
 
 #[async_trait]
@@ -494,26 +484,6 @@ where
                 slug
             )
         })
-    }
-
-    fn optional_platform_object_id(
-        &self,
-        kind: PlatformResourceKind,
-        slug: &Slug,
-    ) -> Result<Option<Uuid>> {
-        let Some(store) = self.resource_ids.as_ref() else {
-            return Ok(None);
-        };
-        store.get(kind, slug)
-    }
-
-    fn ensure_platform_object_id(&self, kind: PlatformResourceKind, slug: &Slug) -> Result<Uuid> {
-        if let Some(id) = self.optional_platform_object_id(kind, slug)? {
-            return Ok(id);
-        }
-        let id = Uuid::new_v4();
-        self.record_platform_object_id(kind, slug, id)?;
-        Ok(id)
     }
 
     fn record_platform_object_id(
@@ -880,35 +850,19 @@ where
     }
 
     async fn configure_agent(&self, params: AgentConfigureParams) -> Result<AgentConfigureResult> {
-        let mut data = params.data;
-        if data.agent.is_none()
-            && let Some(agent) = configure_name_slug(
-                data.metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.name.as_ref()),
-            )
-            && let Some(existing) = self.cached_local_agent(&agent).await?
-        {
-            data.agent = Some(existing.manifest_slug().clone());
-        }
-
-        let existing_agent = if let Some(agent) = data.agent.as_ref() {
-            self.cached_local_agent(agent).await?
-        } else {
-            None
+        let data = params.data;
+        let existing_agent = self.cached_local_agent(&data.slug).await?;
+        let object_id = match existing_agent.as_ref() {
+            Some(_) => self.platform_object_id(PlatformResourceKind::Agent, &data.slug)?,
+            None => Uuid::new_v4(),
         };
-
-        let old_slug = data.agent.clone();
+        let mut transport = AgentConfigureTransport {
+            document: data.clone(),
+            id: Some(object_id),
+            encrypted_payload: None,
+        };
         let mut resolved_prompt_config = None;
-        if let Some(prompt_config) = data.prompt_config.as_ref() {
-            let agent_object_id = match data.agent.as_ref() {
-                Some(agent) => self.platform_object_id(PlatformResourceKind::Agent, agent)?,
-                None => {
-                    let id = data.id.unwrap_or_else(Uuid::new_v4);
-                    data.id = Some(id);
-                    id
-                }
-            };
+        if let Patch::Set(prompt_config) = data.prompt_config.as_ref() {
             let base_prompt_config = existing_agent
                 .as_ref()
                 .map(|agent| agent.prompt_config.clone())
@@ -919,17 +873,20 @@ where
                 .sensitive_payload_encoder
                 .encode_payload(
                     self.local_manifest_org_id().await?,
-                    agent_object_id,
+                    object_id,
                     SensitiveContentKind::AgentPrompt.encrypted_object_type(),
                     &serde_json::to_value(&merged_prompt_config)?,
                 )
                 .await?
                 .ok_or_else(|| anyhow!("agent prompt encryption produced no payload"))?;
-            data.encrypted_payload = Some(encrypted_payload);
-            data.prompt_config = None;
+            transport.encrypted_payload = Some(encrypted_payload);
+            transport.document.prompt_config = Patch::Unchanged;
             resolved_prompt_config = Some(merged_prompt_config);
         }
-        let configured = self.platform_client.configure_agent_record(&data).await?;
+        let configured = self
+            .platform_client
+            .configure_agent_record(&transport)
+            .await?;
         // A submitted prompt patch is already merged locally before encryption, so
         // decrypt only when the response is the sole source of the current prompt.
         let configured = if resolved_prompt_config.is_some() {
@@ -937,7 +894,9 @@ where
         } else {
             self.decode_agent_prompt_record(configured).await?
         };
-        let new_slug = Slug::derive(&configured.slug);
+        let slug = Slug::parse(&configured.slug).with_context(|| {
+            format!("platform returned invalid agent slug `{}`", configured.slug)
+        })?;
 
         let mut local_agent = local_agent_from_record(configured.clone());
         if let Some(prompt_config) = resolved_prompt_config {
@@ -951,23 +910,10 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::Agent(local_agent))
             .await?;
-
-        if let Some(old_slug) = old_slug.as_ref()
-            && old_slug != &new_slug
-        {
-            self.local_store
-                .delete_resource(ManifestResourceKind::Agent, old_slug)
-                .await?;
-        }
-
-        if let Some(old_slug) = old_slug.as_ref() {
-            self.move_platform_object_id(PlatformResourceKind::Agent, old_slug, &new_slug)?;
-        }
-        self.record_platform_object_id(PlatformResourceKind::Agent, &new_slug, configured.id)?;
+        self.record_platform_object_id(PlatformResourceKind::Agent, &slug, configured.id)?;
 
         Ok(AgentConfigureResult {
             agent: agent_document,
-            warnings: Vec::new(),
         })
     }
 }
@@ -1000,54 +946,40 @@ where
         &self,
         params: AbilityConfigureParams,
     ) -> Result<AbilityConfigureResult> {
-        let mut data = params.data;
-        if data.ability.is_none()
-            && let Some(ability) = configure_name_slug(
-                data.metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.name.as_ref()),
-            )
-            && let Some(existing) = self.cached_local_ability(&ability).await?
-        {
-            data.ability = Some(existing.manifest_slug().clone());
-        }
-
-        let existing_ability = if let Some(ability) = data.ability.as_ref() {
-            self.cached_local_ability(ability).await?
-        } else {
-            None
+        let data = params.data;
+        let existing_ability = self.cached_local_ability(&data.slug).await?;
+        let object_id = match existing_ability.as_ref() {
+            Some(_) => self.platform_object_id(PlatformResourceKind::Ability, &data.slug)?,
+            None => Uuid::new_v4(),
         };
-        if let Some(existing) = existing_ability.as_ref() {
-            data.ability = Some(existing.manifest_slug().clone());
-        }
-
-        let old_slug = data.ability.clone();
-        if data.ability.is_none() {
-            data.id = Some(Uuid::new_v4());
-        }
-        let submitted_prompt_config = data.prompt_config.clone();
-        if let Some(prompt_config) = data.prompt_config.as_ref() {
-            let ability_object_id = match data.ability.as_ref() {
-                Some(ability) => self.platform_object_id(PlatformResourceKind::Ability, ability)?,
-                None => data
-                    .id
-                    .expect("new ability id should be assigned before encoding"),
-            };
+        let submitted_prompt_config = match data.prompt_config.clone() {
+            Patch::Unchanged => None,
+            Patch::Set(prompt_config) => Some(prompt_config),
+        };
+        let mut transport = AbilityConfigureTransport {
+            document: data,
+            id: Some(object_id),
+            encrypted_payload: None,
+        };
+        if let Some(prompt_config) = submitted_prompt_config.as_ref() {
             let encrypted_payload = self
                 .sensitive_payload_encoder
                 .encode_payload(
                     self.local_manifest_org_id().await?,
-                    ability_object_id,
+                    object_id,
                     SensitiveContentKind::AbilityPrompt.encrypted_object_type(),
                     &serde_json::json!(prompt_config),
                 )
                 .await?
                 .ok_or_else(|| anyhow!("ability prompt encryption produced no payload"))?;
-            data.encrypted_payload = Some(encrypted_payload);
-            data.prompt_config = None;
+            transport.encrypted_payload = Some(encrypted_payload);
+            transport.document.prompt_config = Patch::Unchanged;
         }
 
-        let configured = self.platform_client.configure_ability_record(&data).await?;
+        let configured = self
+            .platform_client
+            .configure_ability_record(&transport)
+            .await?;
         // A submitted prompt is already available locally, so decrypt only when
         // the platform response is the sole source of the current prompt.
         let configured = if submitted_prompt_config.is_some() {
@@ -1068,16 +1000,14 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::Ability(local_ability))
             .await?;
-
-        if let Some(old_slug) = old_slug.as_ref() {
-            self.move_platform_object_id(PlatformResourceKind::Ability, old_slug, &new_slug)?;
-        } else if let Some(id) = data.id {
-            self.record_platform_object_id(PlatformResourceKind::Ability, &new_slug, id)?;
-        }
+        self.record_platform_object_id(
+            PlatformResourceKind::Ability,
+            &new_slug,
+            configured.ability.id,
+        )?;
 
         Ok(AbilityConfigureResult {
             ability: ability_document,
-            warnings: Vec::new(),
         })
     }
 }
@@ -1116,18 +1046,14 @@ where
         &self,
         params: CommandConfigureParams,
     ) -> Result<CommandConfigureResult> {
-        let existing_command = if let Some(command_ref) = params.data.command_ref.as_deref() {
-            let manifest = self.local_store.load_manifest().await?;
-            Some(
-                manifest
-                    .commands
-                    .into_iter()
-                    .find(|command| command_matches_ref(command, command_ref))
-                    .ok_or_else(|| anyhow!("command not found in local manifest: {command_ref}"))?,
-            )
-        } else {
-            None
-        };
+        let data = params.data;
+        let existing_command = self
+            .local_store
+            .load_manifest()
+            .await?
+            .commands
+            .into_iter()
+            .find(|command| command.manifest_slug() == &data.slug);
 
         if let Some(existing) = existing_command.as_ref()
             && (existing.read_only || existing.source_type != "native")
@@ -1135,44 +1061,37 @@ where
             return Err(anyhow!("package-managed commands cannot be edited locally"));
         }
 
-        let old_slug = existing_command
-            .as_ref()
-            .map(|command| command.manifest_slug().clone());
-        let mut data = params.data;
-        if data.command_ref.is_none() && data.content.is_none() {
-            return Err(anyhow!("content is required when creating a command"));
-        }
-        if let Some(slug) = old_slug.as_ref() {
-            data.id = Some(self.platform_object_id(PlatformResourceKind::Command, slug)?);
-        }
-
-        let submitted_content = data.content.clone();
-        if let Some(content) = data.content.as_ref() {
-            let command_object_id = match data.id {
-                Some(id) => id,
-                None => {
-                    let id = Uuid::new_v4();
-                    data.id = Some(id);
-                    id
-                }
-            };
+        let object_id = match existing_command.as_ref() {
+            Some(_) => self.platform_object_id(PlatformResourceKind::Command, &data.slug)?,
+            None => Uuid::new_v4(),
+        };
+        let submitted_content = match data.content.clone() {
+            Patch::Unchanged => None,
+            Patch::Set(content) => Some(content),
+        };
+        let mut transport = CommandConfigureTransport {
+            document: data,
+            id: Some(object_id),
+            encrypted_payload: None,
+        };
+        if let Some(content) = submitted_content.as_ref() {
             let encrypted_payload = self
                 .sensitive_payload_encoder
                 .encode_payload(
                     self.local_manifest_org_id().await?,
-                    command_object_id,
+                    object_id,
                     SensitiveContentKind::CommandContent.encrypted_object_type(),
                     &serde_json::json!(content),
                 )
                 .await?
                 .ok_or_else(|| anyhow!("command content encryption produced no payload"))?;
-            data.encrypted_payload = Some(encrypted_payload);
-            data.content = None;
+            transport.encrypted_payload = Some(encrypted_payload);
+            transport.document.content = Patch::Unchanged;
         }
 
         let (configured_id, mut local_command) = self
             .platform_client
-            .configure_command_document(&data)
+            .configure_command_document(&transport)
             .await?;
         if let Some(content) = submitted_content {
             local_command.content = content;
@@ -1185,14 +1104,6 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::Command(local_command.clone()))
             .await?;
-
-        if let Some(old_slug) = old_slug.as_ref() {
-            self.move_platform_object_id(
-                PlatformResourceKind::Command,
-                old_slug,
-                local_command.manifest_slug(),
-            )?;
-        }
         self.record_platform_object_id(
             PlatformResourceKind::Command,
             local_command.manifest_slug(),
@@ -1201,7 +1112,6 @@ where
 
         Ok(CommandConfigureResult {
             command: local_command,
-            warnings: Vec::new(),
         })
     }
 }
@@ -1234,59 +1144,42 @@ where
         &self,
         params: DomainConfigureParams,
     ) -> Result<DomainConfigureResult> {
-        let mut data = params.data;
-        if data.domain.is_none()
-            && let Some(metadata) = data.metadata.as_ref()
-            && let Some(name) = metadata
-                .name
-                .as_ref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-        {
-            let path = metadata.path.as_deref().unwrap_or_default();
-            let domain = domain_slug(path, name);
-            if let Some(existing) = self.cached_local_domain(&domain).await? {
-                data.domain = Some(existing.manifest_slug().clone());
-            }
-        }
-
-        let existing_domain = if let Some(domain) = data.domain.as_ref() {
-            self.cached_local_domain(domain).await?
-        } else {
-            None
+        let data = params.data;
+        let existing_domain = self.cached_local_domain(&data.slug).await?;
+        let object_id = match existing_domain.as_ref() {
+            Some(_) => self.platform_object_id(PlatformResourceKind::Domain, &data.slug)?,
+            None => Uuid::new_v4(),
         };
-        if let Some(existing) = existing_domain.as_ref() {
-            data.domain = Some(existing.manifest_slug().clone());
-        }
-
-        let old_slug = data.domain.clone();
-        if data.domain.is_none() {
-            data.id = Some(Uuid::new_v4());
-        }
-        let submitted_prompt_config = data.prompt_config.clone();
-        if let Some(prompt_config) = data.prompt_config.as_ref() {
-            let domain_object_id = match data.domain.as_ref() {
-                Some(domain) => self.platform_object_id(PlatformResourceKind::Domain, domain)?,
-                None => data
-                    .id
-                    .expect("new domain id should be assigned before encoding"),
-            };
+        let submitted_prompt_config = match data.prompt_config.clone() {
+            Patch::Unchanged => None,
+            Patch::Set(prompt_config) => Some(prompt_config),
+        };
+        let mut transport = DomainConfigureTransport {
+            document: data,
+            id: Some(object_id),
+            encrypted_payload: None,
+        };
+        if let Some(prompt_config) = submitted_prompt_config.as_ref() {
             let encrypted_payload = self
                 .sensitive_payload_encoder
                 .encode_payload(
                     self.local_manifest_org_id().await?,
-                    domain_object_id,
+                    object_id,
                     SensitiveContentKind::DomainPrompt.encrypted_object_type(),
                     &serde_json::json!(prompt_config),
                 )
                 .await?
                 .ok_or_else(|| anyhow!("domain prompt encryption produced no payload"))?;
-            data.encrypted_payload = Some(encrypted_payload);
-            data.prompt_config = None;
+            transport.encrypted_payload = Some(encrypted_payload);
+            transport.document.prompt_config = Patch::Unchanged;
         }
 
         let configured = self
-            .decode_domain_prompt_record(self.platform_client.configure_domain_record(&data).await?)
+            .decode_domain_prompt_record(
+                self.platform_client
+                    .configure_domain_record(&transport)
+                    .await?,
+            )
             .await?
             .to_document();
         let mut local_domain = local_domain_from_document(configured);
@@ -1300,16 +1193,10 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::Domain(local_domain))
             .await?;
-
-        if let Some(old_slug) = old_slug.as_ref() {
-            self.move_platform_object_id(PlatformResourceKind::Domain, old_slug, &new_slug)?;
-        } else if let Some(id) = data.id {
-            self.record_platform_object_id(PlatformResourceKind::Domain, &new_slug, id)?;
-        }
+        self.record_platform_object_id(PlatformResourceKind::Domain, &new_slug, object_id)?;
 
         Ok(DomainConfigureResult {
             domain: domain_document,
-            warnings: Vec::new(),
         })
     }
 }
@@ -1636,87 +1523,17 @@ where
         params: RoutineConfigureParams,
     ) -> Result<RoutineConfigureResult> {
         let mut data = params.data;
-        let old_slug = data.routine.clone();
-        if data.routine.is_none()
-            && data
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.name.as_ref())
-                .is_none_or(|name| name.trim().is_empty())
-        {
-            return Err(anyhow!("metadata.name is required when creating a routine"));
+        if data.name.trim().is_empty() {
+            return Err(anyhow!("name must not be blank"));
         }
-
-        if data.routine.is_none()
-            && let Some(routine) = configure_name_slug(
-                data.metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.name.as_ref()),
-            )
-            && let Some(existing) = self.cached_local_routine(&routine).await?
-        {
-            data.routine = Some(existing.manifest_slug().clone());
-        }
-
-        let existing_record = match data.routine.as_ref() {
-            Some(routine) => {
-                self.platform_client
-                    .get_routine_record_optional(routine)
-                    .await?
-            }
-            None => None,
-        };
-
-        if data.id.is_none() {
-            let routine_id = match data.routine.as_ref() {
-                Some(routine) => match existing_record.as_ref() {
-                    Some(record) => {
-                        let id =
-                            routine_encrypted_payload_object_id(record.encrypted_payload.as_ref())
-                                .unwrap_or(record.id);
-                        if id != record.id {
-                            return Err(anyhow!(
-                                "routine {} encrypted_payload object_id {} does not match platform id {}",
-                                routine,
-                                id,
-                                record.id
-                            ));
-                        }
-                        self.record_platform_object_id(
-                            PlatformResourceKind::Routine,
-                            &Slug::derive(&record.slug),
-                            id,
-                        )?;
-                        if Slug::derive(&record.slug) != *routine {
-                            self.record_platform_object_id(
-                                PlatformResourceKind::Routine,
-                                routine,
-                                id,
-                            )?;
-                        }
-                        id
-                    }
-                    None => {
-                        self.ensure_platform_object_id(PlatformResourceKind::Routine, routine)?
-                    }
-                },
-                None => {
-                    let routine = configure_name_slug(
-                        data.metadata
-                            .as_ref()
-                            .and_then(|metadata| metadata.name.as_ref()),
-                    )
-                    .ok_or_else(|| anyhow!("metadata.name is required when creating a routine"))?;
-                    self.ensure_platform_object_id(PlatformResourceKind::Routine, &routine)?
-                }
-            };
-            data.id = Some(routine_id);
-        }
+        let old_slug = Some(data.slug.clone());
+        let existing_record = self
+            .platform_client
+            .get_routine_record_optional(&data.slug)
+            .await?;
 
         let mut retained_step_instructions = HashMap::new();
-        if let Some(routine) = data.routine.as_ref()
-            && let Some(local) = self.cached_local_routine(routine).await?
-        {
+        if let Some(local) = self.cached_local_routine(&data.slug).await? {
             retained_step_instructions.extend(local.steps.into_iter().filter_map(|step| {
                 step.config
                     .get("instructions")
@@ -1744,39 +1561,45 @@ where
             }
         }
 
+        let mut graph = RoutineGraphInput {
+            entry_steps: data.entry_steps,
+            steps: data.steps,
+            edges: data.edges,
+        };
+        preserve_existing_routine_step_state(&mut graph, existing_record.as_ref());
         let mut submitted_step_instructions = HashMap::new();
-        if let Some(graph) = data.graph.as_mut() {
-            preserve_existing_routine_step_state(graph, existing_record.as_ref());
-            let org_id = self.local_manifest_org_id().await?;
-            for step in &mut graph.steps {
-                let instructions = step
-                    .config
-                    .instructions()
-                    .map(str::trim)
-                    .filter(|value| !value.is_empty())
-                    .map(str::to_string);
-                let Some(instructions) = instructions else {
-                    continue;
-                };
-                let step_id = step.id.unwrap_or_else(Uuid::new_v4);
-                step.id = Some(step_id);
-                submitted_step_instructions.insert(step.slug.clone(), instructions.clone());
-                step.config.clear_instructions();
-                let encrypted_payload = self
-                    .sensitive_payload_encoder
-                    .encode_payload(
-                        org_id,
-                        step_id,
-                        SensitiveContentKind::RoutineStepInstructions.encrypted_object_type(),
-                        &serde_json::json!({ "instructions": instructions }),
-                    )
-                    .await?
-                    .ok_or_else(|| {
-                        anyhow!("routine step instructions encryption produced no payload")
-                    })?;
-                step.encrypted_payload = Some(encrypted_payload);
-            }
+        let org_id = self.local_manifest_org_id().await?;
+        for step in &mut graph.steps {
+            let instructions = step
+                .config
+                .instructions()
+                .map(str::trim)
+                .filter(|value| !value.is_empty())
+                .map(str::to_string);
+            let Some(instructions) = instructions else {
+                continue;
+            };
+            let step_id = step.id.unwrap_or_else(Uuid::new_v4);
+            step.id = Some(step_id);
+            submitted_step_instructions.insert(step.slug.clone(), instructions.clone());
+            step.config.clear_instructions();
+            let encrypted_payload = self
+                .sensitive_payload_encoder
+                .encode_payload(
+                    org_id,
+                    step_id,
+                    SensitiveContentKind::RoutineStepInstructions.encrypted_object_type(),
+                    &serde_json::json!({ "instructions": instructions }),
+                )
+                .await?
+                .ok_or_else(|| {
+                    anyhow!("routine step instructions encryption produced no payload")
+                })?;
+            step.encrypted_payload = Some(encrypted_payload);
         }
+        data.entry_steps = graph.entry_steps;
+        data.steps = graph.steps;
+        data.edges = graph.edges;
 
         let configured = self.platform_client.configure_routine_record(&data).await?;
         let mut routine_document = configured.to_document();
@@ -1815,7 +1638,6 @@ where
         self.record_platform_object_id(PlatformResourceKind::Routine, &new_slug, configured.id)?;
         Ok(RoutineConfigureResult {
             routine: routine_document,
-            warnings: Vec::new(),
         })
     }
 
@@ -2146,66 +1968,43 @@ where
         &self,
         params: ContextBlockConfigureParams,
     ) -> Result<ContextBlockConfigureResult> {
-        let mut data = params.data;
-        if data.context_block.is_none()
-            && let Some(metadata) = data.metadata.as_ref()
-            && let Some(name) = metadata
-                .name
-                .as_ref()
-                .map(|value| value.trim())
-                .filter(|value| !value.is_empty())
-        {
-            let path = metadata.path.as_deref().unwrap_or_default();
-            let context_block = context_block_slug(path, name);
-            if let Some(existing) = self.cached_local_context_block(&context_block).await? {
-                data.context_block = Some(existing.manifest_slug().clone());
-            }
-        }
-
-        let existing_context_block = if let Some(context_block) = data.context_block.as_ref() {
-            self.cached_local_context_block(context_block).await?
-        } else {
-            None
+        let data = params.data;
+        let existing_context_block = self.cached_local_context_block(&data.slug).await?;
+        let object_id = match existing_context_block.as_ref() {
+            Some(_) => self.platform_object_id(PlatformResourceKind::ContextBlock, &data.slug)?,
+            None => Uuid::new_v4(),
         };
-        if let Some(existing) = existing_context_block.as_ref() {
-            data.context_block = Some(existing.manifest_slug().clone());
-        }
-
-        let old_slug = data.context_block.clone();
-        if data.context_block.is_none() {
-            data.id = Some(Uuid::new_v4());
-        }
-        let submitted_template = data.template.clone();
+        let submitted_template = match data.template.clone() {
+            Patch::Unchanged => None,
+            Patch::Set(template) => Some(template),
+        };
         let fallback_template = existing_context_block
             .as_ref()
             .map(|item| item.template.clone())
             .unwrap_or_default();
-        if data.template.is_some() {
-            let context_block_object_id = match data.context_block.as_ref() {
-                Some(context_block) => {
-                    self.platform_object_id(PlatformResourceKind::ContextBlock, context_block)?
-                }
-                None => data
-                    .id
-                    .expect("new context block id should be assigned before encoding"),
-            };
+        let mut transport = ContextBlockConfigureTransport {
+            document: data,
+            id: Some(object_id),
+            encrypted_payload: None,
+        };
+        if let Some(template) = submitted_template.as_ref() {
             let encrypted_payload = self
                 .sensitive_payload_encoder
                 .encode_payload(
                     self.local_manifest_org_id().await?,
-                    context_block_object_id,
+                    object_id,
                     SensitiveContentKind::ContextBlockContent.encrypted_object_type(),
-                    &serde_json::json!(submitted_template.clone().unwrap_or_default()),
+                    &serde_json::json!(template),
                 )
                 .await?
                 .ok_or_else(|| anyhow!("context block template encryption produced no payload"))?;
-            data.encrypted_payload = Some(encrypted_payload);
-            data.template = None;
+            transport.encrypted_payload = Some(encrypted_payload);
+            transport.document.template = Patch::Unchanged;
         }
 
         let configured = self
             .platform_client
-            .configure_context_block_record(&data)
+            .configure_context_block_record(&transport)
             .await?;
         // A submitted template is already available locally, so decrypt only when
         // the platform response is the sole source of the current template.
@@ -2227,16 +2026,14 @@ where
         self.local_store
             .upsert_resource(&ManifestResource::ContextBlock(local_context_block))
             .await?;
-
-        if let Some(old_slug) = old_slug.as_ref() {
-            self.move_platform_object_id(PlatformResourceKind::ContextBlock, old_slug, &new_slug)?;
-        } else if let Some(id) = data.id {
-            self.record_platform_object_id(PlatformResourceKind::ContextBlock, &new_slug, id)?;
-        }
+        self.record_platform_object_id(
+            PlatformResourceKind::ContextBlock,
+            &new_slug,
+            configured.block.id,
+        )?;
 
         Ok(ContextBlockConfigureResult {
             context_block: context_block_document,
-            warnings: Vec::new(),
         })
     }
 }
@@ -2294,11 +2091,9 @@ mod tests {
             slug: "dashboard-routine".to_string(),
             name: "Dashboard Routine".to_string(),
             description: None,
-            is_active: true,
             is_default: false,
-            max_retries: 3,
             step_count: 1,
-            metadata: json!({ "entry_steps": ["draft"] }),
+            entry_steps: vec!["draft".to_string()],
             encrypted_payload: None,
             steps: vec![crate::manifest_contract::RoutineStepRecord {
                 id: step_id,
@@ -2815,17 +2610,12 @@ mod tests {
         });
         let configured = backend
             .configure_agent(AgentConfigureParams {
-                data: AgentConfigureDocument {
-                    metadata: Some(AgentConfigureMetadata {
-                        name: Some("Reviewer".to_string()),
-                        slug: None,
-                        description: None,
-                        color: None,
-                        model: None,
-                    }),
-                    prompt_config: Some(prompt_patch),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "reviewer",
+                    "name": "Reviewer",
+                    "prompt_config": prompt_patch
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -2902,14 +2692,11 @@ mod tests {
 
         let configured = backend
             .configure_agent(AgentConfigureParams {
-                data: AgentConfigureDocument {
-                    agent: Some(Slug::derive("reviewer")),
-                    metadata: Some(AgentConfigureMetadata {
-                        model: Some(Some(Slug::derive("ornith-qwen"))),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "reviewer",
+                    "model": "ornith-qwen"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -2947,8 +2734,8 @@ mod tests {
 
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
-        assert_eq!(body["agent"], "reviewer");
-        assert_eq!(body["metadata"]["model"], "ornith-qwen");
+        assert_eq!(body["slug"], "reviewer");
+        assert_eq!(body["model"], "ornith-qwen");
     }
 
     #[tokio::test]
@@ -2998,19 +2785,14 @@ mod tests {
 
         let configured = backend
             .configure_ability(AbilityConfigureParams {
-                data: AbilityConfigureDocument {
-                    metadata: Some(AbilityConfigureMetadata {
-                        slug: Some(Slug::derive("review-code")),
-                        name: Some("review_code".to_string()),
-                        path: None,
-                        description: None,
-                        activation_condition: None,
-                    }),
-                    prompt_config: Some(nenjo::manifest::AbilityPromptConfig {
-                        developer_prompt: "Sensitive ability prompt".to_string(),
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "review-code",
+                    "name": "review_code",
+                    "prompt_config": {
+                        "developer_prompt": "Sensitive ability prompt"
+                    }
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -3092,20 +2874,20 @@ mod tests {
 
         backend
             .configure_ability(AbilityConfigureParams {
-                data: AbilityConfigureDocument {
-                    ability: Some(canonical_slug.clone()),
-                    prompt_config: Some(nenjo::manifest::AbilityPromptConfig {
-                        developer_prompt: "Updated prompt".to_string(),
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": canonical_slug,
+                    "prompt_config": {
+                        "developer_prompt": "Updated prompt"
+                    }
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
 
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
-        assert_eq!(body["ability"], canonical_slug.as_str());
+        assert_eq!(body["slug"], canonical_slug.as_str());
         assert_eq!(body["encrypted_payload"]["object_id"], json!(ability_id));
         assert!(body.get("prompt_config").is_none());
     }
@@ -3143,16 +2925,12 @@ mod tests {
 
         let configured = backend
             .configure_context_block(ContextBlockConfigureParams {
-                data: ContextBlockConfigureDocument {
-                    metadata: Some(ContextBlockConfigureMetadata {
-                        slug: Some(Slug::derive("repo-guidance")),
-                        name: Some("repo_guidance".to_string()),
-                        path: None,
-                        description: None,
-                    }),
-                    template: Some("Sensitive context block template".to_string()),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "repo-guidance",
+                    "name": "repo_guidance",
+                    "template": "Sensitive context block template"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -3219,19 +2997,14 @@ mod tests {
 
         backend
             .configure_ability(AbilityConfigureParams {
-                data: AbilityConfigureDocument {
-                    metadata: Some(AbilityConfigureMetadata {
-                        slug: Some(Slug::derive("mcp-payload-smoke-ability")),
-                        name: Some("mcp_payload_smoke_ability".to_string()),
-                        path: None,
-                        description: None,
-                        activation_condition: None,
-                    }),
-                    prompt_config: Some(nenjo::manifest::AbilityPromptConfig {
-                        developer_prompt: "SMOKE_ABILITY_PROMPT_123".to_string(),
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "mcp-payload-smoke-ability",
+                    "name": "mcp_payload_smoke_ability",
+                    "prompt_config": {
+                        "developer_prompt": "SMOKE_ABILITY_PROMPT_123"
+                    }
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -3264,19 +3037,15 @@ mod tests {
 
         let configured = backend
             .configure_domain(DomainConfigureParams {
-                data: DomainConfigureDocument {
-                    metadata: Some(DomainConfigureMetadata {
-                        slug: Some(Slug::derive("build-domain")),
-                        name: Some("Build Domain".to_string()),
-                        path: None,
-                        description: None,
-                        command: Some("#build-domain".to_string()),
-                    }),
-                    prompt_config: Some(nenjo::manifest::DomainPromptConfig {
-                        developer_prompt_addon: Some("SMOKE_DOMAIN_PROMPT_123".to_string()),
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "build-domain",
+                    "name": "Build Domain",
+                    "command": "#build-domain",
+                    "prompt_config": {
+                        "developer_prompt_addon": "SMOKE_DOMAIN_PROMPT_123"
+                    }
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -3331,16 +3100,13 @@ mod tests {
 
         backend
             .configure_context_block(ContextBlockConfigureParams {
-                data: ContextBlockConfigureDocument {
-                    metadata: Some(ContextBlockConfigureMetadata {
-                        slug: Some(Slug::derive("mcp-payload-smoke-context")),
-                        name: Some("mcp_payload_smoke_context".to_string()),
-                        path: Some("smoke".to_string()),
-                        description: None,
-                    }),
-                    template: Some("SMOKE_CONTEXT_TEMPLATE_123".to_string()),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "mcp-payload-smoke-context",
+                    "name": "mcp_payload_smoke_context",
+                    "path": "smoke",
+                    "template": "SMOKE_CONTEXT_TEMPLATE_123"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -3379,14 +3145,9 @@ mod tests {
                     "slug": "brand-design-workflow",
                     "name": "Brand Design Workflow",
                     "description": "Updated workflow",
-                    "trigger": "task",
-                    "is_active": true,
                     "is_default": false,
-                    "max_retries": 2,
                     "step_count": 0,
-                    "metadata": {
-                        "entry_steps": []
-                    },
+                    "entry_steps": ["done"],
                     "steps": [],
                     "edges": [],
                     "created_by": null,
@@ -3404,16 +3165,25 @@ mod tests {
         let result = backend
             .configure_routine(RoutineConfigureParams {
                 data: RoutineConfigureDocument {
-                    routine: Some(Slug::derive("brand-design-workflow")),
-                    metadata: Some(RoutineConfigureMetadata {
-                        name: Some("Brand Design Workflow".to_string()),
-                        slug: None,
-                        description: Some(Some("Updated workflow".to_string())),
-                        project_id: None,
-                        is_active: Some(true),
-                        max_retries: Some(2),
-                    }),
-                    ..Default::default()
+                    slug: Slug::derive("brand-design-workflow"),
+                    name: "Brand Design Workflow".to_string(),
+                    description: Some("Updated workflow".to_string()),
+                    project_id: None,
+                    entry_steps: vec![Slug::derive("done")],
+                    steps: vec![RoutineStepInput {
+                        id: None,
+                        slug: Slug::derive("done"),
+                        name: "Done".to_string(),
+                        step_type: nenjo::manifest::RoutineStepType::Terminal,
+                        council: None,
+                        agent: None,
+                        config: RoutineStepConfigInput::default(),
+                        encrypted_payload: None,
+                        position_x: None,
+                        position_y: None,
+                        order_index: 0,
+                    }],
+                    edges: Vec::new(),
                 },
             })
             .await
@@ -3427,8 +3197,9 @@ mod tests {
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0].method, "GET");
         let body: serde_json::Value = serde_json::from_str(&requests[1].body).unwrap();
-        assert_eq!(body["routine"], "brand-design-workflow");
-        assert_eq!(body["metadata"]["name"], "Brand Design Workflow");
+        assert_eq!(body["slug"], "brand-design-workflow");
+        assert_eq!(body["name"], "Brand Design Workflow");
+        assert!(body.get("metadata").is_none());
     }
 
     #[tokio::test]
@@ -3473,24 +3244,19 @@ mod tests {
 
         backend
             .configure_agent(AgentConfigureParams {
-                data: AgentConfigureDocument {
-                    agent: Some(Slug::derive("brand-designer")),
-                    metadata: Some(AgentConfigureMetadata {
-                        name: Some("Brand Designer".to_string()),
-                        slug: None,
-                        description: Some(Some("Updated agent".to_string())),
-                        color: None,
-                        model: None,
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "brand-designer",
+                    "name": "Brand Designer",
+                    "description": "Updated agent"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
 
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
-        assert_eq!(body["agent"], "brand-designer");
+        assert_eq!(body["slug"], "brand-designer");
     }
 
     #[tokio::test]
@@ -3543,17 +3309,12 @@ mod tests {
 
         let result = backend
             .configure_ability(AbilityConfigureParams {
-                data: AbilityConfigureDocument {
-                    ability: Some(Slug::derive("brand_review")),
-                    metadata: Some(AbilityConfigureMetadata {
-                        slug: None,
-                        name: Some("brand_review".to_string()),
-                        path: None,
-                        description: Some(Some("Updated ability".to_string())),
-                        activation_condition: None,
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "brand_review",
+                    "name": "brand_review",
+                    "description": "Updated ability"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -3577,7 +3338,7 @@ mod tests {
 
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
-        assert_eq!(body["ability"], "brand_review");
+        assert_eq!(body["slug"], "brand_review");
     }
 
     #[tokio::test]
@@ -3682,24 +3443,19 @@ mod tests {
 
         backend
             .configure_domain(DomainConfigureParams {
-                data: DomainConfigureDocument {
-                    domain: Some(Slug::derive("brand-domain")),
-                    metadata: Some(DomainConfigureMetadata {
-                        slug: None,
-                        name: Some("Brand Domain".to_string()),
-                        path: None,
-                        description: Some(Some("Updated domain".to_string())),
-                        command: None,
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "brand-domain",
+                    "name": "Brand Domain",
+                    "description": "Updated domain"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
 
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
-        assert_eq!(body["domain"], "brand-domain");
+        assert_eq!(body["slug"], "brand-domain");
     }
 
     #[tokio::test]
@@ -3746,16 +3502,12 @@ mod tests {
 
         let result = backend
             .configure_context_block(ContextBlockConfigureParams {
-                data: ContextBlockConfigureDocument {
-                    context_block: Some(Slug::derive("brand-guidance")),
-                    metadata: Some(ContextBlockConfigureMetadata {
-                        slug: None,
-                        name: Some("Brand Guidance".to_string()),
-                        path: None,
-                        description: Some(Some("Updated context".to_string())),
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "brand-guidance",
+                    "name": "Brand Guidance",
+                    "description": "Updated context"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -3771,7 +3523,7 @@ mod tests {
         );
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
-        assert_eq!(body["context_block"], "brand-guidance");
+        assert_eq!(body["slug"], "brand-guidance");
     }
 
     async fn spawn_knowledge_create_server(
@@ -3895,20 +3647,13 @@ mod tests {
         };
         let configured = backend
             .configure_domain(DomainConfigureParams {
-                data: DomainConfigureDocument {
-                    id: None,
-                    domain: None,
-                    metadata: Some(DomainConfigureMetadata {
-                        slug: Some(Slug::derive("build-domain")),
-                        name: Some("Build Domain".to_string()),
-                        path: None,
-                        description: None,
-                        command: Some("#build-domain".to_string()),
-                    }),
-                    prompt_config: Some(prompt_config.clone()),
-                    encrypted_payload: None,
-                    assignments: None,
-                },
+                data: serde_json::from_value(json!({
+                    "slug": "build-domain",
+                    "name": "Build Domain",
+                    "command": "#build-domain",
+                    "prompt_config": prompt_config
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();

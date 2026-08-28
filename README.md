@@ -204,6 +204,24 @@ streaming = true
 `NENJO_VLLM_STREAMING` overrides the TOML value and accepts
 `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off`.
 
+### Routine gate retries
+
+Routine gate retries are configured independently from model-provider request
+reliability:
+
+```toml
+[routines]
+default_gate_max_retries = 3
+max_gate_max_retries = 10
+```
+
+The default applies when a gate `on_fail` edge omits `max_retries`. An explicit
+edge override above the worker maximum is rejected before execution. The
+effective policy is stored in the run checkpoint, so changing worker config
+does not alter an active or resumed run. Environment overrides are
+`NENJO_ROUTINES_DEFAULT_GATE_MAX_RETRIES` and
+`NENJO_ROUTINES_MAX_GATE_MAX_RETRIES`.
+
 ### PDF inputs
 
 For models whose provider accepts native PDFs, the worker preserves that native

@@ -16,6 +16,7 @@ use crate::config::AgentConfig;
 use crate::context::RenderContextVars;
 use crate::manifest::{Manifest, ManifestLoader};
 use crate::memory::Memory;
+use crate::routines::RoutineExecutionConfig;
 use nenjo_knowledge::tools::KnowledgePackEntry;
 
 /// Builder for creating a [`Provider`].
@@ -53,6 +54,7 @@ pub struct ProviderBuilder<
     tool_factory: ToolFactoryImpl,
     memory: Option<Mem>,
     agent_config: AgentConfig,
+    routine_execution_config: RoutineExecutionConfig,
     render_ctx_extra: RenderContextVars,
     argument_bindings: Vec<ResolvedArgumentBinding>,
     knowledge_pack_entries: Vec<KnowledgePackEntry>,
@@ -116,6 +118,7 @@ impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory>
             tool_factory: NoopToolFactory,
             memory: None,
             agent_config: AgentConfig::default(),
+            routine_execution_config: RoutineExecutionConfig::default(),
             render_ctx_extra: RenderContextVars::default(),
             argument_bindings: Vec::new(),
             knowledge_pack_entries: Vec::new(),
@@ -162,6 +165,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: self.tool_factory,
             memory: self.memory,
             agent_config: self.agent_config,
+            routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
@@ -188,6 +192,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: self.tool_factory,
             memory: self.memory,
             agent_config: self.agent_config,
+            routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
@@ -213,6 +218,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: factory,
             memory: self.memory,
             agent_config: self.agent_config,
+            routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
@@ -239,6 +245,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: self.tool_factory,
             memory: Some(memory),
             agent_config: self.agent_config,
+            routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
@@ -253,6 +260,12 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
     /// context token budget, etc. Defaults to [`AgentConfig::default()`].
     pub fn with_agent_config(mut self, config: AgentConfig) -> Self {
         self.agent_config = config;
+        self
+    }
+
+    /// Set gate retry defaults and the worker safety ceiling for routines.
+    pub fn with_routine_execution_config(mut self, config: RoutineExecutionConfig) -> Self {
+        self.routine_execution_config = config;
         self
     }
 
@@ -315,6 +328,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: self.tool_factory,
             memory: self.memory,
             agent_config: self.agent_config,
+            routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
             knowledge_pack_entries: self.knowledge_pack_entries,
@@ -394,6 +408,7 @@ where
                 tool_factory: Arc::new(self.tool_factory),
                 memory: self.memory.map(Arc::new),
                 agent_config: self.agent_config,
+                routine_execution_config: self.routine_execution_config,
                 render_ctx_extra,
                 argument_bindings: self.argument_bindings,
                 knowledge,
@@ -437,6 +452,7 @@ where
                     .memory
                     .map(|memory| Arc::new(memory) as Arc<dyn Memory>),
                 agent_config: self.agent_config,
+                routine_execution_config: self.routine_execution_config,
                 render_ctx_extra,
                 argument_bindings: self.argument_bindings,
                 knowledge,

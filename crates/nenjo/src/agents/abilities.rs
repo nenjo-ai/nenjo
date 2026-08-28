@@ -1579,6 +1579,7 @@ mod tests {
                 argument_bindings: Default::default(),
                 knowledge: Default::default(),
                 artifact_input_preparer: None,
+                routine_execution_config: Default::default(),
             },
         )
     }

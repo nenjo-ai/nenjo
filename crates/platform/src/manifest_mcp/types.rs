@@ -3,16 +3,133 @@
 use derive_builder::Builder;
 use nenjo::Slug;
 use nenjo_models::NativeModelToolId;
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest,
     CouncilDelegationStrategy, CouncilManifest, DomainManifest, ManifestIdentity, ModelManifest,
     ProjectManifest, PromptConfig, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest,
-    RoutineMetadata, RoutineStepManifest, RoutineStepType,
+    RoutineStepManifest, RoutineStepType,
 };
 use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
 use serde_json::Value;
+
+/// Patch state for a non-nullable configure field.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Patch<T> {
+    /// Leave the saved value unchanged.
+    Unchanged,
+    /// Replace the saved value.
+    Set(T),
+}
+
+impl<T> Default for Patch<T> {
+    fn default() -> Self {
+        Self::Unchanged
+    }
+}
+
+impl<T> Patch<T> {
+    pub fn is_unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+
+    pub fn as_ref(&self) -> Patch<&T> {
+        match self {
+            Self::Unchanged => Patch::Unchanged,
+            Self::Set(value) => Patch::Set(value),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for Patch<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        T::deserialize(deserializer).map(Self::Set)
+    }
+}
+
+impl<T> Serialize for Patch<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Unchanged => serializer.serialize_unit(),
+            Self::Set(value) => value.serialize(serializer),
+        }
+    }
+}
+
+/// Patch state for a configure field that can be explicitly cleared.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NullablePatch<T> {
+    /// Leave the saved value unchanged.
+    Unchanged,
+    /// Clear the saved value.
+    Clear,
+    /// Replace the saved value.
+    Set(T),
+}
+
+impl<T> Default for NullablePatch<T> {
+    fn default() -> Self {
+        Self::Unchanged
+    }
+}
+
+impl<T> NullablePatch<T> {
+    pub fn is_unchanged(&self) -> bool {
+        matches!(self, Self::Unchanged)
+    }
+
+    pub fn as_ref(&self) -> NullablePatch<&T> {
+        match self {
+            Self::Unchanged => NullablePatch::Unchanged,
+            Self::Clear => NullablePatch::Clear,
+            Self::Set(value) => NullablePatch::Set(value),
+        }
+    }
+}
+
+impl<'de, T> Deserialize<'de> for NullablePatch<T>
+where
+    T: Deserialize<'de>,
+{
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Option::<T>::deserialize(deserializer).map(|value| match value {
+            Some(value) => Self::Set(value),
+            None => Self::Clear,
+        })
+    }
+}
+
+impl<T> Serialize for NullablePatch<T>
+where
+    T: Serialize,
+{
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        match self {
+            Self::Unchanged => serializer.serialize_unit(),
+            Self::Clear => serializer.serialize_none(),
+            Self::Set(value) => value.serialize(serializer),
+        }
+    }
+}
 
 /// Canonical prompt-free agent document used by manifest list/get/update/delete operations.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,60 +163,39 @@ pub struct AgentDocument {
     pub prompt_locked: bool,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Metadata patch for `configure_agent`.
-pub struct AgentConfigureMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slug: Option<Slug>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub color: Option<Option<String>>,
-    #[serde(
-        default,
-        deserialize_with = "deserialize_optional_slug_field",
-        skip_serializing_if = "Option::is_none"
-    )]
-    pub model: Option<Option<Slug>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Full replacement assignment lists for `configure_agent`.
-pub struct AgentConfigureAssignments {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abilities: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub domains: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<Slug>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for configuring an agent in one backend-owned sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Agent-facing request for configuring an agent by stable slug.
 pub struct AgentConfigureDocument {
+    pub slug: Slug,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub name: Patch<String>,
+    #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
+    pub description: NullablePatch<String>,
+    #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
+    pub color: NullablePatch<String>,
+    #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
+    pub model: NullablePatch<Slug>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub prompt_config: Patch<Value>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub abilities: Patch<Vec<Slug>>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub domains: Patch<Vec<Slug>>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub mcp_servers: Patch<Vec<Slug>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Internal platform transport for an agent configure request.
+pub struct AgentConfigureTransport {
+    #[serde(flatten)]
+    pub document: AgentConfigureDocument,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<uuid::Uuid>,
-    #[serde(default)]
-    pub agent: Option<Slug>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<AgentConfigureMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_config: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignments: Option<AgentConfigureAssignments>,
-}
-
-fn deserialize_optional_slug_field<'de, D>(
-    deserializer: D,
-) -> Result<Option<Option<Slug>>, D::Error>
-where
-    D: Deserializer<'de>,
-{
-    Option::<Slug>::deserialize(deserializer).map(Some)
+    pub encrypted_payload: Option<Value>,
 }
 
 impl From<AgentManifest> for AgentDocument {
@@ -149,45 +245,35 @@ pub struct AbilityDocument {
     pub script_tools: Vec<Slug>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Metadata patch for `configure_ability`.
-pub struct AbilityConfigureMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slug: Option<Slug>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub activation_condition: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Full replacement assignment lists for `configure_ability`.
-pub struct AbilityConfigureAssignments {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub script_tools: Option<Vec<Slug>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for configuring an ability in one backend-owned sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Agent-facing request for configuring an ability by stable slug.
 pub struct AbilityConfigureDocument {
+    pub slug: Slug,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub name: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub path: Patch<String>,
+    #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
+    pub description: NullablePatch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub activation_condition: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub prompt_config: Patch<AbilityPromptConfig>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub mcp_servers: Patch<Vec<Slug>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Internal platform transport for an ability configure request.
+pub struct AbilityConfigureTransport {
+    #[serde(flatten)]
+    pub document: AbilityConfigureDocument,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<uuid::Uuid>,
-    #[serde(default)]
-    pub ability: Option<Slug>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<AbilityConfigureMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_config: Option<AbilityPromptConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignments: Option<AbilityConfigureAssignments>,
+    pub encrypted_payload: Option<Value>,
 }
 
 impl From<AbilityManifest> for AbilityDocument {
@@ -206,19 +292,6 @@ impl From<AbilityManifest> for AbilityDocument {
             script_tools: ability.script_tools,
         }
     }
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Metadata patch for `configure_command`.
-pub struct CommandConfigureMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<Option<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -257,19 +330,33 @@ impl From<CommandManifest> for CommandSummary {
     }
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for configuring a command in one backend-owned sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Agent-facing request for configuring a command by stable slug.
 pub struct CommandConfigureDocument {
+    pub slug: Slug,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub name: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub path: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub command: Patch<String>,
+    #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
+    pub description: NullablePatch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub content: Patch<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Internal platform transport for a command configure request.
+pub struct CommandConfigureTransport {
+    #[serde(flatten)]
+    pub document: CommandConfigureDocument,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<uuid::Uuid>,
-    #[serde(default)]
-    pub command_ref: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<CommandConfigureMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub content: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<serde_json::Value>,
+    pub encrypted_payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -300,47 +387,37 @@ pub struct DomainDocument {
     pub script_tools: Vec<Slug>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Metadata patch for `configure_domain`.
-pub struct DomainConfigureMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slug: Option<Slug>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub command: Option<String>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Full replacement assignment lists for `configure_domain`.
-pub struct DomainConfigureAssignments {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub abilities: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub mcp_servers: Option<Vec<Slug>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub script_tools: Option<Vec<Slug>>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for configuring a domain in one backend-owned sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Agent-facing request for configuring a domain by stable slug.
 pub struct DomainConfigureDocument {
+    pub slug: Slug,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub name: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub path: Patch<String>,
+    #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
+    pub description: NullablePatch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub command: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub prompt_config: Patch<DomainPromptConfig>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub abilities: Patch<Vec<Slug>>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub mcp_servers: Patch<Vec<Slug>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Internal platform transport for a domain configure request.
+pub struct DomainConfigureTransport {
+    #[serde(flatten)]
+    pub document: DomainConfigureDocument,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<uuid::Uuid>,
-    #[serde(default)]
-    pub domain: Option<Slug>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<DomainConfigureMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub prompt_config: Option<DomainPromptConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub assignments: Option<DomainConfigureAssignments>,
+    pub encrypted_payload: Option<Value>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -363,32 +440,31 @@ pub struct ContextBlockDocument {
     pub template: String,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Metadata patch for `configure_context_block`.
-pub struct ContextBlockConfigureMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slug: Option<Slug>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<Option<String>>,
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Agent-facing request for configuring a context block by stable slug.
+pub struct ContextBlockConfigureDocument {
+    pub slug: Slug,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub name: Patch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub path: Patch<String>,
+    #[serde(default, skip_serializing_if = "NullablePatch::is_unchanged")]
+    pub description: NullablePatch<String>,
+    #[serde(default, skip_serializing_if = "Patch::is_unchanged")]
+    pub template: Patch<String>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for configuring a context block in one backend-owned sequence.
-pub struct ContextBlockConfigureDocument {
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Internal platform transport for a context-block configure request.
+pub struct ContextBlockConfigureTransport {
+    #[serde(flatten)]
+    pub document: ContextBlockConfigureDocument,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub id: Option<uuid::Uuid>,
-    #[serde(default)]
-    pub context_block: Option<Slug>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<ContextBlockConfigureMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub template: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<serde_json::Value>,
+    pub encrypted_payload: Option<Value>,
 }
 
 impl From<DomainManifest> for DomainDocument {
@@ -668,8 +744,14 @@ pub struct RoutineEdgeDocument {
     pub source_step: Slug,
     pub target_step: Slug,
     pub condition: RoutineEdgeCondition,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<nenjo::routines::GateRetryLimit>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -678,21 +760,18 @@ pub struct RoutineDocument {
     #[serde(flatten)]
     pub summary: RoutineSummary,
     #[serde(default)]
-    pub metadata: RoutineMetadata,
+    pub entry_steps: Vec<Slug>,
     #[serde(default)]
     pub steps: Vec<RoutineStepDocument>,
     #[serde(default)]
     pub edges: Vec<RoutineEdgeDocument>,
 }
 
+/// Internal full graph value used by resource-specific graph operations.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Full graph payload used when creating or replacing a routine workflow.
 pub struct RoutineGraphInput {
-    #[serde(default)]
     pub entry_steps: Vec<Slug>,
-    #[serde(default)]
     pub steps: Vec<RoutineStepInput>,
-    #[serde(default)]
     pub edges: Vec<RoutineEdgeInput>,
 }
 
@@ -742,6 +821,7 @@ impl RoutineStepConfigInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// One step in a routine graph write request.
 pub struct RoutineStepInput {
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -765,47 +845,35 @@ pub struct RoutineStepInput {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 /// One edge in a routine graph write request.
 pub struct RoutineEdgeInput {
     pub source_step: Slug,
     pub target_step: Slug,
     pub condition: RoutineEdgeCondition,
-    #[serde(default)]
-    pub metadata: serde_json::Value,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub purpose: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_instructions: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub handoff_schema: Option<Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_retries: Option<nenjo::routines::GateRetryLimit>,
 }
 
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Metadata patch for `configure_routine`.
-pub struct RoutineConfigureMetadata {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub name: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub slug: Option<Slug>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub description: Option<Option<String>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub project_id: Option<Option<uuid::Uuid>>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub is_active: Option<bool>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub max_retries: Option<i32>,
-}
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-/// Request body for configuring a routine in one backend-owned sequence.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+/// Complete routine and graph upsert document addressed by stable slug.
 pub struct RoutineConfigureDocument {
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub id: Option<uuid::Uuid>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub routine: Option<Slug>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub metadata: Option<RoutineConfigureMetadata>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub runtime_metadata: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub encrypted_payload: Option<serde_json::Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub graph: Option<RoutineGraphInput>,
+    pub slug: Slug,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    #[serde(default)]
+    pub project_id: Option<uuid::Uuid>,
+    pub entry_steps: Vec<Slug>,
+    pub steps: Vec<RoutineStepInput>,
+    pub edges: Vec<RoutineEdgeInput>,
 }
 
 impl From<RoutineManifest> for RoutineDocument {
@@ -817,7 +885,7 @@ impl From<RoutineManifest> for RoutineDocument {
                 name: routine.name,
                 description: routine.description,
             },
-            metadata: routine.metadata,
+            entry_steps: routine.entry_steps,
             steps: routine
                 .steps
                 .into_iter()
@@ -854,7 +922,10 @@ impl From<RoutineEdgeManifest> for RoutineEdgeDocument {
             source_step: edge.source_step,
             target_step: edge.target_step,
             condition: edge.condition,
-            metadata: edge.metadata,
+            purpose: edge.purpose,
+            handoff_instructions: edge.handoff_instructions,
+            handoff_schema: edge.handoff_schema,
+            max_retries: edge.max_retries,
         }
     }
 }
@@ -1057,6 +1128,124 @@ impl From<CouncilManifest> for CouncilDocument {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn configure_documents_distinguish_omitted_null_and_value() {
+        let document = serde_json::from_value::<AgentConfigureDocument>(serde_json::json!({
+            "slug": "reviewer",
+            "description": null,
+            "model": "ornith-qwen"
+        }))
+        .expect("flat agent configure document");
+
+        assert!(document.name.is_unchanged());
+        assert_eq!(document.description, NullablePatch::Clear);
+        assert_eq!(
+            document.model,
+            NullablePatch::Set(Slug::derive("ornith-qwen"))
+        );
+    }
+
+    #[test]
+    fn configure_documents_reject_legacy_wrappers_and_selectors() {
+        for field in ["agent", "metadata", "assignments", "script_tools"] {
+            let mut value = serde_json::json!({ "slug": "reviewer" });
+            value[field] = serde_json::json!({});
+            let error = serde_json::from_value::<AgentConfigureDocument>(value)
+                .expect_err("legacy configure field should be rejected");
+            assert!(error.to_string().contains("unknown field"));
+        }
+    }
+
+    #[test]
+    fn configure_transport_accepts_only_internal_envelope_fields() {
+        let id = uuid::Uuid::new_v4();
+        let transport = serde_json::from_value::<CommandConfigureTransport>(serde_json::json!({
+            "id": id,
+            "slug": "review",
+            "name": "Review",
+            "command": "/review",
+            "encrypted_payload": { "ciphertext": "opaque" }
+        }))
+        .expect("internal configure transport");
+
+        assert_eq!(transport.id, Some(id));
+        assert_eq!(transport.document.slug, Slug::derive("review"));
+        assert_eq!(transport.document.name, Patch::Set("Review".into()));
+        assert_eq!(
+            transport.encrypted_payload,
+            Some(serde_json::json!({ "ciphertext": "opaque" }))
+        );
+    }
+
+    fn canonical_routine_document() -> serde_json::Value {
+        serde_json::json!({
+            "slug": "rust-code-generation-pipeline",
+            "name": "Rust Code Generation Pipeline",
+            "description": "Implement and review Rust changes.",
+            "project_id": null,
+            "entry_steps": ["implement"],
+            "steps": [
+                {
+                    "slug": "implement",
+                    "name": "Implement",
+                    "step_type": "agent",
+                    "agent": "code-implementer",
+                    "config": {"instructions": "Implement the requested change."},
+                    "order_index": 0
+                },
+                {
+                    "slug": "done",
+                    "name": "Done",
+                    "step_type": "terminal",
+                    "order_index": 1
+                }
+            ],
+            "edges": [{
+                "source_step": "implement",
+                "target_step": "done",
+                "condition": "always",
+                "handoff_schema": {
+                    "type": "object",
+                    "properties": {"summary": {"type": "string"}},
+                    "required": ["summary"],
+                    "additionalProperties": false
+                }
+            }]
+        })
+    }
+
+    #[test]
+    fn canonical_routine_configure_document_deserializes() {
+        let document =
+            serde_json::from_value::<RoutineConfigureDocument>(canonical_routine_document())
+                .expect("canonical routine configure document should deserialize");
+
+        assert_eq!(document.slug.as_str(), "rust-code-generation-pipeline");
+        assert_eq!(document.entry_steps, vec![Slug::derive("implement")]);
+    }
+
+    #[test]
+    fn routine_configure_document_rejects_legacy_and_stringified_graph_fields() {
+        for field in [
+            "routine",
+            "metadata",
+            "runtime_metadata",
+            "graph",
+            "is_active",
+        ] {
+            let mut value = canonical_routine_document();
+            value[field] = serde_json::json!({});
+            let error = serde_json::from_value::<RoutineConfigureDocument>(value)
+                .expect_err("legacy field should be rejected");
+            assert!(error.to_string().contains("unknown field"));
+        }
+
+        let mut value = canonical_routine_document();
+        value["steps"] = serde_json::json!("[]");
+        serde_json::from_value::<RoutineConfigureDocument>(value)
+            .expect_err("stringified steps should be rejected");
+    }
 
     #[test]
     fn routine_step_config_rejects_unknown_fields() {

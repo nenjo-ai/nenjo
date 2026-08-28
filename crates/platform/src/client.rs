@@ -13,19 +13,21 @@ use crate::manifest_contract::{
     AbilityPromptRecord, AgentRecord, ContextBlockContentRecord, DomainPromptRecord, RoutineRecord,
 };
 use crate::manifest_mcp::{
-    AbilityConfigureDocument, AgentConfigureDocument, AgentDocument, CommandConfigureDocument,
-    ContextBlockConfigureDocument, CouncilDocument, CouncilMemberUpdateDocument,
-    CouncilUpdateDocument, DomainConfigureDocument, DomainDocument, KnowledgeDocCreateDocument,
+    AbilityConfigureTransport, AgentConfigureTransport, AgentDocument, CommandConfigureTransport,
+    ContextBlockConfigureTransport, CouncilDocument, CouncilMemberUpdateDocument,
+    CouncilUpdateDocument, DomainConfigureTransport, DomainDocument, KnowledgeDocCreateDocument,
     KnowledgeDocSummary, KnowledgeDocUpdateDocument, KnowledgePackCreateDocument,
     KnowledgePackDocument, KnowledgePackUpdateDocument, ModelCreateDocument, ModelDocument,
     ModelUpdateDocument, ProjectCreateDocument, ProjectDocument, ProjectUpdateDocument,
-    RoutineConfigureDocument, RoutineConfigureMetadata, RoutineGraphInput, RoutineStepConfigInput,
+    RoutineConfigureDocument,
 };
+#[cfg(test)]
+use crate::manifest_mcp::{RoutineGraphInput, RoutineStepConfigInput};
 use crate::types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};
 use nenjo::Slug;
-use nenjo::manifest::{
-    CommandManifest, CouncilDelegationStrategy, RoutineEdgeCondition, RoutineMetadata,
-};
+#[cfg(test)]
+use nenjo::manifest::RoutineEdgeCondition;
+use nenjo::manifest::{CommandManifest, CouncilDelegationStrategy};
 
 #[derive(Debug, serde::Deserialize)]
 struct CommandConfigureResponse {
@@ -42,29 +44,7 @@ pub struct PlatformManifestClient {
     api_key: String,
 }
 
-#[derive(Debug, serde::Serialize)]
-struct RoutineConfigureApiBody<'a> {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<Uuid>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    routine: Option<&'a Slug>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<&'a RoutineConfigureMetadata>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    runtime_metadata: Option<&'a serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    encrypted_payload: Option<&'a serde_json::Value>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    graph: Option<ConfigureRoutineGraphApiBody>,
-}
-
-#[derive(Debug, serde::Serialize)]
-struct ConfigureRoutineGraphApiBody {
-    entry_steps: Vec<Slug>,
-    steps: Vec<SaveRoutineGraphStepBody>,
-    edges: Vec<SaveRoutineGraphEdgeBody>,
-}
-
+#[cfg(test)]
 #[derive(Debug, serde::Serialize)]
 struct SaveRoutineGraphStepBody {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -84,22 +64,29 @@ struct SaveRoutineGraphStepBody {
     order_index: i32,
 }
 
+#[cfg(test)]
 #[derive(Debug, serde::Serialize)]
 struct SaveRoutineGraphEdgeBody {
     source_step: Slug,
     target_step: Slug,
     condition: Option<String>,
-    metadata: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    purpose: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff_instructions: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    handoff_schema: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    max_retries: Option<nenjo::routines::GateRetryLimit>,
 }
 
+#[cfg(test)]
 #[derive(Debug, serde::Serialize)]
 struct SaveRoutineGraphBody<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     name: Option<&'a str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     description: Option<Option<&'a str>>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    metadata: Option<&'a RoutineMetadata>,
     entry_steps: Vec<Slug>,
     steps: Vec<SaveRoutineGraphStepBody>,
     edges: Vec<SaveRoutineGraphEdgeBody>,
@@ -151,16 +138,15 @@ fn retry_after_delay(headers: &header::HeaderMap) -> Duration {
         .min(PLATFORM_CLIENT_429_MAX_RETRY_DELAY)
 }
 
+#[cfg(test)]
 fn routine_graph_body<'a>(
     name: Option<&'a str>,
     description: Option<Option<&'a str>>,
-    metadata: Option<&'a RoutineMetadata>,
     graph: &'a RoutineGraphInput,
 ) -> SaveRoutineGraphBody<'a> {
     SaveRoutineGraphBody {
         name,
         description,
-        metadata,
         entry_steps: graph.entry_steps.clone(),
         steps: graph
             .steps
@@ -196,18 +182,12 @@ fn routine_graph_body<'a>(
                     }
                     .to_string(),
                 ),
-                metadata: Some(edge.metadata.clone()),
+                purpose: edge.purpose.clone(),
+                handoff_instructions: edge.handoff_instructions.clone(),
+                handoff_schema: edge.handoff_schema.clone(),
+                max_retries: edge.max_retries,
             })
             .collect(),
-    }
-}
-
-fn routine_configure_graph_body(graph: &RoutineGraphInput) -> ConfigureRoutineGraphApiBody {
-    let body = routine_graph_body(None, None, None, graph);
-    ConfigureRoutineGraphApiBody {
-        entry_steps: body.entry_steps,
-        steps: body.steps,
-        edges: body.edges,
     }
 }
 
@@ -591,23 +571,13 @@ impl PlatformManifestClient {
     /// Configure an agent in one backend-owned sequence and return the canonical record.
     pub async fn configure_agent_record(
         &self,
-        agent: &AgentConfigureDocument,
+        agent: &AgentConfigureTransport,
     ) -> Result<AgentRecord> {
-        if agent.prompt_config.is_some() && agent.encrypted_payload.is_none() {
-            bail!("agent configure requires encrypted_payload for prompt_config");
-        }
-        let mut body =
-            serde_json::to_value(agent).context("failed to encode agent configure payload")?;
-        if agent.encrypted_payload.is_some()
-            && let Some(object) = body.as_object_mut()
-        {
-            object.remove("prompt_config");
-        }
         let response = self
             .http
             .post(format!("{}/api/v1/agents/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .json(&body)
+            .json(agent)
             .send_with_platform_retry()
             .await
             .context("failed to configure agent")?;
@@ -655,23 +625,13 @@ impl PlatformManifestClient {
     /// Configure an ability while retaining its protected prompt representation.
     pub async fn configure_ability_record(
         &self,
-        ability: &AbilityConfigureDocument,
+        ability: &AbilityConfigureTransport,
     ) -> Result<AbilityPromptRecord> {
-        if ability.prompt_config.is_some() && ability.encrypted_payload.is_none() {
-            bail!("ability configure requires encrypted_payload for prompt_config");
-        }
-        let mut body =
-            serde_json::to_value(ability).context("failed to encode ability configure payload")?;
-        if ability.encrypted_payload.is_some()
-            && let Some(object) = body.as_object_mut()
-        {
-            object.remove("prompt_config");
-        }
         let response = self
             .http
             .post(format!("{}/api/v1/abilities/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .json(&body)
+            .json(ability)
             .send_with_platform_retry()
             .await
             .context("failed to configure ability")?;
@@ -688,46 +648,13 @@ impl PlatformManifestClient {
     /// Configure a slash command in one backend-owned sequence and return the canonical manifest.
     pub async fn configure_command_document(
         &self,
-        command: &CommandConfigureDocument,
+        command: &CommandConfigureTransport,
     ) -> Result<(Uuid, CommandManifest)> {
-        if command.content.is_some() && command.encrypted_payload.is_none() {
-            bail!("command configure requires encrypted_payload for content");
-        }
-
-        let mut body = serde_json::Map::new();
-        if let Some(id) = command.id {
-            body.insert("id".to_string(), serde_json::json!(id));
-        }
-        if let Some(command_ref) = command.command_ref.as_ref() {
-            if command_ref.starts_with('/') {
-                body.insert("command".to_string(), serde_json::json!(command_ref));
-            } else {
-                body.insert("name".to_string(), serde_json::json!(command_ref));
-            }
-        }
-        if let Some(metadata) = command.metadata.as_ref() {
-            if let Some(name) = metadata.name.as_ref() {
-                body.insert("name".to_string(), serde_json::json!(name));
-            }
-            if let Some(path) = metadata.path.as_ref() {
-                body.insert("path".to_string(), serde_json::json!(path));
-            }
-            if let Some(slash_command) = metadata.command.as_ref() {
-                body.insert("command".to_string(), serde_json::json!(slash_command));
-            }
-            if let Some(description) = metadata.description.as_ref() {
-                body.insert("description".to_string(), serde_json::json!(description));
-            }
-        }
-        if let Some(encrypted_payload) = command.encrypted_payload.as_ref() {
-            body.insert("encrypted_payload".to_string(), encrypted_payload.clone());
-        }
-
         let response = self
             .http
             .post(format!("{}/api/v1/chat-commands/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .json(&body)
+            .json(command)
             .send_with_platform_retry()
             .await
             .context("failed to configure command")?;
@@ -747,23 +674,13 @@ impl PlatformManifestClient {
     /// Configure a domain in one backend-owned sequence and return the canonical record.
     pub async fn configure_domain_record(
         &self,
-        domain: &DomainConfigureDocument,
+        domain: &DomainConfigureTransport,
     ) -> Result<DomainPromptRecord> {
-        if domain.prompt_config.is_some() && domain.encrypted_payload.is_none() {
-            bail!("domain configure requires encrypted_payload for prompt_config");
-        }
-        let mut body =
-            serde_json::to_value(domain).context("failed to encode domain configure payload")?;
-        if domain.encrypted_payload.is_some()
-            && let Some(object) = body.as_object_mut()
-        {
-            object.remove("prompt_config");
-        }
         let response = self
             .http
             .post(format!("{}/api/v1/domains/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .json(&body)
+            .json(domain)
             .send_with_platform_retry()
             .await
             .context("failed to configure domain")?;
@@ -780,7 +697,7 @@ impl PlatformManifestClient {
     /// Configure a domain in one backend-owned sequence and return the canonical document.
     pub async fn configure_domain_document(
         &self,
-        domain: &DomainConfigureDocument,
+        domain: &DomainConfigureTransport,
     ) -> Result<DomainDocument> {
         Ok(self.configure_domain_record(domain).await?.to_document())
     }
@@ -1725,19 +1642,11 @@ impl PlatformManifestClient {
         &self,
         routine: &RoutineConfigureDocument,
     ) -> Result<RoutineRecord> {
-        let body = RoutineConfigureApiBody {
-            id: routine.id,
-            routine: routine.routine.as_ref(),
-            metadata: routine.metadata.as_ref(),
-            runtime_metadata: routine.runtime_metadata.as_ref(),
-            encrypted_payload: routine.encrypted_payload.as_ref(),
-            graph: routine.graph.as_ref().map(routine_configure_graph_body),
-        };
         let response = self
             .http
             .post(format!("{}/api/v1/routines/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .json(&body)
+            .json(routine)
             .send_with_platform_retry()
             .await
             .context("failed to configure routine")?;
@@ -2059,23 +1968,13 @@ impl PlatformManifestClient {
     /// Configure a context block while retaining its protected template representation.
     pub async fn configure_context_block_record(
         &self,
-        context_block: &ContextBlockConfigureDocument,
+        context_block: &ContextBlockConfigureTransport,
     ) -> Result<ContextBlockContentRecord> {
-        if context_block.template.is_some() && context_block.encrypted_payload.is_none() {
-            bail!("context block configure requires encrypted_payload for template");
-        }
-        let mut body = serde_json::to_value(context_block)
-            .context("failed to encode context block configure payload")?;
-        if context_block.encrypted_payload.is_some()
-            && let Some(object) = body.as_object_mut()
-        {
-            object.remove("template");
-        }
         let response = self
             .http
             .post(format!("{}/api/v1/context-blocks/configure", self.base_url))
             .header("X-API-Key", &self.api_key)
-            .json(&body)
+            .json(context_block)
             .send_with_platform_retry()
             .await
             .context("failed to configure context block")?;
@@ -2619,11 +2518,14 @@ mod tests {
                 source_step: Slug::derive("implement_pr_changes"),
                 target_step: Slug::derive("evaluate_result"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             }],
         };
 
-        let body = routine_graph_body(None, None, None, &graph);
+        let body = routine_graph_body(None, None, &graph);
 
         assert_eq!(body.entry_steps, vec![Slug::derive("implement_pr_changes")]);
         assert_eq!(
@@ -2655,7 +2557,7 @@ mod tests {
             edges: Vec::new(),
         };
 
-        let body = routine_graph_body(None, None, None, &graph);
+        let body = routine_graph_body(None, None, &graph);
 
         assert_eq!(body.steps[0].position_x, Some(42.0));
         assert_eq!(body.steps[0].position_y, Some(99.0));
@@ -2701,24 +2603,33 @@ mod tests {
                     source_step: Slug::derive("review"),
                     target_step: Slug::derive("produce"),
                     condition: RoutineEdgeCondition::ChangesRequested,
-                    metadata: serde_json::json!({}),
+                    purpose: None,
+                    handoff_instructions: None,
+                    handoff_schema: None,
+                    max_retries: None,
                 },
                 RoutineEdgeInput {
                     source_step: Slug::derive("review"),
                     target_step: Slug::derive("produce"),
                     condition: RoutineEdgeCondition::Approved,
-                    metadata: serde_json::json!({}),
+                    purpose: None,
+                    handoff_instructions: None,
+                    handoff_schema: None,
+                    max_retries: None,
                 },
                 RoutineEdgeInput {
                     source_step: Slug::derive("review"),
                     target_step: Slug::derive("produce"),
                     condition: RoutineEdgeCondition::Rejected,
-                    metadata: serde_json::json!({}),
+                    purpose: None,
+                    handoff_instructions: None,
+                    handoff_schema: None,
+                    max_retries: None,
                 },
             ],
         };
 
-        let body = routine_graph_body(None, None, None, &graph);
+        let body = routine_graph_body(None, None, &graph);
 
         assert_eq!(
             serde_json::to_value(&body.steps[1].config).expect("serialize config")["request"]["title"],
