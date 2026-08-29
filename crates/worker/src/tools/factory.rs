@@ -352,23 +352,17 @@ where
 
         // Web fetch (always included with config, deny-by-default via allowed_hosts)
         if self.config.web_fetch.enabled {
-            tools.push(Arc::new(WebFetchTool::new(
+            tools.push(Arc::new(WebFetchTool::from_config(
                 security.clone(),
-                self.config.web_fetch.allowed_hosts.clone(),
-                self.config.web_fetch.blocked_hosts.clone(),
+                &self.config.web_fetch,
                 self.config.web.allow_private_hosts,
-                self.config.web_fetch.max_response_size,
-                self.config.web_fetch.timeout_secs,
             )));
         }
 
         // Web search
         if self.config.web_search.enabled {
-            tools.push(Arc::new(WebSearchTool::new(
-                self.config.web_search.provider.clone(),
-                self.config.web_search.brave_api_key.clone(),
-                self.config.web_search.max_results,
-                self.config.web_search.timeout_secs,
+            tools.push(Arc::new(WebSearchTool::from_config(
+                &self.config.web_search,
             )));
         }
 

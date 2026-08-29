@@ -655,35 +655,37 @@ where
                     "Turn loop iteration"
                 );
 
-                // Prefer the catalog-derived model context window. It reflects the
-                // exact configured provider model; provider heuristics remain a
-                // fallback for legacy/manual model configurations.
-                let context_budget = compaction_context_budget(
-                    agent.model_manifest.context_window,
-                    model_provider.context_window(model),
-                );
+                if agent.runtime.config.compact_context {
+                    // Prefer the catalog-derived model context window. It reflects the
+                    // exact configured provider model; provider heuristics remain a
+                    // fallback for legacy/manual model configurations.
+                    let context_budget = compaction_context_budget(
+                        agent.model_manifest.context_window,
+                        model_provider.context_window(model),
+                    );
 
-                // Truncate tool arguments in older messages only when we're
-                // approaching the configured compaction threshold. This keeps full
-                // arguments available as long as there's headroom, and only starts
-                // reclaiming space when pressure is real — preventing the model
-                // from seeing (and mimicking) truncation markers prematurely.
-                truncate_old_tool_arguments(
-                    &mut messages,
-                    context_budget,
-                    agent.runtime.config.context_compaction_trigger_percent,
-                );
-                // Compact conversation if token estimate still exceeds budget
-                // after argument truncation.
-                compact_messages_with_summary(
-                    model_provider,
-                    model,
-                    temperature,
-                    &mut messages,
-                    context_budget,
-                    events_tx.as_ref(),
-                )
-                .await?;
+                    // Truncate tool arguments in older messages only when we're
+                    // approaching the configured compaction threshold. This keeps full
+                    // arguments available as long as there's headroom, and only starts
+                    // reclaiming space when pressure is real — preventing the model
+                    // from seeing (and mimicking) truncation markers prematurely.
+                    truncate_old_tool_arguments(
+                        &mut messages,
+                        context_budget,
+                        agent.runtime.config.context_compaction_trigger_percent,
+                    );
+                    // Compact conversation if token estimate still exceeds budget
+                    // after argument truncation.
+                    compact_messages_with_summary(
+                        model_provider,
+                        model,
+                        temperature,
+                        &mut messages,
+                        context_budget,
+                        events_tx.as_ref(),
+                    )
+                    .await?;
+                }
 
                 // Check pause token before each LLM call. If paused, block until
                 // resumed. In-flight tool executions finish before we reach this point.
