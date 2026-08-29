@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.33.0](https://github.com/nenjo-ai/nenjo/compare/v0.32.0...v0.33.0) - 2026-08-29
+
+### Added
+
+- Added first-class vLLM provider support with streamed Chat Completions, configurable streaming behavior, model capability routing, and local endpoint support ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+- Added bounded PDF input processing with native provider passthrough where available, embedded-text extraction, rendered-page vision fallback, deterministic derivative caching, and configurable resource limits ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+- Added declarative task schedule configuration to `configure_task`, including enablement, IANA timezones, local start times, interval/daily/weekly/monthly/yearly/cron recurrence, and date- or occurrence-based end conditions ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+- Added account- and API-key-bound worker enrollment storage so one worker identity can maintain isolated enrollments for multiple platform accounts ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+
+### Changed
+
+- Unified buffered and streaming chat execution behind typed chat handles and expanded turn, tool-call, session, and worker event delivery for reliable live output and durable finalization ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+- Replaced operation-based manifest mutations with declarative configure documents for agents, abilities, commands, context blocks, domains, and routines. Omitted fields are preserved, `null` clears nullable fields, assignment arrays replace existing assignments, and successful writes return the canonical saved document ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+- Allowed agent model and MCP-server assignments to use the standard configure path while leaving managed-resource authorization to the platform edit policy ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+- Reworked routine configuration and execution around typed routine configuration, explicit entry steps and handoff data, stronger graph validation, human-step routing, and checkpointed gate retry limits ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+- Task reads and configure responses now return normalized schedule state, including enabled status, occurrence count, and next/last run timestamps; omitting a schedule preserves it and passing `null` removes it ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+
+### Security
+
+- Bound enrollment refreshes and encrypted key material to the authenticated account/API-key pair to prevent one selected platform account from reading another account's local enrollment ([#108](https://github.com/nenjo-ai/nenjo/pull/108)).
+
 ## [0.32.0](https://github.com/nenjo-ai/nenjo/compare/v0.31.0...v0.32.0) - 2026-08-17
 
 ### Fixed
