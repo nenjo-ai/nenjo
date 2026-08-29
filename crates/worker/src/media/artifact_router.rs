@@ -211,6 +211,16 @@ pub enum ArtifactInputRouteError {
         artifact: ArtifactId,
         capability: ModelCapabilityId,
     },
+    #[error(
+        "artifact {artifact} ({media_type}, {size_bytes} bytes) exceeds the primary provider inline limit of {max_bytes} bytes; use bounded artifact reads or assign capability {fallback_capability}"
+    )]
+    DirectInputTooLarge {
+        artifact: ArtifactId,
+        media_type: MediaType,
+        size_bytes: u64,
+        max_bytes: u64,
+        fallback_capability: ModelCapabilityId,
+    },
     #[error("artifact analyzer assignment for {capability} is invalid: {source}")]
     InvalidAnalyzer {
         capability: ModelCapabilityId,
@@ -224,6 +234,22 @@ pub enum ArtifactInputRouteError {
         analyzer: Slug,
         modality: ModelModality,
     },
+}
+
+impl ArtifactInputRouteError {
+    /// Identify a historical input that may be omitted when no route exists.
+    ///
+    /// Invalid or incompatible configured analyzers remain hard failures because
+    /// they indicate an operator configuration error rather than absent support.
+    pub(super) const fn omittable_historical_artifact(&self) -> Option<ArtifactId> {
+        match self {
+            Self::UnsupportedMediaType { artifact, .. }
+            | Self::MissingAnalyzer { artifact, .. } => Some(*artifact),
+            Self::DirectInputTooLarge { .. }
+            | Self::InvalidAnalyzer { .. }
+            | Self::AnalyzerInputUnsupported { .. } => None,
+        }
+    }
 }
 
 impl ArtifactInputRoute {
@@ -253,19 +279,33 @@ impl ArtifactInputRoute {
                 },
                 reference.media_type(),
             );
-            if primary.input_modalities.contains(&requirement.modality)
-                && direct_transport.accepts(reference.size())
-            {
+            let direct_modality = requirement.modality_for(direct_transport);
+            let primary_supports_direct_modality =
+                primary.input_modalities.contains(&direct_modality);
+            if primary_supports_direct_modality && direct_transport.accepts(reference.size()) {
                 ordered.push(ArtifactInputDisposition::Direct(DirectArtifactInput {
                     input: input.clone(),
                     transport: direct_transport,
                 }));
                 continue;
             }
+            let direct_size_limit = primary_supports_direct_modality
+                .then(|| direct_transport.max_bytes())
+                .flatten()
+                .filter(|max_bytes| reference.size().bytes() > max_bytes.get());
 
             let endpoint = match analyzers.resolve_analyzer(requirement.analysis_capability) {
                 Ok(endpoint) => endpoint,
                 Err(ModelAssignmentResolveError::MissingAssignment { capability }) => {
+                    if let Some(max_bytes) = direct_size_limit {
+                        return Err(ArtifactInputRouteError::DirectInputTooLarge {
+                            artifact: reference.id(),
+                            media_type: reference.media_type().clone(),
+                            size_bytes: reference.size().bytes(),
+                            max_bytes: max_bytes.get(),
+                            fallback_capability: capability,
+                        });
+                    }
                     return Err(ArtifactInputRouteError::MissingAnalyzer {
                         artifact: reference.id(),
                         capability,
@@ -287,13 +327,14 @@ impl ArtifactInputRoute {
                 },
                 reference.media_type(),
             );
-            if !endpoint.input_modalities.contains(&requirement.modality)
+            let analyzer_modality = requirement.modality_for(analyzer_transport);
+            if !endpoint.input_modalities.contains(&analyzer_modality)
                 || !analyzer_transport.accepts(reference.size())
             {
                 return Err(ArtifactInputRouteError::AnalyzerInputUnsupported {
                     artifact: reference.id(),
                     analyzer: endpoint.slug,
-                    modality: requirement.modality,
+                    modality: analyzer_modality,
                 });
             }
             ordered.push(ArtifactInputDisposition::Analyze {
@@ -389,6 +430,15 @@ struct ArtifactInputRequirement {
 }
 
 impl ArtifactInputRequirement {
+    fn modality_for(self, transport: ArtifactInputTransport) -> ModelModality {
+        match transport {
+            ArtifactInputTransport::InlineText { .. } => ModelModality::Text,
+            ArtifactInputTransport::Unsupported
+            | ArtifactInputTransport::Inline { .. }
+            | ArtifactInputTransport::FileUpload { .. } => self.modality,
+        }
+    }
+
     fn for_reference(reference: &ArtifactRef) -> Result<Self, ArtifactInputRouteError> {
         let essence = reference.media_type().essence_str();
         let requirement = if essence.starts_with("image/") {
@@ -406,7 +456,7 @@ impl ArtifactInputRequirement {
                 modality: ModelModality::Audio,
                 analysis_capability: ModelCapabilityId::TranscribeAudio,
             }
-        } else if is_document_media_type(essence) {
+        } else if reference.media_type().is_utf8_text() || is_document_media_type(essence) {
             Self {
                 modality: ModelModality::File,
                 analysis_capability: ModelCapabilityId::AnalyzeDocument,
@@ -422,23 +472,17 @@ impl ArtifactInputRequirement {
 }
 
 fn is_document_media_type(essence: &str) -> bool {
-    essence.starts_with("text/")
-        || matches!(
-            essence,
-            "application/pdf"
-                | "application/json"
-                | "application/ld+json"
-                | "application/xml"
-                | "application/rtf"
-                | "application/msword"
-                | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
-                | "application/vnd.ms-excel"
-                | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-                | "application/vnd.ms-powerpoint"
-                | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
-        )
-        || essence.ends_with("+json")
-        || essence.ends_with("+xml")
+    matches!(
+        essence,
+        "application/pdf"
+            | "application/rtf"
+            | "application/msword"
+            | "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+            | "application/vnd.ms-excel"
+            | "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            | "application/vnd.ms-powerpoint"
+            | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
+    )
 }
 
 #[cfg(test)]
@@ -533,6 +577,12 @@ mod tests {
         }
     }
 
+    fn inline_text_transport() -> ArtifactInputTransport {
+        ArtifactInputTransport::InlineText {
+            max_bytes: NonZeroU64::new(1024).unwrap(),
+        }
+    }
+
     #[test]
     fn collection_deduplicates_exact_requests_but_preserves_distinct_instructions() {
         let base = input("image/png", 42);
@@ -580,6 +630,90 @@ mod tests {
             ArtifactInputDisposition::Direct(direct) if direct.input == image
         ));
         assert!(route.analysis_batches.is_empty());
+    }
+
+    #[test]
+    fn inline_utf8_document_requires_text_instead_of_native_file_modality() {
+        let markdown = input("text/markdown", 7);
+        let transports = TestTransports {
+            supported: HashMap::from([(
+                ("primary-model".to_string(), "text/markdown".to_string()),
+                inline_text_transport(),
+            )]),
+        };
+
+        let route = ArtifactInputRoute::resolve(
+            &primary(vec![ModelModality::Text]),
+            std::slice::from_ref(&markdown),
+            &transports,
+            &TestAnalyzers {
+                endpoints: HashMap::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &route.ordered[0],
+            ArtifactInputDisposition::Direct(direct) if direct.input == markdown
+        ));
+    }
+
+    #[test]
+    fn csv_alias_routes_directly_as_utf8_text() {
+        let csv = input("application/csv", 8);
+        let transports = TestTransports {
+            supported: HashMap::from([(
+                ("primary-model".to_string(), "application/csv".to_string()),
+                inline_text_transport(),
+            )]),
+        };
+
+        let route = ArtifactInputRoute::resolve(
+            &primary(vec![ModelModality::Text]),
+            std::slice::from_ref(&csv),
+            &transports,
+            &TestAnalyzers {
+                endpoints: HashMap::new(),
+            },
+        )
+        .unwrap();
+
+        assert!(matches!(
+            &route.ordered[0],
+            ArtifactInputDisposition::Direct(direct) if direct.input == csv
+        ));
+    }
+
+    #[test]
+    fn oversized_inline_text_reports_transport_limit_instead_of_missing_analyzer() {
+        let csv = input("text/csv", 9);
+        let error = ArtifactInputRoute::resolve(
+            &primary(vec![ModelModality::Text]),
+            std::slice::from_ref(&csv),
+            &TestTransports {
+                supported: HashMap::from([(
+                    ("primary-model".to_string(), "text/csv".to_string()),
+                    ArtifactInputTransport::InlineText {
+                        max_bytes: NonZeroU64::new(64).unwrap(),
+                    },
+                )]),
+            },
+            &TestAnalyzers {
+                endpoints: HashMap::new(),
+            },
+        )
+        .unwrap_err();
+
+        assert_eq!(
+            error,
+            ArtifactInputRouteError::DirectInputTooLarge {
+                artifact: csv.artifact().id(),
+                media_type: MediaType::parse("text/csv").unwrap(),
+                size_bytes: 128,
+                max_bytes: 64,
+                fallback_capability: ModelCapabilityId::AnalyzeDocument,
+            }
+        );
     }
 
     #[test]

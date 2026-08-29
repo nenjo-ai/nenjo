@@ -1,7 +1,7 @@
 //! Shared Chat Completions content encoding for OpenAI-shaped adapters.
 
 use base64::{Engine as _, engine::general_purpose};
-use nenjo_tool_api::{ArtifactId, ArtifactRef};
+use nenjo_tool_api::{ArtifactId, ArtifactRef, is_utf8_text_media_type};
 use serde::Serialize;
 
 use crate::{ArtifactInputTransport, PreparedArtifactInputs};
@@ -11,11 +11,13 @@ const MAX_INLINE_BINARY_ARTIFACT_BYTES: u64 = 16 * 1024 * 1024;
 
 /// Concrete Chat Completions dialect used to decide which artifact parts can
 /// be represented. The wire shapes overlap, but the accepted modalities do
-/// not: OpenAI has no video input while OpenRouter normalizes video parts.
+/// not: OpenAI has no video input, OpenRouter normalizes file and video parts,
+/// and vLLM accepts model media parts but not OpenAI document file parts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ChatArtifactDialect {
     OpenAi,
     OpenRouter,
+    Vllm,
 }
 
 #[derive(Debug, Serialize)]
@@ -131,7 +133,7 @@ pub(crate) fn artifact_content<'a>(
             },
         )?;
         if matches!(transport, ArtifactInputTransport::InlineText { .. }) {
-            let text = std::str::from_utf8(artifact.bytes()).map_err(|_| {
+            let text = artifact.utf8_text().ok_or_else(|| {
                 ChatArtifactSerializationError::InvalidUtf8TextArtifact {
                     artifact: reference.id(),
                     media_type: media_type.to_owned(),
@@ -165,8 +167,10 @@ pub(crate) fn artifact_content<'a>(
                     file_data: data_uri(media_type, &encoded),
                 },
             }
-        } else if dialect == ChatArtifactDialect::OpenRouter
-            && is_inline_video_media_type(media_type)
+        } else if matches!(
+            dialect,
+            ChatArtifactDialect::OpenRouter | ChatArtifactDialect::Vllm
+        ) && is_inline_video_media_type(media_type)
         {
             ChatCompletionsContentPart::VideoUrl {
                 video_url: ChatCompletionsVideoUrl {
@@ -188,7 +192,7 @@ pub(crate) fn chat_artifact_transport(
     dialect: ChatArtifactDialect,
     media_type: &str,
 ) -> ArtifactInputTransport {
-    if is_inline_text_media_type(media_type) {
+    if is_utf8_text_media_type(media_type) {
         return ArtifactInputTransport::InlineText {
             max_bytes: std::num::NonZeroU64::new(MAX_INLINE_TEXT_ARTIFACT_BYTES)
                 .expect("inline text artifact limit is non-zero"),
@@ -197,7 +201,10 @@ pub(crate) fn chat_artifact_transport(
     if is_inline_image_media_type(media_type)
         || audio_format(dialect, media_type).is_some()
         || is_file_media_type(dialect, media_type)
-        || (dialect == ChatArtifactDialect::OpenRouter && is_inline_video_media_type(media_type))
+        || (matches!(
+            dialect,
+            ChatArtifactDialect::OpenRouter | ChatArtifactDialect::Vllm
+        ) && is_inline_video_media_type(media_type))
     {
         ArtifactInputTransport::Inline {
             max_bytes: std::num::NonZeroU64::new(MAX_INLINE_BINARY_ARTIFACT_BYTES)
@@ -219,11 +226,20 @@ fn audio_format(dialect: ChatArtifactDialect, media_type: &str) -> Option<&'stat
     match (dialect, media_type) {
         (_, "audio/wav" | "audio/x-wav" | "audio/vnd.wave") => Some("wav"),
         (_, "audio/mpeg" | "audio/mp3") => Some("mp3"),
-        (ChatArtifactDialect::OpenRouter, "audio/aiff" | "audio/x-aiff") => Some("aiff"),
-        (ChatArtifactDialect::OpenRouter, "audio/aac") => Some("aac"),
-        (ChatArtifactDialect::OpenRouter, "audio/ogg") => Some("ogg"),
-        (ChatArtifactDialect::OpenRouter, "audio/flac" | "audio/x-flac") => Some("flac"),
-        (ChatArtifactDialect::OpenRouter, "audio/mp4" | "audio/x-m4a") => Some("m4a"),
+        (
+            ChatArtifactDialect::OpenRouter | ChatArtifactDialect::Vllm,
+            "audio/aiff" | "audio/x-aiff",
+        ) => Some("aiff"),
+        (ChatArtifactDialect::OpenRouter | ChatArtifactDialect::Vllm, "audio/aac") => Some("aac"),
+        (ChatArtifactDialect::OpenRouter | ChatArtifactDialect::Vllm, "audio/ogg") => Some("ogg"),
+        (
+            ChatArtifactDialect::OpenRouter | ChatArtifactDialect::Vllm,
+            "audio/flac" | "audio/x-flac",
+        ) => Some("flac"),
+        (
+            ChatArtifactDialect::OpenRouter | ChatArtifactDialect::Vllm,
+            "audio/mp4" | "audio/x-m4a",
+        ) => Some("m4a"),
         _ => None,
     }
 }
@@ -232,6 +248,7 @@ fn is_file_media_type(dialect: ChatArtifactDialect, media_type: &str) -> bool {
     match dialect {
         ChatArtifactDialect::OpenAi => is_openai_file_media_type(media_type),
         ChatArtifactDialect::OpenRouter => media_type == "application/pdf",
+        ChatArtifactDialect::Vllm => false,
     }
 }
 
@@ -247,16 +264,6 @@ fn is_openai_file_media_type(media_type: &str) -> bool {
             | "application/vnd.ms-powerpoint"
             | "application/vnd.openxmlformats-officedocument.presentationml.presentation"
     )
-}
-
-fn is_inline_text_media_type(media_type: &str) -> bool {
-    media_type.starts_with("text/")
-        || matches!(
-            media_type,
-            "application/json" | "application/ld+json" | "application/xml"
-        )
-        || (media_type.starts_with("application/")
-            && (media_type.ends_with("+json") || media_type.ends_with("+xml")))
 }
 
 fn is_inline_video_media_type(media_type: &str) -> bool {
@@ -539,7 +546,7 @@ mod tests {
     }
 
     #[test]
-    fn textual_transport_is_bounded_and_rejects_invalid_utf8() {
+    fn textual_transport_is_bounded() {
         let transport = chat_artifact_transport(ChatArtifactDialect::OpenRouter, "text/markdown");
         assert!(matches!(
             transport,
@@ -547,16 +554,5 @@ mod tests {
         ));
         assert!(transport.accepts(ArtifactSize::new(MAX_INLINE_TEXT_ARTIFACT_BYTES)));
         assert!(!transport.accepts(ArtifactSize::new(MAX_INLINE_TEXT_ARTIFACT_BYTES + 1)));
-
-        let (markdown, prepared) = prepared_artifact("text/markdown", b"\xff\xfe");
-        assert!(matches!(
-            artifact_content(
-                "Read this",
-                [(&markdown, None)],
-                Some(&prepared),
-                ChatArtifactDialect::OpenRouter,
-            ),
-            Err(ChatArtifactSerializationError::InvalidUtf8TextArtifact { .. })
-        ));
     }
 }

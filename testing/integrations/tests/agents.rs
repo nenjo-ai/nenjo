@@ -13,7 +13,7 @@ use nenjo::manifest::{
 use nenjo::memory::MarkdownMemory;
 use nenjo::provider::{ModelProviderFactory, Provider, ToolFactory};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
-use nenjo::{Slug, Tool, ToolCategory, ToolResult};
+use nenjo::{Buffered, ChatInput, Slug, Tool, ToolCategory, ToolResult};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
 
@@ -212,9 +212,17 @@ async fn tool_call_round_trip() {
     assert!(specs.iter().any(|spec| spec.name == "list_knowledge_packs"));
 
     let output = match skip_on_provider_rate_limit(
-        runner
-            .chat("What's the weather like in San Francisco?")
-            .await,
+        async {
+            runner
+                .chat(
+                    ChatInput::new("What's the weather like in San Francisco?"),
+                    Buffered,
+                )
+                .await?
+                .output()
+                .await
+        }
+        .await,
         "chat should succeed",
     ) {
         Some(output) => output,
@@ -306,9 +314,17 @@ async fn memory_store_recall_with_real_llm() {
 
     // Ask the agent to store something
     let output = match skip_on_provider_rate_limit(
-        runner
-            .chat("Remember that my favorite programming language is Rust. Category: preferences. Scope: project.")
-            .await,
+        async {
+            runner
+                .chat(
+                    ChatInput::new("Remember that my favorite programming language is Rust. Category: preferences. Scope: project."),
+                    Buffered,
+                )
+                .await?
+                .output()
+                .await
+        }
+        .await,
         "store chat should succeed",
     ) {
         Some(output) => output,
@@ -354,9 +370,17 @@ async fn memory_store_recall_with_real_llm() {
 
     // Now ask the agent to forget it
     let output = match skip_on_provider_rate_limit(
-        runner
-            .chat("Forget what you stored about my favorite programming language. Scope: project.")
-            .await,
+        async {
+            runner
+                .chat(
+                    ChatInput::new("Forget what you stored about my favorite programming language. Scope: project."),
+                    Buffered,
+                )
+                .await?
+                .output()
+                .await
+        }
+        .await,
         "forget chat should succeed",
     ) {
         Some(output) => output,
@@ -477,9 +501,17 @@ async fn assigned_ability_tool_with_real_llm() {
 
     // Ask the agent to review some code — it should activate the code_review ability
     let output = match skip_on_provider_rate_limit(
-        runner
-            .chat("Please review this code:\n\n```rust\nfn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n```")
-            .await,
+        async {
+            runner
+                .chat(
+                    ChatInput::new("Please review this code:\n\n```rust\nfn add(a: i32, b: i32) -> i32 {\n    a - b\n}\n```"),
+                    Buffered,
+                )
+                .await?
+                .output()
+                .await
+        }
+        .await,
         "chat should succeed",
     ) {
         Some(output) => output,
@@ -622,9 +654,17 @@ async fn domain_expansion_with_real_llm() {
     // Ask the agent to write a PRD — the domain's prompt overlay should
     // guide it to produce structured output
     let output = match skip_on_provider_rate_limit(
-        prd_runner
-            .chat("Write a PRD for a user authentication system with SSO support")
-            .await,
+        async {
+            prd_runner
+                .chat(
+                    ChatInput::new("Write a PRD for a user authentication system with SSO support"),
+                    Buffered,
+                )
+                .await?
+                .output()
+                .await
+        }
+        .await,
         "chat should succeed",
     ) {
         Some(output) => output,

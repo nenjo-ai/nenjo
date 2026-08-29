@@ -5,7 +5,7 @@ use async_trait::async_trait;
 use nenjo_platform::api_client::ApiClient;
 use uuid::Uuid;
 
-use crate::{ContentKey, ContentScope, WorkerAuthProvider};
+use crate::{ContentKey, ContentScope, WorkerAuthProvider, WorkerEnrollmentBinding};
 
 #[async_trait]
 pub trait EnvelopeKeyProvider: Send + Sync + 'static {
@@ -33,7 +33,7 @@ pub trait EnvelopeKeyProvider: Send + Sync + 'static {
 pub struct EnrollmentBackedKeyProvider {
     auth_provider: Arc<WorkerAuthProvider>,
     api: Arc<ApiClient>,
-    api_key_id: Uuid,
+    enrollment_binding: WorkerEnrollmentBinding,
     bootstrap_user_id: Uuid,
 }
 
@@ -43,13 +43,13 @@ impl EnrollmentBackedKeyProvider {
     pub fn new(
         auth_provider: impl Into<Arc<WorkerAuthProvider>>,
         api: impl Into<Arc<ApiClient>>,
-        api_key_id: Uuid,
+        enrollment_binding: WorkerEnrollmentBinding,
         bootstrap_user_id: Uuid,
     ) -> Self {
         Self {
             auth_provider: auth_provider.into(),
             api: api.into(),
-            api_key_id,
+            enrollment_binding,
             bootstrap_user_id,
         }
     }
@@ -72,7 +72,7 @@ impl EnvelopeKeyProvider for EnrollmentBackedKeyProvider {
         self.auth_provider
             .sync_worker_enrollment(
                 self.api.as_ref(),
-                self.api_key_id,
+                self.enrollment_binding,
                 self.bootstrap_user_id,
                 None,
             )
@@ -93,7 +93,7 @@ impl EnvelopeKeyProvider for EnrollmentBackedKeyProvider {
         self.auth_provider
             .sync_worker_enrollment(
                 self.api.as_ref(),
-                self.api_key_id,
+                self.enrollment_binding,
                 self.bootstrap_user_id,
                 None,
             )
@@ -127,7 +127,7 @@ impl EnvelopeKeyProvider for EnrollmentBackedKeyProvider {
         self.auth_provider
             .sync_worker_enrollment(
                 self.api.as_ref(),
-                self.api_key_id,
+                self.enrollment_binding,
                 self.bootstrap_user_id,
                 None,
             )
@@ -143,7 +143,7 @@ impl EnvelopeKeyProvider for EnrollmentBackedKeyProvider {
         self.auth_provider
             .sync_worker_enrollment(
                 self.api.as_ref(),
-                self.api_key_id,
+                self.enrollment_binding,
                 self.bootstrap_user_id,
                 None,
             )

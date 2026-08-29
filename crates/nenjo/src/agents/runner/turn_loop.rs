@@ -8,6 +8,7 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::time::Instant;
 
 use anyhow::{Context, Result};
 use nenjo_models::ModelProvider;
@@ -17,10 +18,12 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 use uuid::Uuid;
 
+use super::chat::ProviderResponseDelivery;
 use super::compaction::{
     compact_messages_for_payload, compact_messages_with_summary, estimate_serialized_bytes,
     estimate_serialized_messages_bytes, truncate, truncate_old_tool_arguments, truncate_str,
 };
+use super::tool_calls::{normalize_tool_call_arguments, tool_for_call};
 use super::types::{
     ToolCall, TurnEvent, TurnInputReceiver, TurnLoopConfig, TurnLoopError, TurnOutput,
 };
@@ -28,9 +31,6 @@ use crate::agents::async_ops::{
     AsyncOpWaitFilter, AsyncOperationRuntime, scope_current_async_operation_runtime,
 };
 use crate::agents::instance::AgentInstance;
-use crate::agents::respond::{
-    RESPOND_TO_USER_TOOL_NAME, RespondToUserStatus, TERMINAL_RESPONSE_BLOCKED_BY_ASYNC_OPS,
-};
 use crate::hooks::{
     ActiveHook, ActiveHookScope, HookBlock, HookEvent, HookRuntime, HookRuntimeEvent,
 };
@@ -57,18 +57,6 @@ impl TurnCompletion {
             Self::RequireTool(tool) => Some(tool),
         }
     }
-}
-
-fn tool_for_call<'a>(
-    tools: &'a [Arc<dyn Tool>],
-    tool_call: &nenjo_models::ToolCall,
-) -> Option<&'a Arc<dyn Tool>> {
-    tools.iter().find(|t| {
-        let name = t.name();
-        name == tool_call.name
-            || nenjo_models::sanitize_tool_name(name) == tool_call.name
-            || nenjo_models::sanitize_tool_name_lenient(name) == tool_call.name
-    })
 }
 
 fn provider_tool_metadata(trace: &ProviderToolTrace) -> serde_json::Value {
@@ -154,7 +142,7 @@ where
     P: ModelProvider + ?Sized,
 {
     request.ensure_artifacts_prepared()?;
-    let (stream_tx, mut stream_rx) = mpsc::unbounded_channel();
+    let (stream_tx, mut stream_rx) = mpsc::channel(64);
     let response = provider.chat_stream(request, model, temperature, stream_tx);
     tokio::pin!(response);
 
@@ -162,6 +150,7 @@ where
     let mut started_provider_tools = HashSet::new();
     let mut completed_provider_tools = HashSet::new();
     let mut emitted_text_delta = false;
+    let provider_request_started_at = Instant::now();
 
     loop {
         tokio::select! {
@@ -172,10 +161,28 @@ where
                 match event {
                     ProviderStreamEvent::TextDelta(delta) => {
                         if !delta.is_empty() {
+                            if !emitted_text_delta {
+                                debug!(
+                                    request_id,
+                                    provider_to_first_delta_us = provider_request_started_at.elapsed().as_micros(),
+                                    "Received first provider text delta"
+                                );
+                            }
                             emitted_text_delta = true;
                             emit_event(
                                 events_tx,
                                 TurnEvent::AssistantTextDelta {
+                                    request_id: request_id.to_string(),
+                                    delta,
+                                },
+                            );
+                        }
+                    }
+                    ProviderStreamEvent::ReasoningDelta(delta) => {
+                        if !delta.is_empty() {
+                            emit_event(
+                                events_tx,
+                                TurnEvent::AssistantReasoningDelta {
                                     request_id: request_id.to_string(),
                                     delta,
                                 },
@@ -199,6 +206,27 @@ where
                         started_provider_tools.insert(trace.id.clone());
                         completed_provider_tools.insert(trace.id);
                     }
+                    ProviderStreamEvent::RetryScheduled {
+                        provider,
+                        model,
+                        attempt,
+                        max_attempts,
+                        delay_ms,
+                        code,
+                        message,
+                    } => emit_event(
+                        events_tx,
+                        TurnEvent::ProviderRetryScheduled {
+                            request_id: request_id.to_string(),
+                            provider,
+                            model,
+                            attempt,
+                            max_attempts,
+                            delay_ms,
+                            code,
+                            message,
+                        },
+                    ),
                 }
             }
             result = &mut response => {
@@ -207,10 +235,28 @@ where
                     match event {
                         ProviderStreamEvent::TextDelta(delta) => {
                             if !delta.is_empty() {
+                                if !emitted_text_delta {
+                                    debug!(
+                                        request_id,
+                                        provider_to_first_delta_us = provider_request_started_at.elapsed().as_micros(),
+                                        "Received first provider text delta"
+                                    );
+                                }
                                 emitted_text_delta = true;
                                 emit_event(
                                     events_tx,
                                     TurnEvent::AssistantTextDelta {
+                                        request_id: request_id.to_string(),
+                                        delta,
+                                    },
+                                );
+                            }
+                        }
+                        ProviderStreamEvent::ReasoningDelta(delta) => {
+                            if !delta.is_empty() {
+                                emit_event(
+                                    events_tx,
+                                    TurnEvent::AssistantReasoningDelta {
                                         request_id: request_id.to_string(),
                                         delta,
                                     },
@@ -234,8 +280,35 @@ where
                             started_provider_tools.insert(trace.id.clone());
                             completed_provider_tools.insert(trace.id);
                         }
+                        ProviderStreamEvent::RetryScheduled {
+                            provider,
+                            model,
+                            attempt,
+                            max_attempts,
+                            delay_ms,
+                            code,
+                            message,
+                        } => emit_event(
+                            events_tx,
+                            TurnEvent::ProviderRetryScheduled {
+                                request_id: request_id.to_string(),
+                                provider,
+                                model,
+                                attempt,
+                                max_attempts,
+                                delay_ms,
+                                code,
+                                message,
+                            },
+                        ),
                     }
                 }
+                debug!(
+                    request_id,
+                    provider_request_duration_us = provider_request_started_at.elapsed().as_micros(),
+                    streamed_text_delta = emitted_text_delta,
+                    "Provider request finished"
+                );
                 return Ok((
                     response,
                     started_provider_tools,
@@ -243,6 +316,52 @@ where
                     emitted_text_delta,
                 ));
             }
+        }
+    }
+}
+
+struct ProviderChatExecution<'a> {
+    request_id: &'a str,
+    events_tx: Option<&'a mpsc::UnboundedSender<TurnEvent>>,
+    cancel: &'a CancellationToken,
+    delivery: ProviderResponseDelivery,
+}
+
+async fn chat_with_provider<P>(
+    provider: &P,
+    request: ChatRequest<'_>,
+    model: &str,
+    temperature: f64,
+    execution: ProviderChatExecution<'_>,
+) -> anyhow::Result<(
+    nenjo_models::ChatResponse,
+    HashSet<String>,
+    HashSet<String>,
+    bool,
+)>
+where
+    P: ModelProvider + ?Sized,
+{
+    match execution.delivery {
+        ProviderResponseDelivery::Buffered => {
+            request.ensure_artifacts_prepared()?;
+            let response = tokio::select! {
+                _ = execution.cancel.cancelled() => anyhow::bail!("execution cancelled"),
+                response = provider.chat(request, model, temperature) => response?,
+            };
+            Ok((response, HashSet::new(), HashSet::new(), false))
+        }
+        ProviderResponseDelivery::Streaming => {
+            chat_with_provider_stream(
+                provider,
+                request,
+                model,
+                temperature,
+                execution.request_id,
+                execution.events_tx,
+                execution.cancel,
+            )
+            .await
         }
     }
 }
@@ -428,25 +547,6 @@ fn sanitize_tool_text_preview(text: &str) -> Option<String> {
     }
 }
 
-fn reject_terminal_respond_to_user_results_while_async_ops_open(
-    tools: &[Arc<dyn Tool>],
-    tool_results: &mut [(&nenjo_models::ToolCall, ToolResult)],
-) {
-    for (tool_call, tool_result) in tool_results {
-        if !tool_result.success || !RespondToUserStatus::from_tool_call(tool_call).is_terminal() {
-            continue;
-        }
-        let is_respond_to_user = tool_for_call(tools, tool_call)
-            .is_some_and(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME);
-        if !is_respond_to_user {
-            continue;
-        }
-        tool_result.success = false;
-        tool_result.output.clear();
-        tool_result.error = Some(TERMINAL_RESPONSE_BLOCKED_BY_ASYNC_OPS.into());
-    }
-}
-
 /// Run the agentic turn loop.
 ///
 /// Takes pre-built messages (caller handles prompt construction) and loops:
@@ -461,6 +561,7 @@ pub async fn run<P>(
     pause_token: Option<super::types::PauseToken>,
     turn_input: Option<TurnInputReceiver>,
     completion: TurnCompletion,
+    response_delivery: ProviderResponseDelivery,
 ) -> Result<TurnOutput>
 where
     P: ProviderRuntime,
@@ -634,16 +735,9 @@ where
                 }
 
                 // Call LLM
-                let hide_final_response_tool =
-                    completion.required_tool() != Some(RESPOND_TO_USER_TOOL_NAME);
                 let local_tool_specs = agent
                     .visible_local_tool_specs()
-                    .await
-                    .into_iter()
-                    .filter(|spec| {
-                        !(hide_final_response_tool && spec.name == RESPOND_TO_USER_TOOL_NAME)
-                    })
-                    .collect::<Vec<_>>();
+                    .await;
                 let tools_ref = if local_tool_specs.is_empty() {
                     None
                 } else {
@@ -744,27 +838,31 @@ where
                     streamed_provider_tool_completed_ids,
                     streamed_text_delta,
                 ) =
-                    chat_with_provider_stream(
+                    chat_with_provider(
                         model_provider,
                         request,
                         model,
                         temperature,
-                        &model_request_id,
-                        events_tx.as_ref(),
-                        &cancel,
+                        ProviderChatExecution {
+                            request_id: &model_request_id,
+                            events_tx: events_tx.as_ref(),
+                            cancel: &cancel,
+                            delivery: response_delivery,
+                        },
                     )
                     .await?;
-                let original_tool_call_count = response.tool_calls.len();
-                if response.tool_calls.len() != original_tool_call_count {
-                    warn!(
-                        agent = agent_name,
-                        model,
-                        original_tool_call_count,
-                        deduped_tool_call_count = response.tool_calls.len(),
-                        "Deduped repeated tool calls from a single LLM response"
-                    );
+                for tool_call in &mut response.tool_calls {
+                    let normalized_fields = normalize_tool_call_arguments(tools, tool_call);
+                    if normalized_fields > 0 {
+                        warn!(
+                            agent = agent_name,
+                            model,
+                            tool = %tool_call.name,
+                            normalized_fields,
+                            "Normalized JSON-encoded structured tool arguments"
+                        );
+                    }
                 }
-
                 // Strip <think>…</think> blocks from reasoning models
                 // (DeepSeek, MiniMax, etc.) before text enters messages or NATS.
                 if let Some(ref text) = response.text {
@@ -796,6 +894,7 @@ where
                 if let Some(text) = response.text.as_deref()
                     && !text.is_empty()
                     && !streamed_text_delta
+                    && response_delivery == ProviderResponseDelivery::Streaming
                 {
                     emit_event(
                         events_tx.as_ref(),
@@ -903,7 +1002,7 @@ where
                         },
                     );
 
-                    let mut tool_results: Vec<(&nenjo_models::ToolCall, ToolResult)> =
+                    let tool_results: Vec<(&nenjo_models::ToolCall, ToolResult)> =
                         if run_parallel {
                             let message_snapshot = messages.clone();
                             let futs = response.tool_calls.iter().map(|tc| {
@@ -947,13 +1046,6 @@ where
 
                     total_tool_calls += tool_results.len() as u32;
 
-                    if agent.runtime.async_ops.has_open_model_visible().await {
-                        reject_terminal_respond_to_user_results_while_async_ops_open(
-                            tools,
-                            &mut tool_results,
-                        );
-                    }
-
                     // Check if any executed tool is terminal.
                     // Terminal tools signal that the turn loop should stop immediately
                     // without feeding the tool result back to the LLM.
@@ -965,7 +1057,6 @@ where
                                         .required_tool()
                                         .is_none_or(|required| tool.name() == required)
                             })
-                            && RespondToUserStatus::from_tool_call(tc).is_terminal()
                     });
                     let has_terminal_attempt = tool_results.iter().any(|(tc, _)| {
                         tool_for_call(tools, tc)
@@ -1034,31 +1125,6 @@ where
 
                         result_messages.push(ToolResultMessage::new(tool_call.id.clone(), output));
 
-                        if tool_result.success
-                            && tool_for_call(tools, tool_call)
-                                .is_some_and(|tool| tool.name() == RESPOND_TO_USER_TOOL_NAME)
-                        {
-                            let status = RespondToUserStatus::from_tool_call(tool_call);
-                            let message = tool_result.output.text_content().trim().to_string();
-                            if !message.is_empty() {
-                                let assistant_message =
-                                    ConversationMessage::assistant(message.clone());
-                                messages.push(assistant_message.clone());
-                                emit_event(
-                                    events_tx.as_ref(),
-                                    TurnEvent::AssistantResponse {
-                                        message,
-                                        status: status.to_string(),
-                                    },
-                                );
-                                emit_event(
-                                    events_tx.as_ref(),
-                                    TurnEvent::TranscriptMessage {
-                                        message: assistant_message,
-                                    },
-                                );
-                            }
-                        }
                     }
                     let tool_results_message = ConversationMessage::ToolResults(result_messages);
                     messages.push(tool_results_message.clone());
@@ -1071,18 +1137,13 @@ where
 
                     // Terminal tool: stop the loop. The verdict is already recorded
                     // in the assistant message's tool_calls for extraction.
-                    if let Some((terminal_tool_call, terminal_tool_result)) = terminal_result {
+                    if let Some((_, terminal_tool_result)) = terminal_result {
                         debug!(
                             agent = agent_name,
                             model, "Terminal tool called, ending turn loop"
                         );
                         let terminal_tool_text = terminal_tool_result.output.text_content();
-                        let terminal_tool_name = tool_for_call(tools, terminal_tool_call)
-                            .map(|tool| tool.name())
-                            .unwrap_or_default();
-                        final_text = if completion.required_tool().is_some()
-                            || terminal_tool_name == RESPOND_TO_USER_TOOL_NAME
-                        {
+                        final_text = if completion.required_tool().is_some() {
                             terminal_tool_text
                         } else {
                             response
@@ -1122,6 +1183,13 @@ where
 
                 // No tool calls — check if we have a final text response.
                 let text = response.text.unwrap_or_default();
+
+                if !response.finish_reason.permits_natural_completion() {
+                    return Err(TurnLoopError::ProviderIncomplete {
+                        reason: format!("{:?}", response.finish_reason),
+                    }
+                    .into());
+                }
 
                 // Empty response (no text, no tool calls) — some models occasionally
                 // return these.  Retry instead of treating as final answer.
@@ -1656,8 +1724,58 @@ fn active_hook_source(active: &ActiveHook) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::agents::async_ops::AsyncOpManager;
-    use crate::agents::respond::RespondToUserTool;
+    use std::sync::atomic::AtomicUsize;
+
+    struct DeliveryProbe {
+        buffered_calls: AtomicUsize,
+        streaming_calls: AtomicUsize,
+    }
+
+    impl DeliveryProbe {
+        fn new() -> Self {
+            Self {
+                buffered_calls: AtomicUsize::new(0),
+                streaming_calls: AtomicUsize::new(0),
+            }
+        }
+
+        fn response() -> nenjo_models::ChatResponse {
+            nenjo_models::ChatResponse {
+                text: Some("complete".to_string()),
+                tool_calls: Vec::new(),
+                provider_tool_calls: Vec::new(),
+                usage: nenjo_models::TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
+            }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for DeliveryProbe {
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<nenjo_models::ChatResponse> {
+            self.buffered_calls.fetch_add(1, Ordering::SeqCst);
+            Ok(Self::response())
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+            events: mpsc::Sender<ProviderStreamEvent>,
+        ) -> anyhow::Result<nenjo_models::ChatResponse> {
+            self.streaming_calls.fetch_add(1, Ordering::SeqCst);
+            events
+                .send(ProviderStreamEvent::TextDelta("partial".to_string()))
+                .await?;
+            Ok(Self::response())
+        }
+    }
 
     #[test]
     fn compaction_budget_prefers_configured_context_window() {
@@ -1669,64 +1787,60 @@ mod tests {
         assert_eq!(compaction_context_budget(None, None), 80_000);
     }
 
-    #[test]
-    fn post_batch_guard_rejects_terminal_respond_to_user_result() {
-        let tools: Vec<Arc<dyn Tool>> =
-            vec![Arc::new(RespondToUserTool::new(AsyncOpManager::new()))];
-        let tool_call = nenjo_models::ToolCall {
-            id: "call_1".into(),
-            name: RESPOND_TO_USER_TOOL_NAME.into(),
-            arguments: serde_json::json!({
-                "message": "Done",
-                "status": "completed",
-            })
-            .to_string(),
+    #[tokio::test]
+    async fn provider_delivery_selects_one_exhaustive_transport() {
+        let provider = DeliveryProbe::new();
+        let messages = vec![ConversationMessage::user("hello")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
         };
-        let mut results = vec![(
-            &tool_call,
-            ToolResult {
-                success: true,
-                output: "Done".into(),
-                error: None,
+        let cancel = CancellationToken::new();
+        let (events_tx, mut events_rx) = mpsc::unbounded_channel();
+
+        let (_, _, _, emitted_delta) = chat_with_provider(
+            &provider,
+            request,
+            "model",
+            0.0,
+            ProviderChatExecution {
+                request_id: "buffered-request",
+                events_tx: Some(&events_tx),
+                cancel: &cancel,
+                delivery: ProviderResponseDelivery::Buffered,
             },
-        )];
+        )
+        .await
+        .expect("buffered response");
 
-        reject_terminal_respond_to_user_results_while_async_ops_open(&tools, &mut results);
+        assert!(!emitted_delta);
+        assert_eq!(provider.buffered_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.streaming_calls.load(Ordering::SeqCst), 0);
+        assert!(events_rx.try_recv().is_err());
 
-        assert!(!results[0].1.success);
-        assert!(results[0].1.output.is_empty());
-        assert_eq!(
-            results[0].1.error.as_deref(),
-            Some(TERMINAL_RESPONSE_BLOCKED_BY_ASYNC_OPS)
-        );
-    }
-
-    #[test]
-    fn post_batch_guard_keeps_in_progress_respond_to_user_result() {
-        let tools: Vec<Arc<dyn Tool>> =
-            vec![Arc::new(RespondToUserTool::new(AsyncOpManager::new()))];
-        let tool_call = nenjo_models::ToolCall {
-            id: "call_1".into(),
-            name: RESPOND_TO_USER_TOOL_NAME.into(),
-            arguments: serde_json::json!({
-                "message": "Still working",
-                "status": "in_progress",
-            })
-            .to_string(),
-        };
-        let mut results = vec![(
-            &tool_call,
-            ToolResult {
-                success: true,
-                output: "Still working".into(),
-                error: None,
+        let (_, _, _, emitted_delta) = chat_with_provider(
+            &provider,
+            request,
+            "model",
+            0.0,
+            ProviderChatExecution {
+                request_id: "streaming-request",
+                events_tx: Some(&events_tx),
+                cancel: &cancel,
+                delivery: ProviderResponseDelivery::Streaming,
             },
-        )];
+        )
+        .await
+        .expect("streaming response");
 
-        reject_terminal_respond_to_user_results_while_async_ops_open(&tools, &mut results);
-
-        assert!(results[0].1.success);
-        assert_eq!(results[0].1.output, "Still working");
-        assert_eq!(results[0].1.error, None);
+        assert!(emitted_delta);
+        assert_eq!(provider.buffered_calls.load(Ordering::SeqCst), 1);
+        assert_eq!(provider.streaming_calls.load(Ordering::SeqCst), 1);
+        assert!(matches!(
+            events_rx.try_recv(),
+            Ok(TurnEvent::AssistantTextDelta { delta, .. }) if delta == "partial"
+        ));
     }
 }

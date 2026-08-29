@@ -1021,16 +1021,27 @@ fn stream_raw_provider_tool_phase(value: &Value) -> Option<&'static str> {
     }
 }
 
-fn handle_responses_stream_value(
+async fn send_provider_stream_event(
+    events: &tokio::sync::mpsc::Sender<ProviderStreamEvent>,
+    event: ProviderStreamEvent,
+) -> anyhow::Result<()> {
+    events
+        .send(event)
+        .await
+        .map_err(|_| anyhow::anyhow!("provider stream consumer closed"))
+}
+
+async fn handle_responses_stream_value(
     value: Value,
     state: &mut ResponsesStreamState,
-    events: &tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
-) {
+    events: &tokio::sync::mpsc::Sender<ProviderStreamEvent>,
+) -> anyhow::Result<()> {
     if let Some(delta) = stream_text_delta(&value)
         && !delta.is_empty()
     {
         state.text.push_str(delta);
-        let _ = events.send(ProviderStreamEvent::TextDelta(delta.to_string()));
+        send_provider_stream_event(events, ProviderStreamEvent::TextDelta(delta.to_string()))
+            .await?;
     }
 
     if let Some(response) = stream_response(&value) {
@@ -1045,40 +1056,65 @@ fn handle_responses_stream_value(
         match phase {
             Some("started") => {
                 if state.started_provider_tools.insert(trace.id.clone()) {
-                    let _ = events.send(ProviderStreamEvent::ProviderToolStarted(trace));
+                    send_provider_stream_event(
+                        events,
+                        ProviderStreamEvent::ProviderToolStarted(trace),
+                    )
+                    .await?;
                 }
             }
             Some("completed") => {
                 if state.started_provider_tools.insert(trace.id.clone()) {
-                    let _ = events.send(ProviderStreamEvent::ProviderToolStarted(trace.clone()));
+                    send_provider_stream_event(
+                        events,
+                        ProviderStreamEvent::ProviderToolStarted(trace.clone()),
+                    )
+                    .await?;
                 }
                 if state.completed_provider_tools.insert(trace.id.clone()) {
-                    let _ = events.send(ProviderStreamEvent::ProviderToolCompleted(trace));
+                    send_provider_stream_event(
+                        events,
+                        ProviderStreamEvent::ProviderToolCompleted(trace),
+                    )
+                    .await?;
                 }
             }
             _ => {}
         }
-        return;
+        return Ok(());
     }
 
     if let Some(trace) = stream_raw_provider_tool_trace(&value) {
         match stream_raw_provider_tool_phase(&value) {
             Some("completed") => {
                 if state.started_provider_tools.insert(trace.id.clone()) {
-                    let _ = events.send(ProviderStreamEvent::ProviderToolStarted(trace.clone()));
+                    send_provider_stream_event(
+                        events,
+                        ProviderStreamEvent::ProviderToolStarted(trace.clone()),
+                    )
+                    .await?;
                 }
                 if state.completed_provider_tools.insert(trace.id.clone()) {
-                    let _ = events.send(ProviderStreamEvent::ProviderToolCompleted(trace));
+                    send_provider_stream_event(
+                        events,
+                        ProviderStreamEvent::ProviderToolCompleted(trace),
+                    )
+                    .await?;
                 }
             }
             Some("started") => {
                 if state.started_provider_tools.insert(trace.id.clone()) {
-                    let _ = events.send(ProviderStreamEvent::ProviderToolStarted(trace));
+                    send_provider_stream_event(
+                        events,
+                        ProviderStreamEvent::ProviderToolStarted(trace),
+                    )
+                    .await?;
                 }
             }
             _ => {}
         }
     }
+    Ok(())
 }
 
 impl XAiProvider {
@@ -1162,12 +1198,14 @@ impl XAiProvider {
         let text = responses_text(&response);
         let tool_calls = responses_tool_calls(&response);
         let provider_tool_calls = responses_provider_tool_traces(&response);
+        let finish_reason = crate::FinishReason::from_provider(None, !tool_calls.is_empty());
 
         Ok(ChatResponse {
             text,
             tool_calls,
             provider_tool_calls,
             usage,
+            finish_reason,
         })
     }
 
@@ -1177,7 +1215,7 @@ impl XAiProvider {
         model: &str,
         temperature: f64,
         native_tools: &[NativeModelToolId],
-        events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+        events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
     ) -> anyhow::Result<ChatResponse> {
         let api_key = self.api_key()?;
         let body = ResponsesRequest {
@@ -1223,7 +1261,7 @@ impl XAiProvider {
                         continue;
                     }
                     if let Ok(value) = serde_json::from_str::<Value>(data) {
-                        handle_responses_stream_value(value, &mut state, &events);
+                        handle_responses_stream_value(value, &mut state, &events).await?;
                     }
                 }
             }
@@ -1239,7 +1277,7 @@ impl XAiProvider {
                     continue;
                 }
                 if let Ok(value) = serde_json::from_str::<Value>(data) {
-                    handle_responses_stream_value(value, &mut state, &events);
+                    handle_responses_stream_value(value, &mut state, &events).await?;
                 }
             }
         }
@@ -1256,12 +1294,14 @@ impl XAiProvider {
         let text = responses_text(&response);
         let tool_calls = responses_tool_calls(&response);
         let provider_tool_calls = responses_provider_tool_traces(&response);
+        let finish_reason = crate::FinishReason::from_provider(None, !tool_calls.is_empty());
 
         Ok(ChatResponse {
             text,
             tool_calls,
             provider_tool_calls,
             usage,
+            finish_reason,
         })
     }
 
@@ -1662,7 +1702,7 @@ impl ModelProvider for XAiProvider {
         request: ChatRequest<'_>,
         model: &str,
         temperature: f64,
-        events: tokio::sync::mpsc::UnboundedSender<ProviderStreamEvent>,
+        events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
     ) -> anyhow::Result<ChatResponse> {
         request.reject_artifact_inputs()?;
         if let Some(native_tools) = request.native_tools
@@ -2084,9 +2124,9 @@ mod tests {
         assert_eq!(traces[0].citations.len(), 1);
     }
 
-    #[test]
-    fn xai_stream_parser_emits_provider_tool_start_and_completion() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn xai_stream_parser_emits_provider_tool_start_and_completion() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut state = ResponsesStreamState::default();
 
         handle_responses_stream_value(
@@ -2104,7 +2144,9 @@ mod tests {
             }),
             &mut state,
             &tx,
-        );
+        )
+        .await
+        .unwrap();
         handle_responses_stream_value(
             json!({
                 "type": "response.output_item.done",
@@ -2119,7 +2161,9 @@ mod tests {
             }),
             &mut state,
             &tx,
-        );
+        )
+        .await
+        .unwrap();
 
         match rx.try_recv().expect("start event") {
             ProviderStreamEvent::ProviderToolStarted(trace) => {
@@ -2138,9 +2182,9 @@ mod tests {
         }
     }
 
-    #[test]
-    fn xai_stream_parser_tolerates_raw_provider_tool_events() {
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    #[tokio::test]
+    async fn xai_stream_parser_tolerates_raw_provider_tool_events() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(64);
         let mut state = ResponsesStreamState::default();
 
         handle_responses_stream_value(
@@ -2151,7 +2195,9 @@ mod tests {
             }),
             &mut state,
             &tx,
-        );
+        )
+        .await
+        .unwrap();
 
         match rx.try_recv().expect("start event") {
             ProviderStreamEvent::ProviderToolStarted(trace) => {
@@ -2161,5 +2207,30 @@ mod tests {
             }
             other => panic!("unexpected event: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn xai_stream_applies_backpressure_instead_of_failing() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        tx.send(ProviderStreamEvent::TextDelta("first".to_string()))
+            .await
+            .unwrap();
+
+        let blocked_send = tokio::spawn(async move {
+            send_provider_stream_event(&tx, ProviderStreamEvent::TextDelta("second".to_string()))
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!blocked_send.is_finished());
+
+        assert!(matches!(
+            rx.recv().await,
+            Some(ProviderStreamEvent::TextDelta(delta)) if delta == "first"
+        ));
+        blocked_send.await.unwrap().unwrap();
+        assert!(matches!(
+            rx.recv().await,
+            Some(ProviderStreamEvent::TextDelta(delta)) if delta == "second"
+        ));
     }
 }

@@ -7,7 +7,6 @@ pub(crate) mod delegation;
 pub mod error;
 pub mod instance;
 pub mod prompts;
-pub(crate) mod respond;
 pub mod runner;
 pub(crate) mod sub_agents;
 
@@ -19,6 +18,10 @@ pub use builder::AgentBuilder;
 pub use error::AgentError;
 pub(crate) use instance::AgentExecutionMode;
 pub use instance::AgentInstance;
+pub use runner::chat::{
+    Buffered, BufferedChatEvent, BufferedDelta, ChatDelivery, ChatHandle, Streaming,
+    StreamingChatEvent,
+};
 pub use runner::types::{
     AsyncOperationTranscriptEvent, SubAgentTranscriptEvent, ToolCall, TurnEvent, TurnLoopConfig,
     TurnLoopError, TurnOutput,

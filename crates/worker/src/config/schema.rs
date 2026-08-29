@@ -56,6 +56,15 @@ pub struct Config {
     pub reliability: ReliabilityConfig,
 
     #[serde(default)]
+    pub routines: RoutineConfig,
+
+    #[serde(default)]
+    pub vllm: VllmConfig,
+
+    #[serde(default)]
+    pub pdf: PdfConfig,
+
+    #[serde(default)]
     pub security: SecurityConfig,
 
     #[serde(default)]
@@ -116,6 +125,22 @@ pub struct MediaProviderConfig {
     pub model: String,
     #[serde(default)]
     pub capabilities: Vec<MediaOperation>,
+}
+
+// ── vLLM ────────────────────────────────────────────────────────
+
+/// Worker-local behavior for first-class vLLM endpoints.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct VllmConfig {
+    /// Request OpenAI-compatible SSE responses instead of one buffered response.
+    #[serde(default = "default_true")]
+    pub streaming: bool,
+}
+
+impl Default for VllmConfig {
+    fn default() -> Self {
+        Self { streaming: true }
+    }
 }
 
 // ── Browser (friendly-service browsing only) ───────────────────
@@ -453,6 +478,128 @@ impl Default for ReliabilityConfig {
             backoff_ms: default_backoff_ms(),
             fallback_providers: Vec::new(),
             model_fallbacks: std::collections::HashMap::new(),
+        }
+    }
+}
+
+// ── Routine execution ───────────────────────────────────────────
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct RoutineConfig {
+    #[serde(default = "default_gate_max_retries")]
+    pub default_gate_max_retries: u32,
+    #[serde(default = "max_gate_max_retries")]
+    pub max_gate_max_retries: u32,
+}
+
+fn default_gate_max_retries() -> u32 {
+    3
+}
+
+fn max_gate_max_retries() -> u32 {
+    10
+}
+
+impl RoutineConfig {
+    pub fn execution_config(self) -> Result<nenjo::routines::RoutineExecutionConfig> {
+        nenjo::routines::RoutineExecutionConfig::new(
+            nenjo::routines::GateRetryLimit::new(self.default_gate_max_retries),
+            nenjo::routines::GateRetryLimit::new(self.max_gate_max_retries),
+        )
+        .map_err(Into::into)
+    }
+}
+
+impl Default for RoutineConfig {
+    fn default() -> Self {
+        Self {
+            default_gate_max_retries: default_gate_max_retries(),
+            max_gate_max_retries: max_gate_max_retries(),
+        }
+    }
+}
+
+// ── PDF document processing ──────────────────────────────────────
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PdfConfig {
+    /// Maximum accepted pages per PDF. The hard configuration ceiling is 200.
+    #[serde(default = "default_pdf_max_pages")]
+    pub max_pages: usize,
+    /// Maximum number of blocking page-render workers used for one PDF.
+    #[serde(default = "default_pdf_render_concurrency")]
+    pub render_concurrency: usize,
+    /// Pages sent together to an assigned image-analysis model.
+    #[serde(default = "default_pdf_vision_batch_pages")]
+    pub vision_batch_pages: usize,
+    /// Pixel length of each rendered page's longest edge.
+    #[serde(default = "default_pdf_render_max_edge")]
+    pub render_max_edge: u16,
+    /// Aggregate decoded pixel budget across all rendered pages.
+    #[serde(default = "default_pdf_max_total_pixels")]
+    pub max_total_pixels: u64,
+    /// Aggregate encoded PNG byte budget across all rendered pages.
+    #[serde(default = "default_pdf_max_rendered_bytes")]
+    pub max_rendered_bytes: u64,
+}
+
+fn default_pdf_max_pages() -> usize {
+    50
+}
+
+fn default_pdf_render_concurrency() -> usize {
+    4
+}
+
+fn default_pdf_vision_batch_pages() -> usize {
+    4
+}
+
+fn default_pdf_render_max_edge() -> u16 {
+    1_600
+}
+
+fn default_pdf_max_total_pixels() -> u64 {
+    100_000_000
+}
+
+fn default_pdf_max_rendered_bytes() -> u64 {
+    128 * 1024 * 1024
+}
+
+impl PdfConfig {
+    fn validate(&self) -> Result<()> {
+        if !(1..=200).contains(&self.max_pages) {
+            anyhow::bail!("pdf.max_pages must be between 1 and 200");
+        }
+        if !(1..=16).contains(&self.render_concurrency) {
+            anyhow::bail!("pdf.render_concurrency must be between 1 and 16");
+        }
+        if !(1..=50).contains(&self.vision_batch_pages) {
+            anyhow::bail!("pdf.vision_batch_pages must be between 1 and 50");
+        }
+        if !(256..=4_096).contains(&self.render_max_edge) {
+            anyhow::bail!("pdf.render_max_edge must be between 256 and 4096");
+        }
+        if self.max_total_pixels == 0 {
+            anyhow::bail!("pdf.max_total_pixels must be greater than zero");
+        }
+        if self.max_rendered_bytes == 0 {
+            anyhow::bail!("pdf.max_rendered_bytes must be greater than zero");
+        }
+        Ok(())
+    }
+}
+
+impl Default for PdfConfig {
+    fn default() -> Self {
+        Self {
+            max_pages: default_pdf_max_pages(),
+            render_concurrency: default_pdf_render_concurrency(),
+            vision_batch_pages: default_pdf_vision_batch_pages(),
+            render_max_edge: default_pdf_render_max_edge(),
+            max_total_pixels: default_pdf_max_total_pixels(),
+            max_rendered_bytes: default_pdf_max_rendered_bytes(),
         }
     }
 }
@@ -824,6 +971,9 @@ impl Default for Config {
             nats_url: None,
             autonomy: AutonomyConfig::default(),
             reliability: ReliabilityConfig::default(),
+            routines: RoutineConfig::default(),
+            vllm: VllmConfig::default(),
+            pdf: PdfConfig::default(),
             security: SecurityConfig::default(),
             agent: AgentConfig::default(),
             memory: MemoryConfig::default(),
@@ -907,7 +1057,7 @@ impl Config {
             config
         };
 
-        config.apply_env_overrides();
+        config.apply_env_overrides()?;
         config.validate()?;
 
         // Configure git credentials, identity, and signing.
@@ -924,7 +1074,7 @@ impl Config {
     /// env vars (e.g. `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`). The first
     /// non-empty match wins and is inserted into `model_provider_api_keys`,
     /// overriding any value from the config file.
-    pub fn apply_env_overrides(&mut self) {
+    pub fn apply_env_overrides(&mut self) -> Result<()> {
         if let Ok(val) = std::env::var("NENJO_API_URL") {
             let val = val.trim().to_string();
             if !val.is_empty() {
@@ -959,6 +1109,32 @@ impl Config {
                 }
             }
         }
+
+        apply_numeric_env("NENJO_PDF_MAX_PAGES", &mut self.pdf.max_pages)?;
+        apply_numeric_env(
+            "NENJO_ROUTINES_DEFAULT_GATE_MAX_RETRIES",
+            &mut self.routines.default_gate_max_retries,
+        )?;
+        apply_numeric_env(
+            "NENJO_ROUTINES_MAX_GATE_MAX_RETRIES",
+            &mut self.routines.max_gate_max_retries,
+        )?;
+        apply_numeric_env(
+            "NENJO_PDF_RENDER_CONCURRENCY",
+            &mut self.pdf.render_concurrency,
+        )?;
+        apply_numeric_env(
+            "NENJO_PDF_VISION_BATCH_PAGES",
+            &mut self.pdf.vision_batch_pages,
+        )?;
+        apply_numeric_env("NENJO_PDF_RENDER_MAX_EDGE", &mut self.pdf.render_max_edge)?;
+        apply_numeric_env("NENJO_PDF_MAX_TOTAL_PIXELS", &mut self.pdf.max_total_pixels)?;
+        apply_numeric_env(
+            "NENJO_PDF_MAX_RENDERED_BYTES",
+            &mut self.pdf.max_rendered_bytes,
+        )?;
+        apply_bool_env("NENJO_VLLM_STREAMING", &mut self.vllm.streaming)?;
+        Ok(())
     }
 
     /// Write the config to `{config_dir}/config.toml`.
@@ -981,6 +1157,8 @@ impl Config {
             );
         }
         self.validate_media_providers()?;
+        self.pdf.validate()?;
+        self.routines.execution_config()?;
         Ok(())
     }
 
@@ -1006,9 +1184,39 @@ impl Config {
     }
 }
 
+fn apply_numeric_env<T>(name: &str, target: &mut T) -> Result<()>
+where
+    T: std::str::FromStr,
+    T::Err: std::fmt::Display,
+{
+    let Ok(raw) = std::env::var(name) else {
+        return Ok(());
+    };
+    *target = raw
+        .trim()
+        .parse()
+        .map_err(|error: T::Err| anyhow::anyhow!("{name} must be a valid integer: {error}"))?;
+    Ok(())
+}
+
+fn apply_bool_env(name: &str, target: &mut bool) -> Result<()> {
+    let Ok(raw) = std::env::var(name) else {
+        return Ok(());
+    };
+    *target = match raw.trim().to_ascii_lowercase().as_str() {
+        "true" | "1" | "yes" | "on" => true,
+        "false" | "0" | "no" | "off" => false,
+        _ => anyhow::bail!("{name} must be a boolean (true/false, 1/0, yes/no, or on/off)"),
+    };
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Config, MediaProviderConfig, SecureBusConfig, SecurityConfig, SessionConfig};
+    use super::{
+        Config, MediaProviderConfig, PdfConfig, RoutineConfig, SecureBusConfig, SecurityConfig,
+        SessionConfig, VllmConfig,
+    };
     use nenjo::Slug;
     use nenjo_models::MediaOperation;
 
@@ -1017,6 +1225,76 @@ mod tests {
         let config = SecureBusConfig::default();
 
         assert!(config.require_secured_commands);
+    }
+
+    #[test]
+    fn pdf_config_has_bounded_operational_defaults() {
+        let config = PdfConfig::default();
+
+        assert_eq!(config.max_pages, 50);
+        assert_eq!(config.render_concurrency, 4);
+        assert_eq!(config.vision_batch_pages, 4);
+        assert_eq!(config.render_max_edge, 1_600);
+        config.validate().unwrap();
+    }
+
+    #[test]
+    fn routine_retry_config_deserializes_independently_from_provider_reliability() {
+        let config: Config = toml::from_str(
+            r#"
+api_key = "test"
+
+[model_provider_api_keys]
+
+[routines]
+default_gate_max_retries = 4
+max_gate_max_retries = 7
+"#,
+        )
+        .unwrap();
+
+        let execution = config.routines.execution_config().unwrap();
+        assert_eq!(execution.default_gate_max_retries.get(), 4);
+        assert_eq!(execution.max_gate_max_retries.get(), 7);
+    }
+
+    #[test]
+    fn routine_retry_config_rejects_default_above_ceiling() {
+        let config = RoutineConfig {
+            default_gate_max_retries: 8,
+            max_gate_max_retries: 7,
+        };
+
+        assert!(config.execution_config().is_err());
+    }
+
+    #[test]
+    fn vllm_streaming_defaults_on_and_can_be_disabled() {
+        assert!(VllmConfig::default().streaming);
+
+        let config: Config = toml::from_str(
+            r#"
+api_key = "test"
+
+[model_provider_api_keys]
+
+[vllm]
+streaming = false
+"#,
+        )
+        .unwrap();
+
+        assert!(!config.vllm.streaming);
+    }
+
+    #[test]
+    fn pdf_config_rejects_values_beyond_the_hard_page_limit() {
+        let config = PdfConfig {
+            max_pages: 201,
+            ..PdfConfig::default()
+        };
+
+        assert!(config.validate().unwrap_err().to_string().contains("200"));
     }
 
     #[test]

@@ -127,15 +127,30 @@ mod tests {
     }
 
     #[test]
-    fn configure_routine_schema_has_no_trigger_field() {
+    fn configure_routine_schema_is_flat_and_rejects_legacy_top_level_fields() {
         let tools = all_tools();
         let tool = tools
             .iter()
             .find(|tool| tool.name == "configure_routine")
             .expect("missing configure_routine");
-        let metadata_properties = &tool.parameters["properties"]["metadata"]["properties"];
-
-        assert!(metadata_properties.get("trigger").is_none());
+        let properties = &tool.parameters["properties"];
+        for removed in [
+            "routine",
+            "metadata",
+            "runtime_metadata",
+            "graph",
+            "is_active",
+            "max_retries",
+        ] {
+            assert!(
+                properties.get(removed).is_none(),
+                "legacy field exposed: {removed}"
+            );
+        }
+        assert_eq!(
+            tool.parameters["required"],
+            serde_json::json!(["slug", "name", "entry_steps", "steps", "edges"])
+        );
     }
 
     #[test]
@@ -145,13 +160,16 @@ mod tests {
             .iter()
             .find(|tool| tool.name == "configure_routine")
             .expect("missing configure_routine");
-        let config_schema = &tool.parameters["properties"]["graph"]["properties"]["steps"]["items"]
-            ["properties"]["config"];
+        let config_schema =
+            &tool.parameters["properties"]["steps"]["items"]["properties"]["config"];
 
-        assert!(
-            tool.parameters["properties"].get("id").is_none(),
-            "configure_routine should not expose platform UUIDs to agents"
-        );
+        let step_properties = &tool.parameters["properties"]["steps"]["items"]["properties"];
+        for internal in ["id", "encrypted_payload", "position_x", "position_y"] {
+            assert!(
+                step_properties.get(internal).is_none(),
+                "configure_routine should not expose internal step field {internal} to agents"
+            );
+        }
         assert_eq!(config_schema["type"], "object");
         assert_eq!(config_schema["additionalProperties"], false);
         assert_eq!(
@@ -167,8 +185,7 @@ mod tests {
             serde_json::json!(["title"])
         );
         assert_eq!(
-            tool.parameters["properties"]["graph"]["properties"]["steps"]["items"]["properties"]["step_type"]
-                ["enum"],
+            tool.parameters["properties"]["steps"]["items"]["properties"]["step_type"]["enum"],
             serde_json::json!([
                 "agent",
                 "council",
@@ -189,7 +206,7 @@ mod tests {
             config_schema["description"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("edge metadata.max_attempts"),
+                .contains("edge max_retries"),
             "routine step config should tell agents where retry budgets belong"
         );
     }
@@ -201,19 +218,10 @@ mod tests {
             .iter()
             .find(|tool| tool.name == "configure_routine")
             .expect("missing configure_routine");
-        let graph_schema = &tool.parameters["properties"]["graph"];
-        let metadata_schema =
-            &graph_schema["properties"]["edges"]["items"]["properties"]["metadata"];
-        let handoff_schema = &metadata_schema["properties"]["handoff_schema"];
+        let edge_schema = &tool.parameters["properties"]["edges"]["items"];
+        let handoff_schema = &edge_schema["properties"]["handoff_schema"];
 
-        assert_eq!(graph_schema["type"], "object");
-        assert!(
-            graph_schema["description"]
-                .as_str()
-                .unwrap_or_default()
-                .contains("do not serialize that object into a string"),
-            "configure_routine must make graph's object shape explicit"
-        );
+        assert!(edge_schema["properties"].get("metadata").is_none());
         assert_eq!(handoff_schema["type"], "object");
         assert_eq!(handoff_schema["required"], serde_json::json!(["type"]));
         assert_eq!(
@@ -228,11 +236,11 @@ mod tests {
             "configure_routine must tell agents when handoff_schema is required"
         );
         assert!(
-            metadata_schema["description"]
+            edge_schema["description"]
                 .as_str()
                 .unwrap_or_default()
-                .contains("must define handoff_schema"),
-            "edge metadata guidance must identify handoff_schema as the route contract"
+                .contains("top-level edge fields"),
+            "edge guidance must identify the explicit route contract"
         );
         assert!(
             handoff_schema["description"]
@@ -242,7 +250,7 @@ mod tests {
             "artifact handoffs must advertise their semantic JSON Schema format"
         );
         assert_eq!(
-            graph_schema["properties"]["edges"]["items"]["properties"]["condition"]["enum"],
+            edge_schema["properties"]["condition"]["enum"],
             serde_json::json!([
                 "always",
                 "on_pass",

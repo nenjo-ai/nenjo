@@ -189,6 +189,73 @@ nenjo update
 
 The worker is resilient to service outages. Startup and the event loop use exponential backoff so the process can recover when platform services or NATS become available again.
 
+### vLLM response streaming
+
+The first-class vLLM provider requests streamed Chat Completions by default. This
+keeps long local generations active as long as response data continues to
+arrive and surfaces text deltas to the live session UI. Disable streaming when
+testing an endpoint that requires one buffered JSON response:
+
+```toml
+[vllm]
+streaming = true
+```
+
+`NENJO_VLLM_STREAMING` overrides the TOML value and accepts
+`true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off`.
+
+### Routine gate retries
+
+Routine gate retries are configured independently from model-provider request
+reliability:
+
+```toml
+[routines]
+default_gate_max_retries = 3
+max_gate_max_retries = 10
+```
+
+The default applies when a gate `on_fail` edge omits `max_retries`. An explicit
+edge override above the worker maximum is rejected before execution. The
+effective policy is stored in the run checkpoint, so changing worker config
+does not alter an active or resumed run. Environment overrides are
+`NENJO_ROUTINES_DEFAULT_GATE_MAX_RETRIES` and
+`NENJO_ROUTINES_MAX_GATE_MAX_RETRIES`.
+
+### PDF inputs
+
+For models whose provider accepts native PDFs, the worker preserves that native
+transport. Other providers, including vLLM, use a bounded local fallback: the
+worker extracts embedded text and renders every accepted page to PNG. A
+vision-capable primary model receives those page images directly. Otherwise,
+the worker sends pages in bounded batches to the agent's assigned
+`analyze_image` model. A text-only model can still use a PDF with embedded text;
+an image-only/scanned PDF requires one of those image-capable routes.
+
+PDF plaintext and rendered pages remain ephemeral request inputs. Durable
+conversation history retains the immutable source artifact reference, and a
+worker-process cache reuses deterministic derivatives for the same revision.
+That cache is capped at 256 MiB and 16 completed entries. Encrypted PDFs are
+rejected. Inputs are limited to 16 MiB, extracted text to 256 KiB, and each
+encoded page to 16 MiB.
+
+Defaults can be changed in `~/.nenjo/config.toml`:
+
+```toml
+[pdf]
+max_pages = 50              # allowed range: 1..=200
+render_concurrency = 4      # allowed range: 1..=16
+vision_batch_pages = 4      # allowed range: 1..=50
+render_max_edge = 1600      # allowed range: 256..=4096 pixels
+max_total_pixels = 100000000
+max_rendered_bytes = 134217728
+```
+
+The equivalent environment variables are `NENJO_PDF_MAX_PAGES`,
+`NENJO_PDF_RENDER_CONCURRENCY`, `NENJO_PDF_VISION_BATCH_PAGES`,
+`NENJO_PDF_RENDER_MAX_EDGE`, `NENJO_PDF_MAX_TOTAL_PIXELS`, and
+`NENJO_PDF_MAX_RENDERED_BYTES`.
+
 ### Worker Capabilities
 
 Workers can be scoped to handle only specific workloads:
@@ -233,7 +300,7 @@ Platform-connected workers compose several crates:
 Use the core SDK directly when you want to run agents in your own application without the platform worker:
 
 ```rust
-use nenjo::Provider;
+use nenjo::{Buffered, ChatInput, Provider, Streaming};
 
 // Build a provider with your manifest, model factory, and tools.
 let provider = Provider::builder()
@@ -250,10 +317,16 @@ let runner = provider
     .build()
     .await?;
 
-let output = runner.chat("Refactor the auth module").await?;
+let output = runner
+    .chat(ChatInput::new("Refactor the auth module"), Buffered)
+    .await?
+    .output()
+    .await?;
 println!("{}", output.text);
 
-let mut handle = runner.chat_stream("Refactor the auth module").await?;
+let mut handle = runner
+    .chat(ChatInput::new("Refactor the auth module"), Streaming)
+    .await?;
 while let Some(event) = handle.recv().await {
     match event {
         nenjo::TurnEvent::ToolCallStart { calls } => {
@@ -308,8 +381,8 @@ Provider::builder()
 
 provider.agent_by_name("coder").await? -> AgentBuilder -> .build().await? -> AgentRunner
 provider.new_agent()                  -> AgentBuilder -> .build().await? -> AgentRunner
-runner.chat("task").await?       -> TurnOutput { text, messages, tokens, tool_calls }
-runner.chat_stream("task").await -> ExecutionHandle { recv(), output() }
+runner.chat(ChatInput::new("task"), Buffered).await?  -> ChatHandle<Buffered>
+runner.chat(ChatInput::new("task"), Streaming).await? -> ChatHandle<Streaming>
 
 nenjo run -> nenjo-cli -> nenjo-worker
           -> secure envelope event bus

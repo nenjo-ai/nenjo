@@ -626,8 +626,7 @@ where
         }
         TurnEvent::AbilityStarted { .. }
         | TurnEvent::AbilityCompleted { .. }
-        | TurnEvent::AssistantTextDelta { .. }
-        | TurnEvent::AssistantResponse { .. }
+        | TurnEvent::ProviderRetryScheduled { .. }
         | TurnEvent::HookStarted { .. }
         | TurnEvent::HookActivated { .. }
         | TurnEvent::HookCompleted { .. }
@@ -639,6 +638,9 @@ where
         | TurnEvent::Done { .. } => {
             let _ = parent_tx.send(event);
         }
+        // Delegated model output is already accumulated by the child runner and returned as one
+        // completed TurnOutput. Keep provider token deltas inside that child boundary.
+        TurnEvent::AssistantTextDelta { .. } | TurnEvent::AssistantReasoningDelta { .. } => {}
         TurnEvent::TranscriptMessage { .. } => {}
     }
 }
@@ -711,8 +713,9 @@ async fn bridge_delegation_transcript(
         | TurnEvent::AbilityCompleted { .. }
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
+        | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ProviderRetryScheduled { .. }
         | TurnEvent::ModelRequestCompleted { .. }
-        | TurnEvent::AssistantResponse { .. }
         | TurnEvent::HookStarted { .. }
         | TurnEvent::HookActivated { .. }
         | TurnEvent::HookCompleted { .. }

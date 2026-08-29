@@ -4,7 +4,7 @@ use anyhow::{Result, bail};
 use serde_json::Value;
 use uuid::Uuid;
 
-pub const HANDOFF_SCHEMA_METADATA_KEY: &str = "handoff_schema";
+pub const HANDOFF_SCHEMA_KEY: &str = "handoff_schema";
 /// JSON Schema string format identifying a ready Nenjo artifact.
 pub const ARTIFACT_ID_FORMAT: &str = "nenjo-artifact-id";
 
@@ -37,15 +37,7 @@ const SUPPORTED_TYPES: &[&str] = &[
 /// schema uses a keyword outside this subset, validation fails instead of
 /// silently accepting a contract the runtime cannot enforce.
 pub fn validate_handoff_schema(schema: &Value) -> Result<()> {
-    validate_schema_at(schema, HANDOFF_SCHEMA_METADATA_KEY, true)
-}
-
-pub(crate) fn edge_handoff_schema(metadata: &Value) -> Result<&Value> {
-    let Some(schema) = metadata.get(HANDOFF_SCHEMA_METADATA_KEY) else {
-        bail!("metadata.{HANDOFF_SCHEMA_METADATA_KEY} is required");
-    };
-    validate_handoff_schema(schema)?;
-    Ok(schema)
+    validate_schema_at(schema, HANDOFF_SCHEMA_KEY, true)
 }
 
 pub(crate) fn validate_handoff_payload(schema: &Value, payload: &Value) -> Result<()> {
@@ -69,7 +61,7 @@ fn validate_schema_at(schema: &Value, path: &str, root: bool) -> Result<()> {
 
     let schema_types = schema_types(object, path)?;
     if root && (schema_types.len() != 1 || schema_types[0] != "object") {
-        bail!("metadata.{HANDOFF_SCHEMA_METADATA_KEY}.type must be object");
+        bail!("{HANDOFF_SCHEMA_KEY}.type must be object");
     }
 
     validate_enum(schema, path)?;

@@ -76,6 +76,8 @@ pub type GitLocks = Arc<DashMap<std::path::PathBuf, Arc<tokio::sync::Mutex<()>>>
 /// Responses are sent via `response_tx` (never touch the bus directly).
 #[derive(Clone)]
 pub struct CommandContext {
+    pub org_id: Uuid,
+    pub worker_id: Uuid,
     pub harness: WorkerHarness,
     pub api: Arc<ApiClient>,
     pub provider_registry: Arc<ModelProviderRegistry>,
@@ -173,11 +175,15 @@ impl WorkerRuntime {
 
     pub(crate) fn command_context(
         &self,
+        org_id: Uuid,
+        worker_id: Uuid,
         actor_user_id: Uuid,
         response_tx: ResponseSender,
         org_response_tx: ResponseSender,
     ) -> CommandContext {
         CommandContext {
+            org_id,
+            worker_id,
             harness: self.harness.clone(),
             api: self.api.clone(),
             provider_registry: self.provider_registry.clone(),
@@ -361,10 +367,7 @@ mod tests {
         let api = ApiClient::new(config.backend_api_url(), &config.api_key);
         let external_mcp = Arc::new(ExternalMcpPool::new());
         let skill_registry = Arc::new(SkillRegistry::default());
-        let provider_registry = Arc::new(ModelProviderRegistry::new(
-            &config.model_provider_api_keys,
-            &config.reliability,
-        ));
+        let provider_registry = Arc::new(ModelProviderRegistry::new((&config).into()));
         let manifest_cache = Arc::new(WorkerManifestCache {
             manifests_dir: config.manifests_dir.clone(),
             workspace_dir: config.workspace_dir.clone(),

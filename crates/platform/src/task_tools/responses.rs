@@ -6,6 +6,7 @@
 //! used by the manifest resource tools.
 
 use nenjo::Slug;
+use nenjo_events::{TaskScheduleDefinition, TaskScheduleEnd, TaskScheduleRecurrence};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use uuid::Uuid;
@@ -64,9 +65,24 @@ pub struct TaskDocument {
     #[serde(flatten)]
     pub summary: TaskSummary,
     pub instructions: Option<String>,
+    pub schedule: Option<TaskScheduleDocument>,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+}
+
+/// Declarative schedule state returned with a detailed task document.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskScheduleDocument {
+    pub enabled: bool,
+    /// Local wall-clock start in `timezone`, formatted without a UTC offset.
+    pub starts_at: String,
+    pub timezone: String,
+    pub recurrence: TaskScheduleRecurrence,
+    pub end: TaskScheduleEnd,
+    pub occurrence_count: u32,
+    pub next_run_at: String,
+    pub last_run_at: Option<String>,
 }
 
 /// Result returned by `list_tasks`.
@@ -115,10 +131,21 @@ pub(super) struct PlatformTaskRecord {
     pub execution_target: Option<PlatformTaskTarget>,
     pub dispatch: TaskDispatch,
     #[serde(default)]
+    pub schedule: Option<PlatformTaskScheduleRecord>,
+    #[serde(default)]
     pub labels: Vec<PlatformTaskLabel>,
     pub created_at: String,
     pub updated_at: String,
     pub completed_at: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(super) struct PlatformTaskScheduleRecord {
+    pub definition: TaskScheduleDefinition,
+    pub occurrence_count: i64,
+    pub next_run_at: String,
+    pub enabled: bool,
+    pub last_run_at: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]

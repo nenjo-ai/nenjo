@@ -22,8 +22,8 @@ use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use crate::events::HarnessEvent;
-use crate::execution_context::{project_slug, summarize_turn_event};
-use crate::handle::HarnessExecutionHandle;
+use crate::execution_context::project_slug;
+use crate::handle::{HarnessChatHandle, HarnessExecutionHandle};
 use crate::registry::{ActiveExecution, ExecutionKind};
 use crate::request::ChatRequest;
 use crate::session::{
@@ -31,13 +31,15 @@ use crate::session::{
 };
 use crate::{Harness, ProviderRuntime};
 
-pub(crate) async fn chat_stream<P, SessionRt>(
+pub(crate) async fn chat<P, SessionRt, D>(
     harness: &Harness<P, SessionRt>,
     request: ChatRequest,
-) -> crate::Result<HarnessExecutionHandle>
+    delivery: D,
+) -> crate::Result<HarnessChatHandle<D>>
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    D: nenjo::ChatDelivery,
 {
     if let Some((_, previous)) = harness.executions().remove(&request.session_id) {
         previous.cancel.cancel();
@@ -55,7 +57,7 @@ where
     if let Some(template_override) = prepared.template_override.take() {
         input = input.template_override(template_override);
     }
-    let handle = runner.run_stream(nenjo::AgentRun::chat(input)).await?;
+    let handle = runner.chat(input, delivery).await?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let registry_token = Uuid::new_v4();
 
@@ -81,7 +83,9 @@ where
         registry_token,
     );
 
-    Ok(HarnessExecutionHandle::new(events_rx, join, cancel))
+    Ok(HarnessChatHandle::new(HarnessExecutionHandle::new(
+        events_rx, join, cancel,
+    )))
 }
 
 pub(crate) async fn try_enqueue_chat_message<P, SessionRt>(
@@ -629,9 +633,9 @@ where
     Ok(runner)
 }
 
-fn spawn_chat_execution<P, SessionRt>(
+fn spawn_chat_execution<P, SessionRt, D>(
     harness: Harness<P, SessionRt>,
-    mut handle: nenjo::ExecutionHandle,
+    mut handle: nenjo::ChatHandle<D>,
     prepared: PreparedChatExecution,
     cancel: tokio_util::sync::CancellationToken,
     registry_token: Uuid,
@@ -639,6 +643,7 @@ fn spawn_chat_execution<P, SessionRt>(
 where
     P: ProviderRuntime,
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
+    D: nenjo::ChatDelivery,
 {
     let join_cancel = cancel.clone();
     tokio::spawn(async move {
@@ -664,11 +669,7 @@ where
                 event = handle.recv() => {
                     match event {
                         Some(ev) => {
-                            debug!(
-                                event = %summarize_turn_event(&ev),
-                                agent = %agent_name,
-                                "Harness chat received turn event"
-                            );
+                            let ev = ev.map_deltas(Into::into);
                             let session_event_context = TurnEventContext {
                                 session_id,
                                 turn_id: Some(turn_id),
@@ -676,10 +677,12 @@ where
                                 agent_name: Some(agent_name.clone()),
                                 recorded_at: Utc::now(),
                             };
+                            let runtime_events =
+                                session_runtime_events_from_turn_event(&session_event_context, &ev);
                             let forwarded = events_tx.send(HarnessEvent::Turn {
                                 session_id,
                                 turn_id: Some(turn_id),
-                                event: ev.clone(),
+                                event: ev,
                             });
                             if forwarded.is_err() {
                                 warn!(
@@ -687,15 +690,7 @@ where
                                     session = %session_id,
                                     "Failed to forward chat turn event because receiver was dropped"
                                 );
-                            } else {
-                                debug!(
-                                    agent = %agent_name,
-                                    session = %session_id,
-                                    "Forwarded chat turn event to harness stream"
-                                );
                             }
-                            let runtime_events =
-                                session_runtime_events_from_turn_event(&session_event_context, &ev);
                             harness
                                 .sessions()
                                 .record_events(lease.clone(), runtime_events);

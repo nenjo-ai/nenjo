@@ -6,12 +6,12 @@ use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use anyhow::Result;
-use nenjo::Slug;
 use nenjo::manifest::{
     AbilityManifest, AbilityPromptConfig, AgentManifest, Manifest, ModelManifest, ProjectManifest,
     PromptConfig, PromptTemplates, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
+use nenjo::{Buffered, ChatInput, Slug, Streaming};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
 use nenjo_tool_api::{Tool, ToolCall, ToolCategory, ToolResult};
 use tokio::sync::Notify;
@@ -139,20 +139,13 @@ impl CapturedRequests {
     }
 }
 
-fn completed_response(id: &str, message: &str) -> ChatResponse {
+fn completed_response(_id: &str, message: &str) -> ChatResponse {
     ChatResponse {
-        text: None,
-        tool_calls: vec![ToolCall {
-            id: id.into(),
-            name: "respond_to_user".into(),
-            arguments: serde_json::json!({
-                "message": message,
-                "status": "completed"
-            })
-            .to_string(),
-        }],
+        text: Some(message.to_string()),
+        tool_calls: vec![],
         provider_tool_calls: vec![],
         usage: TokenUsage::default(),
+        finish_reason: nenjo_models::FinishReason::Stop,
     }
 }
 
@@ -268,6 +261,7 @@ impl ModelProvider for SubAgentScriptLlm {
                     }],
                     provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 }
             } else {
                 ChatResponse {
@@ -278,6 +272,7 @@ impl ModelProvider for SubAgentScriptLlm {
                     tool_calls: vec![],
                     provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
                 }
             });
         }
@@ -314,6 +309,7 @@ impl ModelProvider for SubAgentScriptLlm {
                 }],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
             },
             1 | 2 => ChatResponse {
                 text: None,
@@ -324,6 +320,7 @@ impl ModelProvider for SubAgentScriptLlm {
                 }],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
             },
             _ => completed_response("parent-complete", "parent complete"),
         })
@@ -406,6 +403,7 @@ impl ModelProvider for DelegateScriptLlm {
                 tool_calls: vec![],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             });
         }
 
@@ -420,6 +418,7 @@ impl ModelProvider for DelegateScriptLlm {
                 }],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             },
             1 => ChatResponse {
                 text: None,
@@ -434,6 +433,7 @@ impl ModelProvider for DelegateScriptLlm {
                 }],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             },
             2 => ChatResponse {
                 text: None,
@@ -444,6 +444,7 @@ impl ModelProvider for DelegateScriptLlm {
                 }],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             },
             3 => ChatResponse {
                 text: None,
@@ -454,6 +455,7 @@ impl ModelProvider for DelegateScriptLlm {
                 }],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             },
             _ => completed_response("parent-complete", "parent saw delegated result"),
         })
@@ -532,6 +534,7 @@ impl ModelProvider for NestedAbilityDelegateLlm {
                 tool_calls: vec![],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             });
         }
 
@@ -551,6 +554,7 @@ impl ModelProvider for NestedAbilityDelegateLlm {
                     }],
                     provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 },
                 1 => ChatResponse {
                     text: None,
@@ -561,12 +565,14 @@ impl ModelProvider for NestedAbilityDelegateLlm {
                     }],
                     provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 },
                 _ => ChatResponse {
                     text: Some("delegated child observed ability completion".into()),
                     tool_calls: vec![],
                     provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 },
             });
         }
@@ -586,6 +592,7 @@ impl ModelProvider for NestedAbilityDelegateLlm {
                 }],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             },
             1 | 2 => ChatResponse {
                 text: None,
@@ -600,6 +607,7 @@ impl ModelProvider for NestedAbilityDelegateLlm {
                 }],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
             },
             _ => completed_response("parent-complete", "parent saw delegated ability result"),
         })
@@ -702,6 +710,7 @@ impl ModelProvider for AbortObservedLlm {
                     }],
                     provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
+                finish_reason: nenjo_models::FinishReason::Stop,
                 }
             } else {
                 ChatResponse {
@@ -713,6 +722,7 @@ impl ModelProvider for AbortObservedLlm {
                     }],
                     provider_tool_calls: vec![],
                     usage: TokenUsage::default(),
+                    finish_reason: nenjo_models::FinishReason::Stop,
                 }
             })
         }
@@ -861,7 +871,13 @@ async fn parent_tools_are_available_during_execution() {
             .iter()
             .any(|tool| tool.name == "delegate_to")
     );
-    runner.chat("coordinate review").await.unwrap();
+    runner
+        .chat(ChatInput::new("coordinate review"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
 
     let first_tools = captured.tool_names().remove(0);
     for expected in ["spawn_sub_agents", "list_delegatable_agents", "delegate_to"] {
@@ -898,7 +914,13 @@ async fn parent_tools_are_injected_for_ephemeral_sub_agents() {
         .unwrap();
     let runner = provider.agent("solo").await.unwrap().build().await.unwrap();
 
-    runner.chat("work").await.unwrap();
+    runner
+        .chat(ChatInput::new("work"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
     let first_tools = captured.tool_names().remove(0);
     for expected in ["spawn_sub_agents", "list_delegatable_agents", "delegate_to"] {
         assert!(
@@ -941,7 +963,13 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
         .await
         .unwrap();
 
-    let output = runner.chat("coordinate a review").await.unwrap();
+    let output = runner
+        .chat(ChatInput::new("coordinate a review"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
     assert_eq!(output.text, "parent complete");
 
     let tool_results = tool_result_texts(&output.messages);
@@ -1073,8 +1101,32 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
         .await
         .unwrap();
 
-    let output = runner.chat("delegate review").await.unwrap();
+    let mut handle = runner
+        .chat(ChatInput::new("delegate review"), Streaming)
+        .await
+        .unwrap();
+    let mut streamed_text = Vec::new();
+    let mut observed_nested_model = false;
+    while let Some(event) = handle.recv().await {
+        match event {
+            nenjo::TurnEvent::AssistantTextDelta { delta, .. } => streamed_text.push(delta),
+            nenjo::TurnEvent::ModelRequestStarted {
+                parent_call_id: Some(_),
+                ..
+            } => observed_nested_model = true,
+            nenjo::TurnEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    let output = handle.output().await.unwrap();
     assert_eq!(output.text, "parent saw delegated result");
+    assert!(observed_nested_model);
+    assert!(
+        !streamed_text
+            .iter()
+            .any(|text| text.contains("delegated review complete")),
+        "delegated provider output leaked into the parent stream: {streamed_text:?}"
+    );
 
     let tool_results = tool_result_texts(&output.messages);
     let list_result = tool_results
@@ -1178,7 +1230,13 @@ async fn delegate_to_preserves_parent_workspace_scope() {
         .await
         .unwrap();
 
-    let output = runner.chat("delegate review").await.unwrap();
+    let output = runner
+        .chat(ChatInput::new("delegate review"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
     assert_eq!(output.text, "parent saw delegated result");
 
     let workspace_dirs = tool_factory.workspace_dirs();
@@ -1220,8 +1278,27 @@ async fn delegated_child_can_invoke_assigned_ability_and_wait_for_it() {
         .await
         .unwrap();
 
-    let output = runner.chat("delegate ability review").await.unwrap();
+    let mut handle = runner
+        .chat(ChatInput::new("delegate ability review"), Streaming)
+        .await
+        .unwrap();
+    let mut streamed_text = Vec::new();
+    while let Some(event) = handle.recv().await {
+        match event {
+            nenjo::TurnEvent::AssistantTextDelta { delta, .. } => streamed_text.push(delta),
+            nenjo::TurnEvent::Done { .. } => break,
+            _ => {}
+        }
+    }
+    let output = handle.output().await.unwrap();
     assert_eq!(output.text, "parent saw delegated ability result");
+    assert!(
+        !streamed_text.iter().any(|text| {
+            text.contains("ability completed inside delegated child")
+                || text.contains("delegated child observed ability completion")
+        }),
+        "nested ability provider output leaked into the parent stream: {streamed_text:?}"
+    );
 
     let tool_sets = captured.tool_names();
     assert!(
@@ -1282,9 +1359,13 @@ async fn sub_agent_events_stream_to_parent_observers() {
         .await
         .unwrap();
 
-    let mut handle = runner.chat_stream("coordinate a review").await.unwrap();
+    let mut handle = runner
+        .chat(ChatInput::new("coordinate a review"), Streaming)
+        .await
+        .unwrap();
     let mut observed = Vec::new();
     let mut transcript_events = Vec::new();
+    let mut streamed_text = Vec::new();
     while let Some(event) = handle.recv().await {
         match event {
             nenjo::TurnEvent::SubAgentEvent {
@@ -1299,12 +1380,19 @@ async fn sub_agent_events_stream_to_parent_observers() {
                 agent_name,
                 event,
             } => transcript_events.push((slug, agent_name, event.kind().to_string())),
+            nenjo::TurnEvent::AssistantTextDelta { delta, .. } => streamed_text.push(delta),
             nenjo::TurnEvent::Done { .. } => break,
             _ => {}
         }
     }
     let output = handle.output().await.unwrap();
     assert_eq!(output.text, "parent complete");
+    assert!(
+        !streamed_text
+            .iter()
+            .any(|text| text.contains("Security review complete")),
+        "sub-agent provider output leaked into the parent stream: {streamed_text:?}"
+    );
     assert!(
         observed.iter().any(|(slug, agent, kind, _, visible)| {
             slug == "security_review" && agent == "reviewer" && kind == "completed" && !visible
@@ -1352,7 +1440,10 @@ async fn parent_abort_cancels_live_child_execution() {
         .await
         .unwrap();
 
-    let handle = runner.chat_stream("start blocked child").await.unwrap();
+    let handle = runner
+        .chat(ChatInput::new("start blocked child"), Streaming)
+        .await
+        .unwrap();
     tokio::time::timeout(std::time::Duration::from_secs(2), child_started.notified())
         .await
         .expect("child model call should start");
@@ -1402,7 +1493,13 @@ async fn max_depth_zero_disables_parent_tools() {
         .await
         .unwrap();
 
-    runner.chat("work").await.unwrap();
+    runner
+        .chat(ChatInput::new("work"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
     let first_tools = captured.tool_names().remove(0);
-    assert_eq!(first_tools, vec!["list_knowledge_packs", "respond_to_user"]);
+    assert_eq!(first_tools, vec!["list_knowledge_packs"]);
 }

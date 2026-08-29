@@ -106,10 +106,6 @@ impl AgentExecutionMode {
         matches!(self, Self::Parent)
     }
 
-    pub(crate) fn can_respond_to_user(self) -> bool {
-        matches!(self, Self::Parent)
-    }
-
     pub(crate) fn strips_prompt_capabilities(self) -> bool {
         matches!(
             self,

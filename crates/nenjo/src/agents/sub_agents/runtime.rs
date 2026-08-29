@@ -608,7 +608,8 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
         | TurnEvent::AbilityCompleted { .. }
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
-        | TurnEvent::AssistantResponse { .. }
+        | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ProviderRetryScheduled { .. }
         | TurnEvent::ModelRequestCompleted { .. }
         | TurnEvent::HookActivated { .. }
         | TurnEvent::HookStarted { .. }

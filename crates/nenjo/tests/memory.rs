@@ -3,7 +3,6 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
     model_manifest_slug,
@@ -11,8 +10,8 @@ use nenjo::manifest::{
 use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
+use nenjo::{Buffered, ChatInput, Slug};
 use nenjo_models::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage};
-use nenjo_tool_api::ToolCall;
 
 // ---------------------------------------------------------------------------
 // Mock Provider
@@ -39,21 +38,14 @@ impl ModelProvider for MockProvider {
         _temperature: f64,
     ) -> Result<ChatResponse> {
         Ok(ChatResponse {
-            text: None,
-            tool_calls: vec![ToolCall {
-                id: "memory-response".into(),
-                name: "respond_to_user".into(),
-                arguments: serde_json::json!({
-                    "message": self.response_text,
-                    "status": "completed"
-                })
-                .to_string(),
-            }],
+            text: Some(self.response_text.clone()),
+            tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
             },
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 
@@ -755,7 +747,13 @@ async fn runner_with_memory_executes() {
         .unwrap();
 
     let output = runner
-        .chat("What do you know about this project?")
+        .chat(
+            ChatInput::new("What do you know about this project?"),
+            Buffered,
+        )
+        .await
+        .unwrap()
+        .output()
         .await
         .unwrap();
     assert_eq!(output.text, "I see from memory this is a Rust project.");

@@ -12,7 +12,7 @@ use nenjo::manifest::local::LocalManifestStore;
 use nenjo::manifest::{
     AbilityManifest, CommandManifest, ContextBlockManifest, CouncilDelegationStrategy,
     CouncilManifest, DomainManifest, Manifest, ManifestResource, McpServerManifest, ModelManifest,
-    ProjectManifest, RoutineManifest, RoutineMetadata, SkillManifest,
+    ProjectManifest, RoutineManifest, SkillManifest,
 };
 use nenjo::{ManifestWriter, Slug, ToolFactory};
 use nenjo_events::{EncryptedPayload, ModelAssignmentBinding};
@@ -1521,7 +1521,7 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         name: "Package Routine".into(),
         slug: Slug::derive("package-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![],
         edges: vec![],
     };

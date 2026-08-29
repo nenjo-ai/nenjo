@@ -9,7 +9,7 @@ use nenjo::manifest::ManifestIdentity;
 use nenjo::manifest::local::LocalManifestStore;
 use nenjo::memory::MarkdownMemory;
 use nenjo::{ManifestLoader, Provider};
-use nenjo_crypto_auth::EnrollmentBackedKeyProvider;
+use nenjo_crypto_auth::{EnrollmentBackedKeyProvider, WorkerEnrollmentBinding};
 use nenjo_events::PackageArgumentBindingUpdate;
 use nenjo_harness::Harness;
 use nenjo_platform::PlatformManifestClient;
@@ -147,7 +147,7 @@ impl WorkerCryptoContext {
         let key_provider = EnrollmentBackedKeyProvider::new(
             auth_provider,
             enrollment_api,
-            api_key_id,
+            WorkerEnrollmentBinding::new(auth.org_id, api_key_id),
             auth.user_id,
         );
 
@@ -188,10 +188,7 @@ impl WorkerAssembly {
         let local_execution_watcher = LocalRoutineExecutionWatcher::default();
 
         let local_manifest_loader = LocalManifestStore::new(&config.manifests_dir);
-        let provider_registry = Arc::new(ModelProviderRegistry::new(
-            &config.model_provider_api_keys,
-            &config.reliability,
-        ));
+        let provider_registry = Arc::new(ModelProviderRegistry::new(config.into()));
         let provider = build_provider(ProviderBuildContext {
             config,
             local_manifest_loader,
@@ -276,6 +273,7 @@ pub(crate) async fn build_provider(
             materializer,
             config.manifests_dir.clone(),
             provider_registry.clone(),
+            config.pdf.clone(),
         )),
         (Some(_), None) | (None, Some(_)) | (None, None) => None,
     };
@@ -304,6 +302,7 @@ pub(crate) async fn build_provider(
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
+        .with_routine_execution_config(config.routines.execution_config()?)
         .with_argument_bindings(argument_bindings)
         .with_live_manifest_reader(live_manifest_reader)
         .with_optional_artifact_input_preparer(artifact_input_preparer);
@@ -578,10 +577,7 @@ mod tests {
             Arc::new(WorkerAuthProvider::load_or_create(temp.path().join("crypto")).unwrap());
         let external_mcp = Arc::new(ExternalMcpPool::new());
         let skill_registry = Arc::new(SkillRegistry::default());
-        let provider_registry = Arc::new(ModelProviderRegistry::new(
-            &config.model_provider_api_keys,
-            &config.reliability,
-        ));
+        let provider_registry = Arc::new(ModelProviderRegistry::new((&config).into()));
         let cache = Arc::new(WorkerManifestCache {
             manifests_dir: config.manifests_dir.clone(),
             workspace_dir: config.workspace_dir.clone(),
@@ -739,8 +735,7 @@ mod tests {
         };
 
         let config = Config::default();
-        let provider_registry =
-            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
+        let provider_registry = ModelProviderRegistry::new((&config).into());
         validate_runtime_media_requirements(&config, &provider_registry, &manifest)
             .expect("agent without model_assignments should not fail on legacy media");
     }
@@ -774,8 +769,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let provider_registry =
-            ModelProviderRegistry::new(&config.model_provider_api_keys, &config.reliability);
+        let provider_registry = ModelProviderRegistry::new((&config).into());
 
         validate_runtime_media_requirements(&config, &provider_registry, &manifest)
             .expect("configured media provider should satisfy domain requirement");

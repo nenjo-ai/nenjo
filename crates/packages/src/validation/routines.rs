@@ -4,7 +4,7 @@ use nenjo::routines::graph::{
     RoutineGraph, RoutineGraphEdge, RoutineGraphEdgeCondition, RoutineGraphStep,
     RoutineGraphStepType, RoutineValidationError, validate_routine_graph,
 };
-use nenjo::routines::handoff_schema::{HANDOFF_SCHEMA_METADATA_KEY, validate_handoff_schema};
+use nenjo::routines::handoff_schema::{HANDOFF_SCHEMA_KEY, validate_handoff_schema};
 use serde::Deserialize;
 
 use crate::{PackageKind, ResolvedModule, ResolvedPackage, validate_source_path};
@@ -34,8 +34,6 @@ pub(crate) fn validate_routine_manifest(
 struct PackageRoutineManifest {
     #[serde(default)]
     entry_steps: Vec<String>,
-    #[serde(default)]
-    metadata: serde_json::Value,
     #[serde(default)]
     steps: Vec<PackageRoutineStep>,
     #[serde(default)]
@@ -73,7 +71,15 @@ struct PackageRoutineEdge {
     #[serde(default)]
     outcome: Option<String>,
     #[serde(default)]
-    max_attempts: Option<u32>,
+    #[serde(alias = "max_attempts")]
+    max_retries: Option<u32>,
+    #[serde(default)]
+    purpose: Option<String>,
+    #[serde(default)]
+    handoff_instructions: Option<String>,
+    #[serde(default)]
+    handoff_schema: Option<serde_json::Value>,
+    /// Legacy compatibility input for already published packages.
     #[serde(default)]
     metadata: serde_json::Value,
 }
@@ -254,6 +260,9 @@ fn package_routine_graph(routine: &PackageRoutineManifest) -> anyhow::Result<Rou
         .iter()
         .enumerate()
         .map(|(index, edge)| {
+            // Deserialization above is authoritative for the explicit string
+            // fields even though graph topology validation does not consume them.
+            let _edge_context = (&edge.purpose, &edge.handoff_instructions);
             let from = edge.from.trim();
             let to = edge.to.trim();
             if from.is_empty() {
@@ -274,18 +283,16 @@ fn package_routine_graph(routine: &PackageRoutineManifest) -> anyhow::Result<Rou
                 RoutineGraphEdgeCondition::parse(condition.trim()).ok_or_else(|| {
                     anyhow::anyhow!("edges[{index}] has unsupported condition '{}'", condition)
                 })?;
-            let mut metadata = normalize_edge_metadata(&edge.metadata)?;
-            if let Some(max_attempts) = edge.max_attempts {
-                let Some(object) = metadata.as_object_mut() else {
-                    anyhow::bail!("edges[{index}].metadata must be an object");
-                };
-                object.insert("max_attempts".to_string(), serde_json::json!(max_attempts));
-            }
+            let metadata = normalize_edge_metadata(&edge.metadata)?;
             Ok(RoutineGraphEdge {
                 source_step: parse_routine_slug(from, &format!("edges[{index}].from"))?,
                 target_step: parse_routine_slug(to, &format!("edges[{index}].to"))?,
                 condition,
-                metadata,
+                handoff_schema: edge
+                    .handoff_schema
+                    .clone()
+                    .or_else(|| metadata.get(HANDOFF_SCHEMA_KEY).cloned()),
+                max_retries: edge.max_retries.map(nenjo::routines::GateRetryLimit::new),
             })
         })
         .collect::<anyhow::Result<Vec<_>>>()?;
@@ -298,21 +305,7 @@ fn package_routine_graph(routine: &PackageRoutineManifest) -> anyhow::Result<Rou
 }
 
 fn routine_entry_steps(routine: &PackageRoutineManifest) -> Vec<String> {
-    if !routine.entry_steps.is_empty() {
-        return routine.entry_steps.clone();
-    }
-    routine
-        .metadata
-        .get("entry_steps")
-        .and_then(serde_json::Value::as_array)
-        .map(|values| {
-            values
-                .iter()
-                .filter_map(serde_json::Value::as_str)
-                .map(str::to_string)
-                .collect()
-        })
-        .unwrap_or_default()
+    routine.entry_steps.clone()
 }
 
 fn normalize_edge_metadata(value: &serde_json::Value) -> anyhow::Result<serde_json::Value> {
@@ -324,10 +317,9 @@ fn normalize_edge_metadata(value: &serde_json::Value) -> anyhow::Result<serde_js
         validate_optional_string_field(value, "handoff_instructions")?;
         reject_legacy_edge_metadata(value, "handoff")?;
         reject_legacy_edge_metadata(value, "task")?;
-        if let Some(schema) = value.get(HANDOFF_SCHEMA_METADATA_KEY) {
-            validate_handoff_schema(schema).with_context(|| {
-                format!("edge metadata.{HANDOFF_SCHEMA_METADATA_KEY} is invalid")
-            })?;
+        if let Some(schema) = value.get(HANDOFF_SCHEMA_KEY) {
+            validate_handoff_schema(schema)
+                .with_context(|| format!("legacy edge metadata.{HANDOFF_SCHEMA_KEY} is invalid"))?;
         }
         return Ok(value.clone());
     }
@@ -337,7 +329,7 @@ fn normalize_edge_metadata(value: &serde_json::Value) -> anyhow::Result<serde_js
 fn reject_legacy_edge_metadata(value: &serde_json::Value, field: &str) -> anyhow::Result<()> {
     if value.get(field).is_some() {
         anyhow::bail!(
-            "edge metadata.{field} is no longer supported; use metadata.handoff_schema and metadata.handoff_instructions"
+            "edge metadata.{field} is no longer supported; use the explicit handoff_schema and handoff_instructions edge fields"
         );
     }
     Ok(())

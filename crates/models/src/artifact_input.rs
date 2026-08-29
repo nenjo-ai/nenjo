@@ -28,14 +28,20 @@ pub enum ArtifactInputTransport {
 }
 
 impl ArtifactInputTransport {
-    /// Return whether this transport can carry an artifact of the given size.
-    pub fn accepts(self, size: ArtifactSize) -> bool {
+    /// Maximum artifact size accepted by this concrete transport.
+    pub const fn max_bytes(self) -> Option<NonZeroU64> {
         match self {
-            Self::Unsupported => false,
+            Self::Unsupported => None,
             Self::InlineText { max_bytes }
             | Self::Inline { max_bytes }
-            | Self::FileUpload { max_bytes } => size.bytes() <= max_bytes.get(),
+            | Self::FileUpload { max_bytes } => Some(max_bytes),
         }
+    }
+
+    /// Return whether this transport can carry an artifact of the given size.
+    pub fn accepts(self, size: ArtifactSize) -> bool {
+        self.max_bytes()
+            .is_some_and(|max_bytes| size.bytes() <= max_bytes.get())
     }
 }
 
@@ -47,6 +53,13 @@ impl ArtifactInputTransport {
 pub struct PreparedArtifact {
     reference: ArtifactRef,
     bytes: Arc<[u8]>,
+    representation: PreparedArtifactRepresentation,
+}
+
+#[derive(Debug, Clone, Copy)]
+enum PreparedArtifactRepresentation {
+    Binary,
+    Utf8 { content_start: usize },
 }
 
 impl fmt::Debug for PreparedArtifact {
@@ -55,6 +68,7 @@ impl fmt::Debug for PreparedArtifact {
             .debug_struct("PreparedArtifact")
             .field("reference", &self.reference)
             .field("byte_len", &self.bytes.len())
+            .field("representation", &self.representation)
             .finish()
     }
 }
@@ -75,7 +89,24 @@ impl PreparedArtifact {
                 artifact: Box::new(reference.clone()),
             });
         }
-        Ok(Self { reference, bytes })
+        let representation = if reference.media_type().is_utf8_text() {
+            validate_utf8_charset(reference.media_type(), &bytes, &reference)?;
+            let text = std::str::from_utf8(&bytes).map_err(|_| {
+                PreparedArtifactError::InvalidUtf8Text {
+                    artifact: Box::new(reference.clone()),
+                }
+            })?;
+            PreparedArtifactRepresentation::Utf8 {
+                content_start: usize::from(text.starts_with('\u{feff}')) * 3,
+            }
+        } else {
+            PreparedArtifactRepresentation::Binary
+        };
+        Ok(Self {
+            reference,
+            bytes,
+            representation,
+        })
     }
 
     pub fn reference(&self) -> &ArtifactRef {
@@ -85,6 +116,40 @@ impl PreparedArtifact {
     pub fn bytes(&self) -> &[u8] {
         &self.bytes
     }
+
+    /// Return prevalidated UTF-8 text with an optional leading BOM removed.
+    pub fn utf8_text(&self) -> Option<&str> {
+        let PreparedArtifactRepresentation::Utf8 { content_start } = self.representation else {
+            return None;
+        };
+        std::str::from_utf8(&self.bytes[content_start..]).ok()
+    }
+}
+
+fn validate_utf8_charset(
+    media_type: &crate::MediaType,
+    bytes: &[u8],
+    artifact: &ArtifactRef,
+) -> Result<(), PreparedArtifactError> {
+    let Some(charset) = media_type.as_mime().get_param("charset") else {
+        return Ok(());
+    };
+    let charset = charset.as_str();
+    match charset.to_ascii_lowercase().as_str() {
+        "utf-8" | "utf8" => return Ok(()),
+        "us-ascii" if bytes.is_ascii() => return Ok(()),
+        "us-ascii" => {
+            return Err(PreparedArtifactError::TextCharsetMismatch {
+                artifact: Box::new(artifact.clone()),
+                charset: charset.to_owned(),
+            });
+        }
+        _ => {}
+    }
+    Err(PreparedArtifactError::UnsupportedTextCharset {
+        media_type: media_type.clone(),
+        charset: charset.to_owned(),
+    })
 }
 
 /// Ephemeral artifact lookup for one provider request.
@@ -133,6 +198,20 @@ pub enum PreparedArtifactError {
     },
     #[error("prepared artifact {artifact:?} does not match its authoritative SHA-256 digest")]
     DigestMismatch { artifact: Box<ArtifactRef> },
+    #[error("prepared text artifact {artifact:?} is not valid UTF-8")]
+    InvalidUtf8Text { artifact: Box<ArtifactRef> },
+    #[error("text media type '{media_type}' declares unsupported charset '{charset}'")]
+    UnsupportedTextCharset {
+        media_type: crate::MediaType,
+        charset: String,
+    },
+    #[error(
+        "prepared text artifact {artifact:?} contains bytes outside declared charset '{charset}'"
+    )]
+    TextCharsetMismatch {
+        artifact: Box<ArtifactRef>,
+        charset: String,
+    },
 }
 
 #[cfg(test)]
@@ -195,5 +274,59 @@ mod tests {
 
         assert!(!format!("{prepared:?}").contains("secret-image-bytes"));
         assert!(!format!("{inputs:?}").contains("secret-image-bytes"));
+    }
+
+    #[test]
+    fn textual_preparation_proves_utf8_and_removes_a_leading_bom() {
+        let bytes: Arc<[u8]> = Arc::from(&b"\xef\xbb\xbfhello \xf0\x9f\x8c\x8d"[..]);
+        let reference = ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).unwrap(),
+            Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(&bytes))).unwrap(),
+            MediaType::parse("text/markdown; charset=utf-8").unwrap(),
+            ArtifactSize::new(bytes.len() as u64),
+        );
+
+        let prepared = PreparedArtifact::new(reference, bytes).unwrap();
+
+        assert_eq!(prepared.utf8_text(), Some("hello 🌍"));
+    }
+
+    #[test]
+    fn textual_preparation_rejects_invalid_bytes_and_non_utf8_charset() {
+        let invalid: Arc<[u8]> = Arc::from(&b"\xff\xfe"[..]);
+        let invalid_reference = ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).unwrap(),
+            Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(&invalid))).unwrap(),
+            MediaType::parse("text/plain").unwrap(),
+            ArtifactSize::new(invalid.len() as u64),
+        );
+        assert!(matches!(
+            PreparedArtifact::new(invalid_reference, invalid),
+            Err(PreparedArtifactError::InvalidUtf8Text { .. })
+        ));
+
+        let ascii: Arc<[u8]> = Arc::from(&b"hello"[..]);
+        let latin1_reference = ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).unwrap(),
+            Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(&ascii))).unwrap(),
+            MediaType::parse("text/plain; charset=iso-8859-1").unwrap(),
+            ArtifactSize::new(ascii.len() as u64),
+        );
+        assert!(matches!(
+            PreparedArtifact::new(latin1_reference, ascii),
+            Err(PreparedArtifactError::UnsupportedTextCharset { .. })
+        ));
+
+        let unicode: Arc<[u8]> = Arc::from("hello 🌍".as_bytes());
+        let ascii_reference = ArtifactRef::new(
+            ArtifactId::parse(Uuid::new_v4()).unwrap(),
+            Sha256Digest::parse(&format!("sha256:{:x}", Sha256::digest(&unicode))).unwrap(),
+            MediaType::parse("text/plain; charset=us-ascii").unwrap(),
+            ArtifactSize::new(unicode.len() as u64),
+        );
+        assert!(matches!(
+            PreparedArtifact::new(ascii_reference, unicode),
+            Err(PreparedArtifactError::TextCharsetMismatch { .. })
+        ));
     }
 }

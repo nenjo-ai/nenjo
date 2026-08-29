@@ -24,6 +24,29 @@ impl PreparedModelArtifacts {
         new_analysis_messages: Vec<ArtifactAnalysisMessage>,
         usage: TokenUsage,
     ) -> Self {
+        Self::with_ephemeral_context(
+            messages,
+            artifacts,
+            new_analysis_messages,
+            usage,
+            &[],
+            Vec::new(),
+        )
+    }
+
+    /// Compile a request with host-derived context that is intentionally not persisted.
+    ///
+    /// This is used for deterministic local derivatives such as PDF page text and
+    /// rendered page images. Durable history retains the authoritative source artifact;
+    /// each request rebuilds or reuses the derivative from the source digest.
+    pub fn with_ephemeral_context(
+        messages: &[ConversationMessage],
+        artifacts: PreparedArtifactInputs,
+        new_analysis_messages: Vec<ArtifactAnalysisMessage>,
+        usage: TokenUsage,
+        suppressed_inputs: &[ArtifactInput],
+        additional_request_messages: Vec<ConversationMessage>,
+    ) -> Self {
         let analyses = messages
             .iter()
             .filter_map(|message| match message {
@@ -36,13 +59,14 @@ impl PreparedModelArtifacts {
             .collect::<Vec<_>>();
         let mut request_messages = messages
             .iter()
-            .map(|message| compile_message(message, &analyses))
+            .map(|message| compile_message(message, &analyses, suppressed_inputs))
             .collect::<Vec<_>>();
         request_messages.extend(
             new_analysis_messages
                 .iter()
                 .map(|analysis| ConversationMessage::user(analysis.model_context())),
         );
+        request_messages.extend(additional_request_messages);
         Self {
             request_messages,
             artifacts,
@@ -55,12 +79,18 @@ impl PreparedModelArtifacts {
 fn compile_message(
     message: &ConversationMessage,
     analyses: &[&ArtifactAnalysisMessage],
+    suppressed_inputs: &[ArtifactInput],
 ) -> ConversationMessage {
     match message {
         ConversationMessage::Chat(chat) => {
             let mut chat = chat.clone();
-            chat.artifacts
-                .retain(|input| !analyses.iter().any(|analysis| analysis.covers(input)));
+            chat.artifacts.retain(|input| {
+                !analyses.iter().any(|analysis| analysis.covers(input))
+                    && !suppressed_inputs.iter().any(|suppressed| {
+                        suppressed.artifact() == input.artifact()
+                            && suppressed.instruction() == input.instruction()
+                    })
+            });
             ConversationMessage::Chat(chat)
         }
         ConversationMessage::AssistantToolCalls { text, tool_calls } => {
@@ -76,6 +106,10 @@ fn compile_message(
                     let input =
                         ArtifactInput::new(artifact.clone(), ArtifactInputSource::ToolResult);
                     !analyses.iter().any(|analysis| analysis.covers(&input))
+                        && !suppressed_inputs.iter().any(|suppressed| {
+                            suppressed.artifact() == input.artifact()
+                                && suppressed.instruction() == input.instruction()
+                        })
                 });
             }
             ConversationMessage::ToolResults(results)
@@ -181,6 +215,38 @@ mod tests {
             message
                 .as_chat()
                 .is_some_and(|chat| chat.content.contains("derived text"))
+        }));
+    }
+
+    #[test]
+    fn local_derivatives_replace_only_the_ephemeral_source_input() {
+        let source = reference();
+        let input = ArtifactInput::new(source.clone(), ArtifactInputSource::UserAttachment);
+        let durable = vec![ConversationMessage::chat(
+            ChatMessage::user("read it").with_artifacts(vec![input.clone()]),
+        )];
+        let local_context = ConversationMessage::user("bounded local derivative");
+
+        let prepared = PreparedModelArtifacts::with_ephemeral_context(
+            &durable,
+            PreparedArtifactInputs::default(),
+            Vec::new(),
+            TokenUsage::default(),
+            &[input],
+            vec![local_context],
+        );
+
+        assert!(durable[0].has_artifact_references());
+        assert!(
+            prepared
+                .request_messages
+                .iter()
+                .all(|message| !message.has_artifact_references())
+        );
+        assert!(prepared.request_messages.iter().any(|message| {
+            message
+                .as_chat()
+                .is_some_and(|chat| chat.content == "bounded local derivative")
         }));
     }
 }

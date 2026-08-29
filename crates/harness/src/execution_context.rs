@@ -15,15 +15,29 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
         nenjo::TurnEvent::ModelRequestStarted {
             request_id, model, ..
         } => format!("model_request_started(request={request_id}, model={model})"),
-        nenjo::TurnEvent::AssistantTextDelta { request_id, delta } => {
+        nenjo::TurnEvent::AssistantTextDelta {
+            request_id, delta, ..
+        } => {
             format!(
                 "assistant_text_delta(request={request_id}, len={})",
                 delta.len()
             )
         }
-        nenjo::TurnEvent::AssistantResponse { message, status } => {
-            format!("assistant_response(status={status}, len={})", message.len())
+        nenjo::TurnEvent::AssistantReasoningDelta { request_id, delta } => {
+            format!(
+                "assistant_reasoning_delta(request={request_id}, len={})",
+                delta.len()
+            )
         }
+        nenjo::TurnEvent::ProviderRetryScheduled {
+            request_id,
+            attempt,
+            max_attempts,
+            delay_ms,
+            ..
+        } => format!(
+            "provider_retry_scheduled(request={request_id}, attempt={attempt}/{max_attempts}, delay_ms={delay_ms})"
+        ),
         nenjo::TurnEvent::ModelRequestCompleted { request_id, .. } => {
             format!("model_request_completed(request={request_id})")
         }

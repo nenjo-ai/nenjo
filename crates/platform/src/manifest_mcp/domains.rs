@@ -1,9 +1,16 @@
 use nenjo::{ToolCategory, ToolSpec};
 
 fn domain_ref_schema() -> serde_json::Value {
+    slug_schema("Existing domain slug. Use `slug` from list_domains or get_domain.")
+}
+
+fn slug_schema(description: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "string",
-        "description": "Existing domain slug. Use `slug` from list_domains or get_domain. For configure_domain, omit `domain` to create a new domain."
+        "minLength": 1,
+        "maxLength": 255,
+        "pattern": "^[a-z0-9](?:[a-z0-9_-]{0,253}[a-z0-9])?$",
+        "description": description
     })
 }
 
@@ -11,7 +18,8 @@ fn string_list_schema(description: &str) -> serde_json::Value {
     serde_json::json!({
         "type": "array",
         "description": description,
-        "items": { "type": "string" }
+        "items": slug_schema("Assigned resource slug."),
+        "uniqueItems": true
     })
 }
 
@@ -24,49 +32,6 @@ fn prompt_config_schema() -> serde_json::Value {
                 "type": ["string", "null"],
                 "description": "Developer prompt addon applied while the domain is active. Set null to clear."
             }
-        },
-        "additionalProperties": false
-    })
-}
-
-fn configure_metadata_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Domain metadata patch. metadata.slug, metadata.name, and metadata.command are required when creating; omitted fields are unchanged on update.",
-        "properties": {
-            "slug": {
-                "type": "string",
-                "description": "Stable domain slug. Required when creating a new domain."
-            },
-            "name": {
-                "type": "string",
-                "description": "Domain runtime/display name. Required when creating a new domain."
-            },
-            "path": {
-                "type": "string",
-                "description": "Folder path for this domain. Omit to leave unchanged."
-            },
-            "description": {
-                "type": ["string", "null"],
-                "description": "Human-readable description. Omit to leave unchanged; set null to clear."
-            },
-            "command": {
-                "type": "string",
-                "description": "Slash/hash-style command used to activate this domain, such as `#creator`. Required when creating a new domain."
-            }
-        },
-        "additionalProperties": false
-    })
-}
-
-fn configure_assignments_schema() -> serde_json::Value {
-    serde_json::json!({
-        "type": "object",
-        "description": "Full replacement assignment lists. Omit a field to leave that assignment type unchanged; pass an empty array to clear it.",
-        "properties": {
-            "abilities": string_list_schema("Full replacement list of ability names/slugs activated by this domain."),
-            "mcp_servers": string_list_schema("Full replacement list of MCP server slugs activated by this domain."),
-            "script_tools": string_list_schema("Full replacement list of native script tool slugs activated by this domain.")
         },
         "additionalProperties": false
     })
@@ -102,15 +67,33 @@ pub fn domain_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_domain".to_string(),
-            description: "Create or update one domain in a single backend-owned sequence. Omit `domain` to create; include `domain` to update by slug. On create, metadata.slug, metadata.name, and metadata.command are required. Omitted fields are unchanged on update. assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns `domain: DomainDocument`."
+            description: "Create or update one domain atomically by required stable slug. If the slug does not exist, `name` and `command` are required. Omitted fields are unchanged; set description to null to clear it. Assignment arrays are full replacements when present; pass an empty array to clear that assignment type. Returns the same canonical `domain: DomainDocument` as get_domain, not a patch echo."
                 .to_string(),
             parameters: serde_json::json!({
                 "type": "object",
+                "required": ["slug"],
                 "properties": {
-                    "domain": domain_ref_schema(),
-                    "metadata": configure_metadata_schema(),
+                    "slug": slug_schema("Required stable domain slug. Configure never renames this slug."),
+                    "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Domain runtime/display name. Required when the slug does not exist; omit on update to leave unchanged."
+                    },
+                    "path": {
+                        "type": "string",
+                        "description": "Folder path for this domain. Omit to leave unchanged."
+                    },
+                    "description": {
+                        "type": ["string", "null"],
+                        "description": "Human-readable description. Omit to leave unchanged; set null to clear."
+                    },
+                    "command": {
+                        "type": "string",
+                        "description": "Slash/hash-style command used to activate this domain. Required when the slug does not exist; omit on update to leave unchanged."
+                    },
                     "prompt_config": prompt_config_schema(),
-                    "assignments": configure_assignments_schema()
+                    "abilities": string_list_schema("Full replacement list of ability slugs activated by this domain. Omit to leave unchanged."),
+                    "mcp_servers": string_list_schema("Full replacement list of MCP server slugs activated by this domain. Omit to leave unchanged.")
                 },
                 "additionalProperties": false
             }),
@@ -132,15 +115,24 @@ mod tests {
             .expect("configure_domain tool should exist");
 
         assert_eq!(
-            configure_domain.parameters["properties"]["assignments"]["properties"]["abilities"]["description"],
+            configure_domain.parameters["properties"]["abilities"]["description"],
             serde_json::json!(
-                "Full replacement list of ability names/slugs activated by this domain."
+                "Full replacement list of ability slugs activated by this domain. Omit to leave unchanged."
             )
         );
         assert!(
             configure_domain
                 .description
-                .contains("assignment arrays are full replacements")
+                .contains("Assignment arrays are full replacements")
+        );
+        assert_eq!(
+            configure_domain.parameters["required"],
+            serde_json::json!(["slug"])
+        );
+        assert!(
+            configure_domain.parameters["properties"]
+                .get("script_tools")
+                .is_none()
         );
     }
 }

@@ -175,6 +175,8 @@ struct NativeEndpointInfo {
 #[derive(Debug, Deserialize)]
 struct NativeChoice {
     message: NativeResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -285,7 +287,10 @@ impl OpenRouterProvider {
         Ok(native)
     }
 
-    fn parse_native_response(message: NativeResponseMessage) -> ChatResponse {
+    fn parse_native_response(
+        message: NativeResponseMessage,
+        finish_reason: Option<&str>,
+    ) -> ChatResponse {
         let tool_calls = message
             .tool_calls
             .unwrap_or_default()
@@ -297,11 +302,14 @@ impl OpenRouterProvider {
             })
             .collect::<Vec<_>>();
 
+        let finish_reason =
+            crate::FinishReason::from_provider(finish_reason, !tool_calls.is_empty());
         ChatResponse {
             text: message.content,
             tool_calls,
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
+            finish_reason,
         }
     }
 
@@ -671,13 +679,13 @@ impl ModelProvider for OpenRouterProvider {
             })
             .unwrap_or_default();
 
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenRouter"))?;
-        let mut result = Self::parse_native_response(message);
+        let mut result =
+            Self::parse_native_response(choice.message, choice.finish_reason.as_deref());
         result.usage = usage;
         Ok(result)
     }

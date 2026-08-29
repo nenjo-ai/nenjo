@@ -15,13 +15,13 @@ use nenjo::provider::{
     ToolFactory,
 };
 use nenjo::types::{AbilityPromptConfig, DomainPromptConfig};
-use nenjo::{Slug, Tool, ToolCategory, ToolResult};
+use nenjo::{Buffered, ChatInput, Slug, Tool, ToolCategory, ToolResult};
 use nenjo_models::traits::{
     ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage,
 };
 use nenjo_models::{
     ArtifactId, ArtifactRef, ArtifactSize, MediaType, PreparedArtifact, PreparedArtifactInputs,
-    Sha256Digest, ToolCall,
+    Sha256Digest,
 };
 
 // ---------------------------------------------------------------------------
@@ -49,21 +49,14 @@ impl ModelProvider for MockProvider {
         _temperature: f64,
     ) -> Result<ChatResponse> {
         Ok(ChatResponse {
-            text: None,
-            tool_calls: vec![ToolCall {
-                id: "call_respond_to_user".to_string(),
-                name: "respond_to_user".to_string(),
-                arguments: serde_json::json!({
-                    "message": self.response_text.clone(),
-                    "status": "completed",
-                })
-                .to_string(),
-            }],
+            text: Some(self.response_text.clone()),
+            tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
             },
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 
@@ -125,18 +118,11 @@ impl ModelProvider for ArtifactRecordingProvider {
         *self.observation.bytes.lock().unwrap() = bytes;
 
         Ok(ChatResponse {
-            text: None,
-            tool_calls: vec![ToolCall {
-                id: "call_respond_to_user".to_string(),
-                name: "respond_to_user".to_string(),
-                arguments: serde_json::json!({
-                    "message": "artifact prepared",
-                    "status": "completed",
-                })
-                .to_string(),
-            }],
+            text: Some("artifact prepared".to_string()),
+            tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 
@@ -386,16 +372,52 @@ async fn runner_chat() {
         .build()
         .await
         .unwrap();
-    let output = runner.chat("Hi there").await.expect("chat should succeed");
+    let output = runner
+        .chat(ChatInput::new("Hi there"), Buffered)
+        .await
+        .expect("chat should start")
+        .output()
+        .await
+        .expect("chat should succeed");
 
     assert_eq!(output.text, "Hello from the mock LLM!");
     assert_eq!(output.input_tokens, 100);
     assert_eq!(output.output_tokens, 50);
-    assert_eq!(output.tool_calls, 1);
+    assert_eq!(output.tool_calls, 0);
     assert!(
         !output.messages.is_empty(),
         "should have conversation messages"
     );
+}
+
+#[tokio::test]
+async fn natural_assistant_question_completes_the_turn() {
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(MockModelProviderFactory::new(
+            "Which deployment environment should I target?",
+        ))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let output = runner
+        .chat(ChatInput::new("Deploy it"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+    assert_eq!(output.text, "Which deployment environment should I target?");
+    assert_eq!(output.tool_calls, 0);
 }
 
 #[tokio::test]
@@ -468,9 +490,12 @@ async fn runner_chat_with_history() {
     ];
 
     let output = runner
-        .chat_with_history("And what's 3+3?", history)
+        .chat(ChatInput::new("And what's 3+3?").history(history), Buffered)
         .await
-        .expect("chat_with_history should succeed");
+        .expect("chat should start")
+        .output()
+        .await
+        .expect("chat with history should succeed");
 
     assert_eq!(output.text, "I remember our conversation.");
 }
@@ -503,12 +528,18 @@ async fn runner_with_custom_tool() {
         "runner should not expose duplicate tool names: {names:?}"
     );
     assert!(names.contains(&"echo"));
-    assert!(names.contains(&"respond_to_user"));
+    assert!(!names.contains(&"respond_to_user"));
     assert!(names.contains(&"list_knowledge_packs"));
     assert!(names.contains(&"inspect"));
     assert!(names.contains(&"stop"));
 
-    let output = runner.chat("Use the echo tool").await.unwrap();
+    let output = runner
+        .chat(ChatInput::new("Use the echo tool"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
     assert_eq!(output.text, "Done!");
 }
 
@@ -539,12 +570,18 @@ async fn runner_with_tool_factory() {
         "runner should not expose duplicate tool names: {names:?}"
     );
     assert!(names.contains(&"echo"));
-    assert!(names.contains(&"respond_to_user"));
+    assert!(!names.contains(&"respond_to_user"));
     assert!(names.contains(&"list_knowledge_packs"));
     assert!(names.contains(&"inspect"));
     assert!(names.contains(&"stop"));
 
-    let output = runner.chat("Hello").await.unwrap();
+    let output = runner
+        .chat(ChatInput::new("Hello"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
     assert_eq!(output.text, "Tool factory works!");
 }
 
@@ -801,8 +838,8 @@ async fn ability_agent_has_ability_invoke_tool_only() {
         "base agent should have ability invocation tool, got: {tool_names:?}"
     );
     assert!(
-        tool_names.contains(&"respond_to_user"),
-        "parent chat agent should finalize through respond_to_user, got: {tool_names:?}"
+        !tool_names.contains(&"respond_to_user"),
+        "parent chat agents should complete naturally, got: {tool_names:?}"
     );
     assert!(
         !tool_names.contains(&"writer"),
@@ -939,8 +976,8 @@ async fn agent_without_abilities_has_no_ability_tools() {
         "agent without abilities should not have ability broker tools, got: {tool_names:?}"
     );
     assert!(
-        tool_names.contains(&"respond_to_user"),
-        "parent chat agents should expose respond_to_user, got: {tool_names:?}"
+        !tool_names.contains(&"respond_to_user"),
+        "parent chat agents should not expose respond_to_user, got: {tool_names:?}"
     );
 }
 

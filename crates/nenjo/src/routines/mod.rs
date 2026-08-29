@@ -18,6 +18,7 @@
 //!
 //! ```
 
+pub mod config;
 pub mod council;
 pub mod event;
 pub mod executor;
@@ -36,6 +37,7 @@ use crate::manifest::RoutineStepManifest;
 use crate::memory::MemoryScope;
 use crate::provider::ProviderRuntime;
 
+pub use config::{GateRetryLimit, RoutineExecutionConfig, RoutineExecutionConfigError};
 pub use event::RoutineEvent;
 pub use runner::{ResumableRoutineExecutionHandle, RoutineExecutionHandle, RoutineRunner};
 pub use types::{

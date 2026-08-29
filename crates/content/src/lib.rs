@@ -185,6 +185,45 @@ impl MediaType {
     pub fn essence_str(&self) -> &str {
         self.0.essence_str()
     }
+
+    /// Return whether this media type conventionally carries UTF-8 model-facing text.
+    pub fn is_utf8_text(&self) -> bool {
+        is_utf8_text_media_type(self.essence_str())
+    }
+
+    /// Return whether this media type identifies a PDF document.
+    pub fn is_pdf(&self) -> bool {
+        self.essence_str() == "application/pdf"
+    }
+}
+
+/// Classify storage-neutral media types whose plaintext bytes may be decoded as UTF-8.
+///
+/// Actual bytes are still validated before use. This function classifies the declared
+/// representation; it does not trust the declaration as proof of valid text.
+pub fn is_utf8_text_media_type(media_type: &str) -> bool {
+    let essence = media_type
+        .split(';')
+        .next()
+        .map(str::trim)
+        .unwrap_or_default();
+    essence.starts_with("text/")
+        || matches!(
+            essence,
+            "application/json"
+                | "application/ld+json"
+                | "application/csv"
+                | "application/x-csv"
+                | "application/xml"
+                | "application/javascript"
+                | "application/ecmascript"
+                | "application/yaml"
+                | "application/x-yaml"
+                | "application/toml"
+                | "image/svg+xml"
+        )
+        || (essence.starts_with("application/")
+            && (essence.ends_with("+json") || essence.ends_with("+xml")))
 }
 
 impl fmt::Display for MediaType {
@@ -431,6 +470,29 @@ mod tests {
         assert_eq!(media_type.essence_str(), "image/png");
         assert!(MediaType::parse("image/*").is_err());
         assert!(MediaType::parse("not a mime type").is_err());
+    }
+
+    #[test]
+    fn utf8_text_media_types_cover_structured_documents() {
+        for media_type in [
+            "text/plain",
+            "text/markdown; charset=utf-8",
+            "application/json",
+            "application/problem+json",
+            "application/csv",
+            "application/x-csv",
+            "application/xml",
+            "application/atom+xml",
+            "application/yaml",
+            "application/toml",
+            "application/javascript",
+            "image/svg+xml",
+        ] {
+            assert!(is_utf8_text_media_type(media_type), "{media_type}");
+        }
+        assert!(!is_utf8_text_media_type("application/pdf"));
+        assert!(!is_utf8_text_media_type("application/vnd.ms-excel"));
+        assert!(!is_utf8_text_media_type("application/octet-stream"));
     }
 
     #[test]

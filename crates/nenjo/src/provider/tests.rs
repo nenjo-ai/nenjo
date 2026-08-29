@@ -28,6 +28,7 @@ impl nenjo_models::ModelProvider for MockProvider {
             tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: nenjo_models::TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 }
@@ -1063,7 +1064,7 @@ async fn routine_runner_keeps_manifest_snapshot_after_provider_update() {
         name: "routine".into(),
         slug: Slug::derive("routine"),
         description: None,
-        metadata: crate::manifest::RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![crate::manifest::RoutineStepManifest {
             slug: Slug::derive("step"),
             routine: Slug::derive("routine"),

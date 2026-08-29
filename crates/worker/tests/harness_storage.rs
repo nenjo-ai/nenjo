@@ -32,6 +32,7 @@ impl nenjo::ModelProvider for TestModelProvider {
             tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 }

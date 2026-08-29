@@ -29,8 +29,6 @@ pub struct RoutineManifestV1 {
     #[serde(default)]
     pub description: Option<String>,
     #[serde(default)]
-    pub metadata: Map<String, serde_json::Value>,
-    #[serde(default)]
     pub entry_steps: Vec<String>,
     #[serde(default)]
     pub steps: Vec<RoutineStepManifestV1>,
@@ -77,8 +75,15 @@ pub struct RoutineEdgeManifestV1 {
     /// Human-review outcome alias for `condition`.
     #[serde(default)]
     pub outcome: Option<String>,
+    #[serde(default, alias = "max_attempts")]
+    pub max_retries: Option<u32>,
     #[serde(default)]
-    pub max_attempts: Option<u32>,
+    pub purpose: Option<String>,
+    #[serde(default)]
+    pub handoff_instructions: Option<String>,
+    #[serde(default)]
+    pub handoff_schema: Option<serde_json::Value>,
+    /// Legacy compatibility input. New manifests use the explicit fields.
     #[serde(default)]
     pub metadata: Map<String, serde_json::Value>,
 }
@@ -181,7 +186,7 @@ mod tests {
             panic!("expected routine manifest");
         };
         assert_eq!(routine.name, "review_resource_design");
-        assert_eq!(routine.edges[0].max_attempts, Some(3));
+        assert_eq!(routine.edges[0].max_retries, Some(3));
     }
 
     #[test]

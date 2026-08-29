@@ -11,6 +11,138 @@ fn slug(description: &str) -> serde_json::Value {
     json!({"type": "string", "description": description})
 }
 
+fn recurrence() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "frequency": {"const": "interval"},
+                    "every": {"type": "integer", "minimum": 1},
+                    "unit": {"type": "string", "enum": ["seconds", "minutes", "hours", "days"]}
+                },
+                "required": ["frequency", "every", "unit"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "frequency": {"const": "daily"},
+                    "interval": {"type": "integer", "minimum": 1}
+                },
+                "required": ["frequency", "interval"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "frequency": {"const": "weekly"},
+                    "interval": {"type": "integer", "minimum": 1},
+                    "weekdays": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]},
+                        "minItems": 1,
+                        "uniqueItems": true
+                    }
+                },
+                "required": ["frequency", "interval", "weekdays"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "frequency": {"const": "monthly"},
+                    "interval": {"type": "integer", "minimum": 1},
+                    "day_of_month": {"type": "integer", "minimum": 1, "maximum": 31}
+                },
+                "required": ["frequency", "interval", "day_of_month"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "frequency": {"const": "yearly"},
+                    "interval": {"type": "integer", "minimum": 1},
+                    "month": {"type": "integer", "minimum": 1, "maximum": 12},
+                    "day": {"type": "integer", "minimum": 1, "maximum": 31}
+                },
+                "required": ["frequency", "interval", "month", "day"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "frequency": {"const": "cron"},
+                    "expression": {"type": "string", "minLength": 1}
+                },
+                "required": ["frequency", "expression"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn schedule_end() -> serde_json::Value {
+    json!({
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {"type": {"const": "never"}},
+                "required": ["type"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "on"},
+                    "date": {"type": "string", "format": "date"}
+                },
+                "required": ["type", "date"],
+                "additionalProperties": false
+            },
+            {
+                "type": "object",
+                "properties": {
+                    "type": {"const": "after"},
+                    "occurrences": {"type": "integer", "minimum": 1}
+                },
+                "required": ["type", "occurrences"],
+                "additionalProperties": false
+            }
+        ]
+    })
+}
+
+fn schedule() -> serde_json::Value {
+    json!({
+        "description": "Desired task schedule state. Omit to preserve the current schedule, pass null to remove it, or pass an object to create or update it. When the user asks for work to run on a schedule, explicitly include enabled: true. Creating requires enabled, starts_at, timezone, and recurrence; end defaults to never. Updating may include only changed fields.",
+        "oneOf": [
+            {
+                "type": "object",
+                "properties": {
+                    "enabled": {
+                        "type": "boolean",
+                        "description": "Set true when the user wants the task to run on this schedule. Set false only when the user asks to pause or disable it. Omit on update only to preserve the existing active or paused state."
+                    },
+                    "starts_at": {
+                        "type": "string",
+                        "description": "Local wall-clock start in timezone, formatted as YYYY-MM-DDTHH:MM:SS without a UTC offset."
+                    },
+                    "timezone": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "IANA timezone such as America/Chicago."
+                    },
+                    "recurrence": recurrence(),
+                    "end": schedule_end()
+                },
+                "additionalProperties": false
+            },
+            {"type": "null"}
+        ]
+    })
+}
+
 /// Return the task-centered tools exposed to agents with task scopes.
 pub fn task_tools() -> Vec<ToolSpec> {
     vec![
@@ -71,7 +203,7 @@ pub fn task_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "configure_task".into(),
-            description: "Create or update one task using human-readable resource references. Before drafting, inspect labels with list_task_labels, inspect the relevant project with list_projects and get_project, and inspect the execution target with list_agents and get_agent or list_routines and get_routine so the task fits its context and capabilities. To create, omit task_slug and provide both title and non-empty instructions; missing labels are created in the organization catalog. To update, provide the exact task_slug and only the fields that should change; omit instructions to preserve the current instructions and use existing label names. For project, pass the exact slug returned by list_projects; omit project to preserve the current assignment, or pass null to clear it. A successful response is the saved task, so do not repeat the same update.".into(),
+            description: "Create or update one task using human-readable resource references. Before drafting, inspect labels with list_task_labels, inspect the relevant project with list_projects and get_project, and inspect the execution target with list_agents and get_agent or list_routines and get_routine so the task fits its context and capabilities. To create, omit task_slug and provide both title and non-empty instructions; missing labels are created in the organization catalog. To update, provide the exact task_slug and only the fields that should change; omit instructions to preserve the current instructions and use existing label names. For project and schedule, omit the field to preserve it or pass null to remove it. When the user asks for work to run on a schedule, include schedule.enabled=true; omitting enabled preserves an existing disabled state. A successful response is the full saved task including its current schedule, so do not repeat the same update.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
@@ -96,6 +228,7 @@ pub fn task_tools() -> Vec<ToolSpec> {
                         ],
                         "description": "Agent or routine execution target, or null to clear it."
                     },
+                    "schedule": schedule(),
                     "labels": {
                         "type": "array",
                         "items": {"type": "string", "minLength": 1},

@@ -145,7 +145,7 @@ impl NatsTransport {
                 jetstream: self.jetstream.clone(),
                 stream_name: self.stream_name.clone(),
                 subject,
-                consumer_name: format!("work-requests-{capability}"),
+                consumer_name: work_request_consumer_name(capability),
                 max_deliver: self.max_deliver,
                 ack_wait: self.ack_wait,
                 tx: tx.clone(),
@@ -189,6 +189,11 @@ impl NatsTransport {
     }
 }
 
+/// One shared work queue per capability inside the authenticated org account.
+fn work_request_consumer_name(capability: Capability) -> String {
+    format!("work-requests-{capability}")
+}
+
 struct ConsumerSpawnSpec {
     jetstream: jetstream::Context,
     stream_name: String,
@@ -229,6 +234,13 @@ async fn spawn_consumer(spec: ConsumerSpawnSpec) -> Result<(), EventBusError> {
         .map_err(|e| {
             EventBusError::Transport(format!("create consumer '{consumer_name}' failed: {e}"))
         })?;
+    let actual_filter = &consumer.cached_info().config.filter_subject;
+    if actual_filter != &subject {
+        return Err(EventBusError::Transport(format!(
+            "consumer '{consumer_name}' filter mismatch: expected '{subject}', found \
+             '{actual_filter}'"
+        )));
+    }
 
     let mut messages = consumer
         .messages()
@@ -284,6 +296,13 @@ async fn spawn_consumer(spec: ConsumerSpawnSpec) -> Result<(), EventBusError> {
                         .get_or_create_consumer(&consumer_name, consumer_config.clone())
                         .await
                         .map_err(|e| e.to_string())?;
+                    let actual_filter = &c.cached_info().config.filter_subject;
+                    if actual_filter != &subject {
+                        return Err(format!(
+                            "consumer '{consumer_name}' filter mismatch: expected '{subject}', \
+                             found '{actual_filter}'"
+                        ));
+                    }
                     c.messages().await.map_err(|e| e.to_string())
                 }
                 .await;
@@ -691,6 +710,14 @@ mod tests {
         let desired = vec!["worker_requests.*.*.*".to_string()];
 
         assert!(!stream_subjects_cover(&existing, &desired));
+    }
+
+    #[test]
+    fn work_request_consumer_identity_is_account_local() {
+        assert_eq!(
+            work_request_consumer_name(Capability::Chat),
+            "work-requests-chat"
+        );
     }
 
     #[test]

@@ -10,7 +10,7 @@ use uuid::Uuid;
 
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
-    RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType, model_manifest_slug,
+    RoutineManifest, RoutineStepManifest, RoutineStepType, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::{Slug, TaskInput};
@@ -121,7 +121,7 @@ async fn single_step_routine_with_real_llm() {
         name: "smoke-routine".into(),
         slug: routine_slug.clone(),
         description: Some("Single-step routine integration test".into()),
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive("respond"),
             routine: routine_slug.clone(),

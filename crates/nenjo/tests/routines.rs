@@ -10,7 +10,7 @@ use uuid::Uuid;
 use nenjo::manifest::{
     AgentManifest, CouncilDelegationStrategy, CouncilManifest, CouncilMemberManifest, Manifest,
     ModelManifest, ProjectManifest, PromptConfig, PromptTemplates, RoutineEdgeCondition,
-    RoutineEdgeManifest, RoutineManifest, RoutineMetadata, RoutineStepManifest, RoutineStepType,
+    RoutineEdgeManifest, RoutineManifest, RoutineStepManifest, RoutineStepType,
     model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
@@ -53,6 +53,7 @@ impl ModelProvider for MockLlm {
                 input_tokens: 10,
                 output_tokens: 5,
             },
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 
@@ -428,16 +429,8 @@ fn ensure_routable_edge_handoff_schemas(routine: &mut RoutineManifest) {
         ) {
             continue;
         }
-        if !edge.metadata.is_object() {
-            edge.metadata = serde_json::json!({});
-        }
-        let object = edge
-            .metadata
-            .as_object_mut()
-            .expect("metadata was normalized to an object");
-        object
-            .entry("handoff_schema".to_string())
-            .or_insert_with(default_handoff_schema);
+        edge.handoff_schema
+            .get_or_insert_with(default_handoff_schema);
     }
 }
 
@@ -529,11 +522,12 @@ fn plain_response(text: &str) -> ChatResponse {
             input_tokens: 10,
             output_tokens: 5,
         },
+        finish_reason: nenjo_models::FinishReason::Stop,
     }
 }
 
 fn canonical_routine(mut routine: RoutineManifest) -> RoutineManifest {
-    if routine.metadata.entry_steps.is_empty() {
+    if routine.entry_steps.is_empty() {
         let required_targets = routine
             .edges
             .iter()
@@ -547,7 +541,7 @@ fn canonical_routine(mut routine: RoutineManifest) -> RoutineManifest {
             .min_by_key(|step| step.order_index)
             .or_else(|| routine.steps.iter().min_by_key(|step| step.order_index))
         {
-            routine.metadata.entry_steps = vec![entry.slug.clone()];
+            routine.entry_steps = vec![entry.slug.clone()];
         }
     }
 
@@ -599,7 +593,10 @@ fn canonical_routine(mut routine: RoutineManifest) -> RoutineManifest {
                     | RoutineStepType::TerminalFail => RoutineEdgeCondition::Always,
                     RoutineStepType::Human => RoutineEdgeCondition::Approved,
                 },
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             });
         }
     }
@@ -636,6 +633,7 @@ fn route_response(
             input_tokens: 10,
             output_tokens: 5,
         },
+        finish_reason: nenjo_models::FinishReason::Stop,
     }
 }
 
@@ -652,6 +650,7 @@ fn progress_tool_response(text: &str) -> ChatResponse {
             input_tokens: 10,
             output_tokens: 5,
         },
+        finish_reason: nenjo_models::FinishReason::Stop,
     }
 }
 
@@ -671,7 +670,7 @@ async fn single_agent_step() {
         name: "simple-routine".into(),
         slug: Slug::derive("simple-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("simple-routine"),
@@ -732,7 +731,7 @@ async fn routine_agent_request_includes_route_next_steps_tool() {
         name: "tool-check-routine".into(),
         slug: Slug::derive("tool-check-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("tool-check-routine"),
@@ -816,7 +815,7 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
         name: "agent-instructions".into(),
         slug: Slug::derive("agent-instructions"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("agent-instructions"),
@@ -887,7 +886,7 @@ async fn routine_agent_step_renders_project_context() {
         name: "agent-project-context".into(),
         slug: Slug::derive("agent-project-context"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("agent-project-context"),
@@ -972,7 +971,7 @@ async fn routine_agent_step_uses_task_execution_template() {
         name: "cron-agent-template".into(),
         slug: Slug::derive("cron-agent-template"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("cron-agent-template"),
@@ -1043,7 +1042,7 @@ async fn routine_agent_step_without_project_uses_task_execution_template() {
         name: "cron-agent-no-project".into(),
         slug: Slug::derive("cron-agent-no-project"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("cron-agent-no-project"),
@@ -1113,7 +1112,7 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
         name: "gate-instructions".into(),
         slug: Slug::derive("gate-instructions"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("gate-instructions"),
@@ -1186,7 +1185,7 @@ async fn single_agent_step_retries_until_route_next_steps() {
         name: "retry-for-route-next-steps".into(),
         slug: Slug::derive("retry-for-route-next-steps"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("retry-for-route-next-steps"),
@@ -1220,6 +1219,7 @@ async fn single_agent_step_retries_until_route_next_steps() {
                 input_tokens: 10,
                 output_tokens: 5,
             },
+            finish_reason: nenjo_models::FinishReason::Stop,
         },
         route_response(
             "Implementation complete.",
@@ -1284,7 +1284,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
         name: "route-progress-reset".into(),
         slug: Slug::derive("route-progress-reset"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("route-progress-reset"),
@@ -1317,6 +1317,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+            finish_reason: nenjo_models::FinishReason::Stop,
             },
             progress_tool_response("Writing the implementation now."),
             ChatResponse {
@@ -1327,6 +1328,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+            finish_reason: nenjo_models::FinishReason::Stop,
             },
             ChatResponse {
                 text: Some("I need one more verification pass.".into()),
@@ -1336,6 +1338,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+            finish_reason: nenjo_models::FinishReason::Stop,
             },
             route_response(
                 "Implementation complete.",
@@ -1374,9 +1377,7 @@ async fn agent_step_retries_invalid_route_next_steps_until_all_targets_are_hande
         name: "retry-invalid-route".into(),
         slug: Slug::derive("retry-invalid-route"),
         description: None,
-        metadata: RoutineMetadata {
-            entry_steps: vec![Slug::derive("start")],
-        },
+        entry_steps: vec![Slug::derive("start")],
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive("start"),
@@ -1425,28 +1426,40 @@ async fn agent_step_retries_invalid_route_next_steps_until_all_targets_are_hande
                 source_step: Slug::derive("start"),
                 target_step: Slug::derive("left"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({"purpose": "left branch"}),
+                purpose: Some("left branch".to_string()),
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-invalid-route"),
                 source_step: Slug::derive("start"),
                 target_step: Slug::derive("right"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({"purpose": "right branch"}),
+                purpose: Some("right branch".to_string()),
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-invalid-route"),
                 source_step: Slug::derive("left"),
                 target_step: Slug::derive("done"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-invalid-route"),
                 source_step: Slug::derive("right"),
                 target_step: Slug::derive("done"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };
@@ -1545,7 +1558,7 @@ async fn stream_events_single_step() {
         name: "stream-test".into(),
         slug: Slug::derive("stream-test"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("stream-test"),
@@ -1638,7 +1651,7 @@ async fn two_step_chain() {
         name: "code-review".into(),
         slug: Slug::derive("code-review"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive(step1_id.to_string()),
@@ -1666,7 +1679,10 @@ async fn two_step_chain() {
             source_step: Slug::derive(step1_id.to_string()),
             target_step: Slug::derive(step2_id.to_string()),
             condition: RoutineEdgeCondition::Always,
-            metadata: serde_json::json!({}),
+            purpose: None,
+            handoff_instructions: None,
+            handoff_schema: None,
+            max_retries: None,
         }],
     };
 
@@ -1742,7 +1758,7 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
         name: "agent-fail-stops-routine".into(),
         slug: Slug::derive("agent-fail-stops-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive(step1_id.to_string()),
@@ -1770,7 +1786,10 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
             source_step: Slug::derive(step1_id.to_string()),
             target_step: Slug::derive(step2_id.to_string()),
             condition: RoutineEdgeCondition::Always,
-            metadata: serde_json::json!({}),
+            purpose: None,
+            handoff_instructions: None,
+            handoff_schema: None,
+            max_retries: None,
         }],
     };
 
@@ -1804,6 +1823,7 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
                     input_tokens: 10,
                     output_tokens: 5,
                 },
+                finish_reason: nenjo_models::FinishReason::Stop,
             },
         ]))
         .with_tool_factory(NoopToolFactory)
@@ -1855,7 +1875,7 @@ async fn gate_step_pass() {
         name: "gated-routine".into(),
         slug: Slug::derive("gated-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive(step1_id.to_string()),
@@ -1894,14 +1914,20 @@ async fn gate_step_pass() {
                 source_step: Slug::derive(step1_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("gated-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(terminal_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };
@@ -1966,7 +1992,7 @@ async fn gate_always_edge_is_invalid() {
         name: "invalid-gate-routing".into(),
         slug: Slug::derive("invalid-gate-routing"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive(step1_id.to_string()),
@@ -2005,14 +2031,20 @@ async fn gate_always_edge_is_invalid() {
                 source_step: Slug::derive(step1_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("invalid-gate-routing"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(terminal_id.to_string()),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };
@@ -2076,7 +2108,7 @@ async fn gate_on_fail_routes_back_before_completion() {
         name: "retry-gated-routine".into(),
         slug: Slug::derive("retry-gated-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive(step1_id.to_string()),
@@ -2115,21 +2147,30 @@ async fn gate_on_fail_routes_back_before_completion() {
                 source_step: Slug::derive(step1_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-gated-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(step1_id.to_string()),
                 condition: RoutineEdgeCondition::OnFail,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-gated-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(terminal_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };
@@ -2215,7 +2256,7 @@ async fn gate_on_fail_routes_back_before_completion() {
 }
 
 #[tokio::test]
-async fn gate_on_fail_edge_exhausts_after_max_attempts() {
+async fn gate_on_fail_edge_exhausts_after_max_retries() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step1_id = Uuid::new_v4();
@@ -2228,7 +2269,7 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
         name: "retry-exhaustion-routine".into(),
         slug: Slug::derive("retry-exhaustion-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive(step1_id.to_string()),
@@ -2267,21 +2308,30 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
                 source_step: Slug::derive(step1_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-exhaustion-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(done_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-exhaustion-routine"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(step1_id.to_string()),
                 condition: RoutineEdgeCondition::OnFail,
-                metadata: serde_json::json!({ "max_attempts": 1 }),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: Some(nenjo::routines::GateRetryLimit::new(1)),
             },
         ],
     };
@@ -2350,7 +2400,7 @@ async fn gate_on_fail_edge_exhausts_after_max_attempts() {
     assert_eq!(result.step_slug, Slug::derive(gate_id.to_string()));
     assert_eq!(result.step_name, "verify");
     assert!(
-        result.output.contains("exhausted after 1 attempts"),
+        result.output.contains("exhausted after 1 retries"),
         "unexpected output: {}",
         result.output
     );
@@ -2369,7 +2419,7 @@ async fn gate_execution_error_does_not_activate_on_fail_route() {
         name: "gate-provider-error-stops".into(),
         slug: Slug::derive("gate-provider-error-stops"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive(implement_id.to_string()),
@@ -2408,21 +2458,30 @@ async fn gate_execution_error_does_not_activate_on_fail_route() {
                 source_step: Slug::derive(implement_id.to_string()),
                 target_step: Slug::derive(gate_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("gate-provider-error-stops"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(implement_id.to_string()),
                 condition: RoutineEdgeCondition::OnFail,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("gate-provider-error-stops"),
                 source_step: Slug::derive(gate_id.to_string()),
                 target_step: Slug::derive(done_id.to_string()),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };
@@ -2523,7 +2582,7 @@ async fn terminal_fail_step() {
         name: "fail-routine".into(),
         slug: Slug::derive("fail-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("fail-routine"),
@@ -2576,7 +2635,7 @@ async fn council_decompose() {
         name: "council-routine".into(),
         slug: Slug::derive("council-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("council-routine"),
@@ -2649,7 +2708,7 @@ async fn council_broadcast() {
         name: "broadcast-council-routine".into(),
         slug: Slug::derive("broadcast-council-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("broadcast-council-routine"),
@@ -2729,7 +2788,7 @@ async fn council_round_robin() {
         name: "round-robin-council-routine".into(),
         slug: Slug::derive("round-robin-council-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("round-robin-council-routine"),
@@ -2809,7 +2868,7 @@ async fn council_vote() {
         name: "vote-council-routine".into(),
         slug: Slug::derive("vote-council-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("vote-council-routine"),
@@ -2886,7 +2945,7 @@ async fn task_routine_execution_emits_a_terminal_result() {
         name: "cron-routine".into(),
         slug: Slug::derive("cron-routine"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![RoutineStepManifest {
             slug: Slug::derive(step_id.to_string()),
             routine: Slug::derive("cron-routine"),
@@ -2958,7 +3017,7 @@ async fn task_agent_route_next_steps_continues_to_terminal_step() {
         name: "cron-agent-terminal".into(),
         slug: Slug::derive("cron-agent-terminal"),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive(agent_step_id.to_string()),
@@ -2986,7 +3045,10 @@ async fn task_agent_route_next_steps_continues_to_terminal_step() {
             source_step: Slug::derive(agent_step_id.to_string()),
             target_step: Slug::derive(terminal_step_id.to_string()),
             condition: RoutineEdgeCondition::OnPass,
-            metadata: serde_json::json!({}),
+            purpose: None,
+            handoff_instructions: None,
+            handoff_schema: None,
+            max_retries: None,
         }],
     };
 
@@ -3050,9 +3112,7 @@ async fn agent_step_receives_route_next_steps_tool() {
         name: "route-tool-check".into(),
         slug: Slug::derive("route-tool-check"),
         description: None,
-        metadata: RoutineMetadata {
-            entry_steps: vec![Slug::derive("work")],
-        },
+        entry_steps: vec![Slug::derive("work")],
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive("work"),
@@ -3080,7 +3140,10 @@ async fn agent_step_receives_route_next_steps_tool() {
             source_step: Slug::derive("work"),
             target_step: Slug::derive("done"),
             condition: RoutineEdgeCondition::Always,
-            metadata: serde_json::json!({"purpose": "finish the routine"}),
+            purpose: Some("finish the routine".to_string()),
+            handoff_instructions: None,
+            handoff_schema: None,
+            max_retries: None,
         }],
     };
 
@@ -3128,9 +3191,7 @@ async fn gate_step_receives_route_next_steps_tool() {
         name: "gate-route-tool-check".into(),
         slug: Slug::derive("gate-route-tool-check"),
         description: None,
-        metadata: RoutineMetadata {
-            entry_steps: vec![Slug::derive("review")],
-        },
+        entry_steps: vec![Slug::derive("review")],
         steps: vec![RoutineStepManifest {
             slug: Slug::derive("review"),
             routine: Slug::derive("gate-route-tool-check"),
@@ -3193,9 +3254,7 @@ async fn fan_out_and_fan_in_waits_for_all_upstream_steps() {
         name: "fanout-fanin".into(),
         slug: Slug::derive("fanout-fanin"),
         description: None,
-        metadata: RoutineMetadata {
-            entry_steps: vec![Slug::derive("start")],
-        },
+        entry_steps: vec![Slug::derive("start")],
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive("start"),
@@ -3244,28 +3303,40 @@ async fn fan_out_and_fan_in_waits_for_all_upstream_steps() {
                 source_step: Slug::derive("start"),
                 target_step: Slug::derive("left"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({"purpose": "left branch"}),
+                purpose: Some("left branch".to_string()),
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("fanout-fanin"),
                 source_step: Slug::derive("start"),
                 target_step: Slug::derive("right"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({"purpose": "right branch"}),
+                purpose: Some("right branch".to_string()),
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("fanout-fanin"),
                 source_step: Slug::derive("left"),
                 target_step: Slug::derive("done"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("fanout-fanin"),
                 source_step: Slug::derive("right"),
                 target_step: Slug::derive("done"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };
@@ -3346,9 +3417,7 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
         name: "handoff-join".into(),
         slug: Slug::derive("handoff-join"),
         description: None,
-        metadata: RoutineMetadata {
-            entry_steps: vec![Slug::derive("left"), Slug::derive("right")],
-        },
+        entry_steps: vec![Slug::derive("left"), Slug::derive("right")],
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive("left"),
@@ -3397,27 +3466,30 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
                 source_step: Slug::derive("left"),
                 target_step: Slug::derive("synthesize"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({
-                    "purpose": "Provide left branch evidence.",
-                    "handoff_instructions": "Hand off left evidence only."
-                }),
+                purpose: Some("Provide left branch evidence.".to_string()),
+                handoff_instructions: Some("Hand off left evidence only.".to_string()),
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("handoff-join"),
                 source_step: Slug::derive("right"),
                 target_step: Slug::derive("synthesize"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({
-                    "purpose": "Provide right branch evidence.",
-                    "handoff_instructions": "Hand off right evidence only."
-                }),
+                purpose: Some("Provide right branch evidence.".to_string()),
+                handoff_instructions: Some("Hand off right evidence only.".to_string()),
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("handoff-join"),
                 source_step: Slug::derive("synthesize"),
                 target_step: Slug::derive("done"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };
@@ -3552,9 +3624,7 @@ async fn gate_on_fail_retry_edge_does_not_block_first_downstream_pass() {
         name: "retry-loop-first-pass".into(),
         slug: Slug::derive("retry-loop-first-pass"),
         description: None,
-        metadata: RoutineMetadata {
-            entry_steps: vec![Slug::derive("plan")],
-        },
+        entry_steps: vec![Slug::derive("plan")],
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive("plan"),
@@ -3603,28 +3673,40 @@ async fn gate_on_fail_retry_edge_does_not_block_first_downstream_pass() {
                 source_step: Slug::derive("plan"),
                 target_step: Slug::derive("implement"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({"purpose": "handoff plan"}),
+                purpose: Some("handoff plan".to_string()),
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-loop-first-pass"),
                 source_step: Slug::derive("implement"),
                 target_step: Slug::derive("review"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({"purpose": "review implementation"}),
+                purpose: Some("review implementation".to_string()),
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-loop-first-pass"),
                 source_step: Slug::derive("review"),
                 target_step: Slug::derive("done"),
                 condition: RoutineEdgeCondition::OnPass,
-                metadata: serde_json::json!({"purpose": "finish"}),
+                purpose: Some("finish".to_string()),
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("retry-loop-first-pass"),
                 source_step: Slug::derive("review"),
                 target_step: Slug::derive("implement"),
                 condition: RoutineEdgeCondition::OnFail,
-                metadata: serde_json::json!({"purpose": "revise implementation"}),
+                purpose: Some("revise implementation".to_string()),
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };
@@ -3697,9 +3779,7 @@ async fn route_next_steps_fail_verdict_stops_routine() {
         name: "route-fail-stops".into(),
         slug: Slug::derive("route-fail-stops"),
         description: None,
-        metadata: RoutineMetadata {
-            entry_steps: vec![Slug::derive("first")],
-        },
+        entry_steps: vec![Slug::derive("first")],
         steps: vec![
             RoutineStepManifest {
                 slug: Slug::derive("first"),
@@ -3738,14 +3818,20 @@ async fn route_next_steps_fail_verdict_stops_routine() {
                 source_step: Slug::derive("first"),
                 target_step: Slug::derive("second"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
             RoutineEdgeManifest {
                 routine: Slug::derive("route-fail-stops"),
                 source_step: Slug::derive("second"),
                 target_step: Slug::derive("done"),
                 condition: RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             },
         ],
     };

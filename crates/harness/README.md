@@ -62,12 +62,17 @@ Harness execution APIs take builder-style request values. Required arguments go
 in `new`; optional context is added with `with_*` methods:
 
 ```rust
-use nenjo_harness::{ChatRequest, TaskRequest};
+use nenjo_harness::{Buffered, ChatRequest, TaskRequest};
 
 let output = harness
-    .chat(ChatRequest::new("coder", "Fix the failing test")
-        .with_session(session_id)
-        .with_project("website"))
+    .chat(
+        ChatRequest::new("coder", "Fix the failing test")
+            .with_session(session_id)
+            .with_project("website"),
+        Buffered,
+    )
+    .await?
+    .output()
     .await?;
 
 let task_output = harness

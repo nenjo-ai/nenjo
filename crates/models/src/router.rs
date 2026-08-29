@@ -2,7 +2,7 @@
 //! combinations based on hint-prefixed model names.
 
 use crate::ModelProvider;
-use crate::traits::{ChatRequest, ChatResponse};
+use crate::traits::{ChatRequest, ChatResponse, ProviderStreamEvent};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
@@ -105,6 +105,21 @@ impl ModelProvider for RouterProvider {
         provider.chat(request, &resolved_model, temperature).await
     }
 
+    async fn chat_stream(
+        &self,
+        request: ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
+    ) -> anyhow::Result<ChatResponse> {
+        request.ensure_artifacts_prepared()?;
+        let (provider_idx, resolved_model) = self.resolve(model);
+        let (_, provider) = &self.providers[provider_idx];
+        provider
+            .chat_stream(request, &resolved_model, temperature, events)
+            .await
+    }
+
     fn context_window(&self, model: &str) -> Option<usize> {
         self.providers
             .get(self.default_index)
@@ -154,12 +169,15 @@ impl ModelProvider for RouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::traits::{ChatRequest, ChatResponse, TokenUsage, one_shot};
+    use crate::traits::{
+        ChatRequest, ChatResponse, ConversationMessage, ProviderStreamEvent, TokenUsage, one_shot,
+    };
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct MockProvider {
         calls: Arc<AtomicUsize>,
+        stream_calls: Arc<AtomicUsize>,
         response: &'static str,
         last_model: std::sync::Mutex<String>,
     }
@@ -168,6 +186,7 @@ mod tests {
         fn new(response: &'static str) -> Self {
             Self {
                 calls: Arc::new(AtomicUsize::new(0)),
+                stream_calls: Arc::new(AtomicUsize::new(0)),
                 response,
                 last_model: std::sync::Mutex::new(String::new()),
             }
@@ -175,6 +194,10 @@ mod tests {
 
         fn call_count(&self) -> usize {
             self.calls.load(Ordering::SeqCst)
+        }
+
+        fn stream_call_count(&self) -> usize {
+            self.stream_calls.load(Ordering::SeqCst)
         }
 
         fn last_model(&self) -> String {
@@ -197,6 +220,28 @@ mod tests {
                 tool_calls: vec![],
                 provider_tool_calls: vec![],
                 usage: TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop,
+            })
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest<'_>,
+            model: &str,
+            _temperature: f64,
+            events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
+        ) -> anyhow::Result<ChatResponse> {
+            self.stream_calls.fetch_add(1, Ordering::SeqCst);
+            *self.last_model.lock().unwrap() = model.to_string();
+            events
+                .send(ProviderStreamEvent::TextDelta(self.response.to_string()))
+                .await?;
+            Ok(ChatResponse {
+                text: Some(self.response.to_string()),
+                tool_calls: vec![],
+                provider_tool_calls: vec![],
+                usage: TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop,
             })
         }
     }
@@ -249,6 +294,18 @@ mod tests {
             temperature: f64,
         ) -> anyhow::Result<ChatResponse> {
             self.as_ref().chat(request, model, temperature).await
+        }
+
+        async fn chat_stream(
+            &self,
+            request: ChatRequest<'_>,
+            model: &str,
+            temperature: f64,
+            events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
+        ) -> anyhow::Result<ChatResponse> {
+            self.as_ref()
+                .chat_stream(request, model, temperature, events)
+                .await
         }
     }
 
@@ -383,5 +440,37 @@ mod tests {
             .unwrap();
         assert_eq!(result, "response");
         assert_eq!(mock.call_count(), 1);
+    }
+
+    #[tokio::test]
+    async fn chat_stream_routes_without_falling_back_to_buffered_chat() {
+        let (router, mocks) = make_router(
+            vec![("default", "default-response"), ("smart", "streamed")],
+            vec![("reasoning", "smart", "stream-model")],
+        );
+        let messages = vec![ConversationMessage::user("hello")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(1);
+
+        let response = router
+            .chat_stream(request, "hint:reasoning", 0.5, events_tx)
+            .await
+            .expect("streamed response");
+
+        assert_eq!(response.text.as_deref(), Some("streamed"));
+        assert_eq!(mocks[0].call_count(), 0);
+        assert_eq!(mocks[0].stream_call_count(), 0);
+        assert_eq!(mocks[1].call_count(), 0);
+        assert_eq!(mocks[1].stream_call_count(), 1);
+        assert_eq!(mocks[1].last_model(), "stream-model");
+        assert!(matches!(
+            events_rx.recv().await,
+            Some(ProviderStreamEvent::TextDelta(delta)) if delta == "streamed"
+        ));
     }
 }

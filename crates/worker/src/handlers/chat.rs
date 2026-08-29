@@ -10,26 +10,56 @@ use nenjo_sessions::{
 };
 use std::path::{Component, Path, PathBuf};
 use tokio::time::{Duration, Instant};
-use tracing::{debug, info, trace, warn};
+use tracing::{debug, info, warn};
 use uuid::Uuid;
 
 use nenjo::Slug;
-use nenjo_events::{DomainActivation, Response, StreamEvent};
+use nenjo_events::{ChatStreamErrorCode, ChatStreamFrame, DomainActivation, Response, StreamEvent};
 use nenjo_models::ArtifactRef;
 
-use nenjo_harness::events::HarnessEvent;
+use nenjo_harness::events::HarnessChatEvent;
 use nenjo_harness::registry::ExecutionKind;
 use nenjo_harness::request::ChatRequest;
-use nenjo_harness::{Harness, HarnessError, ProviderRuntime};
+use nenjo_harness::{Harness, HarnessError, ProviderRuntime, Streaming};
 
-use crate::event_bridge::{agent_name, summarize_stream_event, turn_event_to_stream_events};
+use crate::event_bridge::{agent_name, turn_event_to_stream_events};
 use crate::handlers::ResponseSender;
 use crate::handlers::notification::platform_notification_emitter;
 use crate::resource_resolver::PlatformResourceResolver;
 use crate::tools::{register_platform_notification_emitter, with_platform_notification_emitter};
 
 const ASSISTANT_DELTA_FLUSH_CHARS: usize = 180;
-const ASSISTANT_DELTA_FLUSH_AFTER: Duration = Duration::from_millis(75);
+const ASSISTANT_DELTA_FLUSH_AFTER: Duration = Duration::from_millis(35);
+const ASSISTANT_CHECKPOINT_CHARS: usize = 2_048;
+const ASSISTANT_CHECKPOINT_AFTER: Duration = Duration::from_secs(1);
+
+struct ChatStreamWriter<'a, S> {
+    context: &'a ChatCommandContext<S>,
+    run_id: &'a str,
+    input_message_id: Option<Uuid>,
+    next_sequence: u64,
+}
+
+impl<S: ResponseSender> ChatStreamWriter<'_, S> {
+    fn send(&mut self, session_id: Uuid, event: StreamEvent) -> Result<()> {
+        self.next_sequence = self
+            .next_sequence
+            .checked_add(1)
+            .context("chat stream sequence exhausted")?;
+        let frame = ChatStreamFrame::new(
+            self.context.organization_id,
+            self.context.worker_instance_id,
+            session_id,
+            self.run_id,
+            self.input_message_id,
+            self.next_sequence,
+            event,
+        );
+        self.context
+            .response_sink
+            .send(Response::ChatStreamFrame { frame })
+    }
+}
 
 #[derive(Debug)]
 struct PendingAssistantDelta {
@@ -37,12 +67,29 @@ struct PendingAssistantDelta {
     run_id: String,
     request_id: String,
     delta: String,
+    chars: usize,
     flush_at: Instant,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug)]
 struct AssistantDeltaBuffer {
     pending: Option<PendingAssistantDelta>,
+    accumulated: String,
+    chars_since_checkpoint: usize,
+    last_checkpoint_at: Instant,
+    first_delta_emitted: bool,
+}
+
+impl Default for AssistantDeltaBuffer {
+    fn default() -> Self {
+        Self {
+            pending: None,
+            accumulated: String::new(),
+            chars_since_checkpoint: 0,
+            last_checkpoint_at: Instant::now(),
+            first_delta_emitted: false,
+        }
+    }
 }
 
 impl AssistantDeltaBuffer {
@@ -55,6 +102,7 @@ impl AssistantDeltaBuffer {
         let StreamEvent::AssistantTextDelta {
             run_id,
             request_id,
+            checkpoint,
             payload,
             encrypted_payload,
         } = event
@@ -71,6 +119,7 @@ impl AssistantDeltaBuffer {
                 StreamEvent::AssistantTextDelta {
                     run_id,
                     request_id,
+                    checkpoint,
                     payload,
                     encrypted_payload,
                 },
@@ -89,6 +138,7 @@ impl AssistantDeltaBuffer {
                 StreamEvent::AssistantTextDelta {
                     run_id,
                     request_id,
+                    checkpoint,
                     payload,
                     encrypted_payload,
                 },
@@ -98,6 +148,24 @@ impl AssistantDeltaBuffer {
 
         if delta.is_empty() {
             return Vec::new();
+        }
+        let delta_chars = delta.chars().count();
+
+        // The first usable provider delta must not wait for the batching timer.
+        if !self.first_delta_emitted {
+            self.first_delta_emitted = true;
+            self.accumulated.push_str(delta);
+            self.chars_since_checkpoint += delta_chars;
+            return vec![(
+                session_id,
+                StreamEvent::AssistantTextDelta {
+                    run_id,
+                    request_id,
+                    checkpoint: false,
+                    payload: Some(serde_json::json!({ "delta": delta })),
+                    encrypted_payload: None,
+                },
+            )];
         }
 
         let same_request = self.pending.as_ref().is_some_and(|pending| {
@@ -112,12 +180,13 @@ impl AssistantDeltaBuffer {
                 run_id,
                 request_id,
                 delta: delta.to_string(),
+                chars: delta_chars,
                 flush_at: now + ASSISTANT_DELTA_FLUSH_AFTER,
             });
             if self
                 .pending
                 .as_ref()
-                .is_some_and(|pending| pending.delta.chars().count() >= ASSISTANT_DELTA_FLUSH_CHARS)
+                .is_some_and(|pending| pending.chars >= ASSISTANT_DELTA_FLUSH_CHARS)
             {
                 return events.into_iter().chain(self.flush()).collect();
             }
@@ -126,12 +195,13 @@ impl AssistantDeltaBuffer {
 
         if let Some(pending) = self.pending.as_mut() {
             pending.delta.push_str(delta);
+            pending.chars += delta_chars;
         }
 
         if self
             .pending
             .as_ref()
-            .is_some_and(|pending| pending.delta.chars().count() >= ASSISTANT_DELTA_FLUSH_CHARS)
+            .is_some_and(|pending| pending.chars >= ASSISTANT_DELTA_FLUSH_CHARS)
         {
             self.flush()
         } else {
@@ -147,14 +217,28 @@ impl AssistantDeltaBuffer {
         let Some(pending) = self.pending.take() else {
             return Vec::new();
         };
+        self.accumulated.push_str(&pending.delta);
+        self.chars_since_checkpoint += pending.chars;
+        let now = Instant::now();
+        let checkpoint = self.chars_since_checkpoint >= ASSISTANT_CHECKPOINT_CHARS
+            || now.duration_since(self.last_checkpoint_at) >= ASSISTANT_CHECKPOINT_AFTER;
+        let payload = if checkpoint {
+            self.chars_since_checkpoint = 0;
+            self.last_checkpoint_at = now;
+            serde_json::json!({
+                "delta": pending.delta,
+                "checkpoint": self.accumulated.clone(),
+            })
+        } else {
+            serde_json::json!({ "delta": pending.delta })
+        };
         vec![(
             pending.session_id,
             StreamEvent::AssistantTextDelta {
                 run_id: pending.run_id,
                 request_id: pending.request_id,
-                payload: Some(serde_json::json!({
-                    "delta": pending.delta,
-                })),
+                checkpoint,
+                payload: Some(payload),
                 encrypted_payload: None,
             },
         )]
@@ -163,6 +247,8 @@ impl AssistantDeltaBuffer {
 
 #[derive(Clone)]
 pub struct ChatCommandContext<S> {
+    pub organization_id: Uuid,
+    pub worker_instance_id: Uuid,
     pub response_sink: S,
     pub worker_id: String,
     pub state_dir: PathBuf,
@@ -303,6 +389,7 @@ where
     SessionRt: nenjo_sessions::SessionRuntime + 'static,
     S: ResponseSender + Clone + 'static,
 {
+    let request_accepted_at = Instant::now();
     let ChatCommandRequest {
         message_id,
         content,
@@ -415,12 +502,16 @@ where
     let notification_emitter = platform_notification_emitter(ctx.response_sink.clone(), session_id);
     let _notification_registration =
         register_platform_notification_emitter(notification_emitter.clone());
-    let mut stream =
-        with_platform_notification_emitter(notification_emitter, harness.chat_stream(chat)).await?;
     let run_id = Uuid::new_v4().to_string();
-    ctx.response_sink.send(Response::AgentResponse {
-        session_id: Some(session_id),
-        payload: StreamEvent::RunStarted {
+    let mut writer = ChatStreamWriter {
+        context: ctx,
+        run_id: &run_id,
+        input_message_id,
+        next_sequence: 0,
+    };
+    writer.send(
+        session_id,
+        StreamEvent::RunStarted {
             run_id: run_id.clone(),
             session_id: session_id.to_string(),
             input_message_id,
@@ -428,19 +519,44 @@ where
             agent_id: Some(agent_slug.to_string()),
             agent_name: Some(aname.clone()),
         },
-    })?;
+    )?;
+    let mut stream = match with_platform_notification_emitter(
+        notification_emitter,
+        harness.chat(chat, Streaming),
+    )
+    .await
+    {
+        Ok(stream) => stream,
+        Err(error) => {
+            warn!(session = %session_id, agent = %aname, error = %error, "Failed to start chat run");
+            let (code, message, retryable) = normalize_chat_error(&error);
+            writer.send(
+                session_id,
+                StreamEvent::RunFailed {
+                    run_id: run_id.clone(),
+                    session_id: session_id.to_string(),
+                    code,
+                    message,
+                    retryable,
+                    payload: None,
+                    encrypted_payload: None,
+                },
+            )?;
+            return Ok(());
+        }
+    };
 
     let mut assistant_delta_buffer = AssistantDeltaBuffer::default();
+    let mut provider_request_observed = false;
     loop {
         let event = if let Some(flush_at) = assistant_delta_buffer.next_flush_at() {
             tokio::select! {
                 event = stream.recv() => event,
                 _ = tokio::time::sleep_until(flush_at) => {
                     send_chat_stream_events(
-                        &ctx.response_sink,
+                        &mut writer,
                         assistant_delta_buffer.flush(),
-                        &aname,
-                    );
+                    )?;
                     continue;
                 }
             }
@@ -453,13 +569,13 @@ where
         };
 
         match event {
-            HarnessEvent::DomainEntered {
+            HarnessChatEvent::DomainEntered {
                 session_id: domain_session_id,
                 domain_name,
             } => {
-                send_chat_stream_events(&ctx.response_sink, assistant_delta_buffer.flush(), &aname);
+                send_chat_stream_events(&mut writer, assistant_delta_buffer.flush())?;
                 send_chat_stream_events(
-                    &ctx.response_sink,
+                    &mut writer,
                     vec![(
                         session_id,
                         StreamEvent::DomainEntered {
@@ -467,27 +583,33 @@ where
                             domain_name,
                         },
                     )],
-                    &aname,
-                );
+                )?;
             }
-            HarnessEvent::Turn {
+            HarnessChatEvent::Turn {
                 session_id: event_session_id,
                 event: ev,
                 ..
             } => {
                 for mut se in turn_event_to_stream_events(&ev, &aname, &run_id, event_session_id) {
                     bind_chat_response_context(&mut se, &run_id, input_message_id);
+                    if !provider_request_observed
+                        && matches!(se, StreamEvent::ModelRequestStarted { .. })
+                    {
+                        provider_request_observed = true;
+                        debug!(
+                            run = %run_id,
+                            request_to_provider_us = request_accepted_at.elapsed().as_micros(),
+                            "Observed first model request for chat run"
+                        );
+                    }
                     let buffered_events =
                         assistant_delta_buffer.push(event_session_id, se, Instant::now());
-                    send_chat_stream_events(&ctx.response_sink, buffered_events, &aname);
+                    send_chat_stream_events(&mut writer, buffered_events)?;
                 }
-            }
-            HarnessEvent::Routine { .. } => {
-                send_chat_stream_events(&ctx.response_sink, assistant_delta_buffer.flush(), &aname);
             }
         }
     }
-    send_chat_stream_events(&ctx.response_sink, assistant_delta_buffer.flush(), &aname);
+    send_chat_stream_events(&mut writer, assistant_delta_buffer.flush())?;
 
     debug!(session = %session_id, agent = %aname, "Chat harness event stream closed");
     debug!(session = %session_id, agent = %aname, "Awaiting chat stream output");
@@ -495,9 +617,32 @@ where
         Ok(output) => output,
         Err(HarnessError::Cancelled) => {
             debug!(session = %session_id, agent = %aname, "Chat stream output cancelled");
+            writer.send(
+                session_id,
+                StreamEvent::RunCancelled {
+                    run_id: run_id.clone(),
+                    session_id: session_id.to_string(),
+                },
+            )?;
             return Ok(());
         }
-        Err(error) => return Err(error.into()),
+        Err(error) => {
+            warn!(session = %session_id, agent = %aname, error = %error, "Chat run failed");
+            let (code, message, retryable) = normalize_chat_error(&error);
+            writer.send(
+                session_id,
+                StreamEvent::RunFailed {
+                    run_id: run_id.clone(),
+                    session_id: session_id.to_string(),
+                    code,
+                    message,
+                    retryable,
+                    payload: None,
+                    encrypted_payload: None,
+                },
+            )?;
+            return Ok(());
+        }
     };
     debug!(
         session = %session_id,
@@ -508,34 +653,80 @@ where
     Ok(())
 }
 
+fn normalize_chat_error(error: &impl std::fmt::Display) -> (ChatStreamErrorCode, String, bool) {
+    let diagnostic = error.to_string().to_lowercase();
+    if diagnostic.contains("401") || diagnostic.contains("403") || diagnostic.contains("auth") {
+        return (
+            ChatStreamErrorCode::Authentication,
+            "The model provider rejected the worker credentials.".to_string(),
+            false,
+        );
+    }
+    if diagnostic.contains("429") || diagnostic.contains("rate limit") {
+        return (
+            ChatStreamErrorCode::RateLimited,
+            "The model provider is rate limited. Try again shortly.".to_string(),
+            true,
+        );
+    }
+    if diagnostic.contains("context") && diagnostic.contains("length") {
+        return (
+            ChatStreamErrorCode::ContextLengthExceeded,
+            "This conversation is too long for the selected model.".to_string(),
+            false,
+        );
+    }
+    if diagnostic.contains("finish reason length") {
+        return (
+            ChatStreamErrorCode::OutputLimitExceeded,
+            "The model reached its output limit before finishing the response.".to_string(),
+            false,
+        );
+    }
+    if diagnostic.contains("finish reason contentfilter")
+        || diagnostic.contains("finish reason content_filter")
+        || diagnostic.contains("finish reason safety")
+    {
+        return (
+            ChatStreamErrorCode::ContentFiltered,
+            "The model provider stopped this response because of its content policy.".to_string(),
+            false,
+        );
+    }
+    if diagnostic.contains("invalid") || diagnostic.contains("400") {
+        return (
+            ChatStreamErrorCode::InvalidRequest,
+            "The model provider could not process this request.".to_string(),
+            false,
+        );
+    }
+    if diagnostic.contains("maximum of") && diagnostic.contains("turn") {
+        return (
+            ChatStreamErrorCode::Internal,
+            "The response could not be completed within the allowed turns.".to_string(),
+            false,
+        );
+    }
+    (
+        ChatStreamErrorCode::ProviderUnavailable,
+        "The model provider could not complete the response.".to_string(),
+        true,
+    )
+}
+
 fn bind_chat_response_context(
     event: &mut StreamEvent,
     run_id: &str,
     input_message_id: Option<Uuid>,
 ) {
     match event {
-        StreamEvent::Done {
+        StreamEvent::AssistantMessageFinalized {
             run_id: event_run_id,
             input_message_id: event_input_message_id,
             ..
         } => {
-            *event_run_id = Some(run_id.to_string());
+            *event_run_id = run_id.to_string();
             *event_input_message_id = input_message_id;
-        }
-        StreamEvent::AssistantResponse { payload, .. } => {
-            let Some(payload) = payload.as_mut().and_then(serde_json::Value::as_object_mut) else {
-                return;
-            };
-            payload.insert(
-                "message_id".to_string(),
-                serde_json::Value::String(Uuid::new_v4().to_string()),
-            );
-            if let Some(input_message_id) = input_message_id {
-                payload.insert(
-                    "input_message_id".to_string(),
-                    serde_json::Value::String(input_message_id.to_string()),
-                );
-            }
         }
         StreamEvent::RunStarted { .. }
         | StreamEvent::RunCompleted { .. }
@@ -543,15 +734,20 @@ fn bind_chat_response_context(
         | StreamEvent::RunCancelled { .. }
         | StreamEvent::ModelRequestStarted { .. }
         | StreamEvent::AssistantTextDelta { .. }
+        | StreamEvent::AssistantReasoningDelta { .. }
         | StreamEvent::ModelRequestCompleted { .. }
         | StreamEvent::ToolCallStarted { .. }
+        | StreamEvent::ToolCallUpdated { .. }
         | StreamEvent::ToolOutputDelta { .. }
         | StreamEvent::ToolCallCompleted { .. }
+        | StreamEvent::ProviderRetryScheduled { .. }
+        | StreamEvent::ProgressUpdate { .. }
         | StreamEvent::HookStarted { .. }
         | StreamEvent::HookCompleted { .. }
         | StreamEvent::AsyncOperationEvent { .. }
         | StreamEvent::AsyncOperationTranscript { .. }
         | StreamEvent::Error { .. }
+        | StreamEvent::Done { .. }
         | StreamEvent::DomainEntered { .. }
         | StreamEvent::DomainExited { .. }
         | StreamEvent::MessageCompacted { .. }
@@ -560,37 +756,17 @@ fn bind_chat_response_context(
     }
 }
 
-fn send_chat_stream_events<S>(response_sink: &S, events: Vec<(Uuid, StreamEvent)>, agent_name: &str)
+fn send_chat_stream_events<S>(
+    writer: &mut ChatStreamWriter<'_, S>,
+    events: Vec<(Uuid, StreamEvent)>,
+) -> Result<()>
 where
     S: ResponseSender,
 {
     for (session_id, event) in events {
-        if matches!(event, StreamEvent::AssistantTextDelta { .. }) {
-            trace!(
-                stream_event = %summarize_stream_event(&event),
-                agent = %agent_name,
-                "Chat handler produced assistant text delta"
-            );
-        } else {
-            debug!(
-                stream_event = %summarize_stream_event(&event),
-                agent = %agent_name,
-                "Chat handler produced stream event"
-            );
-        }
-
-        if let Err(error) = response_sink.send(Response::AgentResponse {
-            session_id: Some(session_id),
-            payload: event,
-        }) {
-            warn!(
-                error = %error,
-                session = %session_id,
-                agent = %agent_name,
-                "Failed to enqueue chat response"
-            );
-        }
+        writer.send(session_id, event)?;
     }
+    Ok(())
 }
 
 async fn handle_chat_command_adapter<P, SessionRt, S>(
@@ -800,6 +976,24 @@ where
 
     let council = Slug::parse(request.council)?;
     let project = request.project.map(Slug::parse).transpose()?;
+    let run_id = Uuid::new_v4().to_string();
+    let mut writer = ChatStreamWriter {
+        context: ctx,
+        run_id: &run_id,
+        input_message_id: request.input_message_id,
+        next_sequence: 0,
+    };
+    writer.send(
+        request.session_id,
+        StreamEvent::RunStarted {
+            run_id: run_id.clone(),
+            session_id: request.session_id.to_string(),
+            input_message_id: request.input_message_id,
+            parent_run_id: None,
+            agent_id: None,
+            agent_name: Some(council.as_str().to_string()),
+        },
+    )?;
     let (events_tx, _events_rx) = tokio::sync::mpsc::unbounded_channel();
     let result = nenjo::routines::council::execute_council_chat(
         harness.provider().as_ref(),
@@ -816,22 +1010,27 @@ where
         "final_output": result.output,
         "data": result.data,
         "target_type": "council",
-        "target": council.into_string(),
+        "target": council.as_str(),
     });
-    ctx.response_sink.send(Response::AgentResponse {
-        session_id: Some(request.session_id),
-        payload: StreamEvent::Done {
-            run_id: None,
+    writer.send(
+        request.session_id,
+        StreamEvent::AssistantMessageFinalized {
+            run_id: run_id.clone(),
+            message_id: Uuid::new_v4(),
             input_message_id: request.input_message_id,
             payload: Some(payload),
             encrypted_payload: None,
             total_input_tokens: result.input_tokens,
             total_output_tokens: result.output_tokens,
-            project: project.map(|slug| slug.into_string()),
-            agent: None,
-            session_id: Some(request.session_id),
         },
-    })?;
+    )?;
+    writer.send(
+        request.session_id,
+        StreamEvent::RunCompleted {
+            run_id: run_id.clone(),
+            session_id: request.session_id.to_string(),
+        },
+    )?;
 
     Ok(())
 }
@@ -1036,6 +1235,7 @@ mod tests {
         StreamEvent::AssistantTextDelta {
             run_id: run_id.to_string(),
             request_id: request_id.to_string(),
+            checkpoint: false,
             payload: Some(serde_json::json!({ "delta": delta })),
             encrypted_payload: None,
         }
@@ -1061,16 +1261,29 @@ mod tests {
     }
 
     #[test]
+    fn provider_terminal_reasons_map_to_safe_typed_errors() {
+        let (code, message, retryable) =
+            normalize_chat_error(&"provider ended the response with finish reason Length");
+        assert_eq!(code, ChatStreamErrorCode::OutputLimitExceeded);
+        assert!(message.contains("output limit"));
+        assert!(!retryable);
+
+        let (code, message, retryable) =
+            normalize_chat_error(&"provider ended the response with finish reason ContentFilter");
+        assert_eq!(code, ChatStreamErrorCode::ContentFiltered);
+        assert!(message.contains("content policy"));
+        assert!(!retryable);
+    }
+
+    #[test]
     fn assistant_delta_buffer_coalesces_small_deltas() {
         let session_id = Uuid::new_v4();
         let mut buffer = AssistantDeltaBuffer::default();
         let now = Instant::now();
 
-        assert!(
-            buffer
-                .push(session_id, assistant_delta("run", "request", "hello "), now)
-                .is_empty()
-        );
+        let first = buffer.push(session_id, assistant_delta("run", "request", "hello "), now);
+        assert_eq!(first.len(), 1);
+        assert_eq!(assistant_delta_text(&first[0].1), "hello ");
         assert!(
             buffer
                 .push(
@@ -1084,7 +1297,7 @@ mod tests {
         let events = buffer.flush();
         assert_eq!(events.len(), 1);
         assert_eq!(events[0].0, session_id);
-        assert_eq!(assistant_delta_text(&events[0].1), "hello world");
+        assert_eq!(assistant_delta_text(&events[0].1), "world");
     }
 
     #[test]
@@ -1093,6 +1306,12 @@ mod tests {
         let mut buffer = AssistantDeltaBuffer::default();
         let now = Instant::now();
 
+        assert_eq!(
+            buffer
+                .push(session_id, assistant_delta("run", "request", "first"), now)
+                .len(),
+            1
+        );
         assert!(
             buffer
                 .push(
@@ -1115,6 +1334,12 @@ mod tests {
         let mut buffer = AssistantDeltaBuffer::default();
         let now = Instant::now();
 
+        assert_eq!(
+            buffer
+                .push(session_id, assistant_delta("run", "request", "first"), now)
+                .len(),
+            1
+        );
         assert!(
             buffer
                 .push(
@@ -1144,6 +1369,8 @@ mod tests {
         let session_id = Uuid::new_v4();
         let mut buffer = AssistantDeltaBuffer::default();
         let now = Instant::now();
+        let first = buffer.push(session_id, assistant_delta("run", "request", "x"), now);
+        assert_eq!(first.len(), 1);
         let large_delta = "x".repeat(ASSISTANT_DELTA_FLUSH_CHARS);
 
         let events = buffer.push(
@@ -1158,33 +1385,29 @@ mod tests {
     }
 
     #[test]
-    fn assistant_progress_response_gets_durable_chat_identity() {
-        let input_message_id = Uuid::new_v4();
-        let mut event = StreamEvent::AssistantResponse {
-            run_id: "run-1".to_string(),
-            payload: Some(serde_json::json!({
-                "message": "Still working",
-                "status": "in_progress",
-            })),
-            encrypted_payload: None,
-        };
-
-        bind_chat_response_context(&mut event, "run-1", Some(input_message_id));
-
-        let StreamEvent::AssistantResponse {
+    fn assistant_delta_buffer_emits_rolling_checkpoint() {
+        let session_id = Uuid::new_v4();
+        let mut buffer = AssistantDeltaBuffer::default();
+        let now = Instant::now();
+        let first = buffer.push(session_id, assistant_delta("run", "request", "hello"), now);
+        assert_eq!(first.len(), 1);
+        buffer.last_checkpoint_at = now - ASSISTANT_CHECKPOINT_AFTER;
+        assert!(
+            buffer
+                .push(session_id, assistant_delta("run", "request", " world"), now,)
+                .is_empty()
+        );
+        let events = buffer.flush();
+        let StreamEvent::AssistantTextDelta {
+            checkpoint,
             payload: Some(payload),
             ..
-        } = event
+        } = &events[0].1
         else {
-            panic!("expected assistant response payload");
+            panic!("expected checkpoint delta");
         };
-        assert_eq!(payload["input_message_id"], input_message_id.to_string());
-        assert!(
-            payload["message_id"]
-                .as_str()
-                .and_then(|value| Uuid::parse_str(value).ok())
-                .is_some()
-        );
+        assert!(*checkpoint);
+        assert_eq!(payload["checkpoint"], "hello world");
     }
 
     #[test]
@@ -1344,6 +1567,8 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink: response_sink.clone(),
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
@@ -1374,29 +1599,22 @@ Original user message: {{ chat.message }}
         let responses = response_sink.responses.lock().unwrap().clone();
         let run_id = responses
             .iter()
-            .find_map(|response| match response {
-                Response::AgentResponse {
-                    payload:
-                        StreamEvent::RunStarted {
-                            run_id,
-                            input_message_id: Some(event_input_message_id),
-                            ..
-                        },
+            .find_map(|response| match response_stream_event(response) {
+                Some(StreamEvent::RunStarted {
+                    run_id,
+                    input_message_id: Some(event_input_message_id),
                     ..
-                } if *event_input_message_id == input_message_id => Some(run_id.clone()),
+                }) if *event_input_message_id == input_message_id => Some(run_id.clone()),
                 _ => None,
             })
             .expect("chat run should retain its input message identity");
         assert!(responses.iter().any(|response| matches!(
-            response,
-            Response::AgentResponse {
-                payload: StreamEvent::Done {
-                    run_id: Some(done_run_id),
-                    input_message_id: Some(done_input_message_id),
-                    ..
-                },
+            response_stream_event(response),
+            Some(StreamEvent::AssistantMessageFinalized {
+                run_id: finalized_run_id,
+                input_message_id: Some(done_input_message_id),
                 ..
-            } if done_run_id == &run_id && *done_input_message_id == input_message_id
+            }) if finalized_run_id == &run_id && *done_input_message_id == input_message_id
         )));
         assert_eq!(
             count_hook_events(&responses, HookStreamKind::Started, "Stop", "command"),
@@ -1419,11 +1637,8 @@ Original user message: {{ chat.message }}
         );
         assert!(
             responses.iter().any(|response| matches!(
-                response,
-                Response::AgentResponse {
-                    payload: StreamEvent::Done { .. },
-                    ..
-                }
+                response_stream_event(response),
+                Some(StreamEvent::RunCompleted { .. })
             )),
             "chat command should still finish the normal stream"
         );
@@ -1589,6 +1804,8 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink: response_sink.clone(),
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
@@ -1824,6 +2041,8 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink: response_sink.clone(),
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
@@ -1994,6 +2213,8 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink: response_sink.clone(),
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
@@ -2196,6 +2417,8 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink: response_sink.clone(),
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
@@ -2368,6 +2591,8 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink,
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
@@ -2480,6 +2705,8 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink: response_sink.clone(),
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
@@ -2614,6 +2841,8 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink: response_sink.clone(),
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
@@ -2739,12 +2968,14 @@ Original user message: {{ chat.message }}
         let harness = Harness::builder(provider).build();
         let response_sink = Arc::new(CapturedResponses::default());
         let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
             response_sink: response_sink.clone(),
             worker_id: "worker-test".to_string(),
             state_dir: state_dir.clone(),
         };
 
-        let error = harness
+        harness
             .handle_chat_command(
                 &ctx,
                 ChatSlashCommandRequest {
@@ -2762,13 +2993,7 @@ Original user message: {{ chat.message }}
                 },
             )
             .await
-            .expect_err("max-turn exhaustion should fail the chat run");
-
-        assert!(
-            format!("{error:#}")
-                .contains("turn loop reached the maximum of 2 turns without a final response"),
-            "the max-turn failure should propagate through the harness: {error:#}"
-        );
+            .expect("chat command failures should be delivered as typed stream events");
 
         let responses = response_sink.responses.lock().unwrap().clone();
         assert_eq!(
@@ -2787,13 +3012,21 @@ Original user message: {{ chat.message }}
         );
         assert!(
             !responses.iter().any(|response| matches!(
-                response,
-                Response::AgentResponse {
-                    payload: StreamEvent::Done { .. },
-                    ..
-                }
+                response_stream_event(response),
+                Some(StreamEvent::RunCompleted { .. })
             )),
             "max-turn exhaustion must not emit a successful Done output"
+        );
+        assert!(
+            responses.iter().any(|response| matches!(
+                response_stream_event(response),
+                Some(StreamEvent::RunFailed {
+                    code: ChatStreamErrorCode::Internal,
+                    retryable: false,
+                    ..
+                })
+            )),
+            "max-turn exhaustion should emit a typed failed run"
         );
 
         let requests = model_requests.lock().unwrap();
@@ -3052,20 +3285,12 @@ Original user message: {{ chat.message }}
     }
 
     fn text_response(text: impl Into<String>) -> ChatResponse {
-        let text = text.into();
         ChatResponse {
-            text: None,
-            tool_calls: vec![ToolCall {
-                id: "call_respond_to_user".to_string(),
-                name: "respond_to_user".to_string(),
-                arguments: serde_json::json!({
-                    "message": text,
-                    "status": "completed",
-                })
-                .to_string(),
-            }],
+            text: Some(text.into()),
+            tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
         }
     }
 
@@ -3075,6 +3300,7 @@ Original user message: {{ chat.message }}
             tool_calls: vec![tool_call],
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
         }
     }
 
@@ -3548,6 +3774,14 @@ done
         Completed,
     }
 
+    fn response_stream_event(response: &Response) -> Option<&StreamEvent> {
+        match response {
+            Response::ChatStreamFrame { frame } => Some(&frame.event),
+            Response::AgentResponse { payload, .. } => Some(payload),
+            _ => None,
+        }
+    }
+
     fn count_hook_events(
         responses: &[Response],
         kind: HookStreamKind,
@@ -3556,8 +3790,8 @@ done
     ) -> usize {
         responses
             .iter()
-            .filter(|response| match response {
-                Response::AgentResponse { payload, .. } => match (kind, payload) {
+            .filter(|response| match response_stream_event(response) {
+                Some(payload) => match (kind, payload) {
                     (
                         HookStreamKind::Started,
                         StreamEvent::HookStarted {
@@ -3595,7 +3829,7 @@ done
         responses
             .iter()
             .filter(|response| {
-                let Response::AgentResponse { payload, .. } = response else {
+                let Some(payload) = response_stream_event(response) else {
                     return false;
                 };
                 let StreamEvent::HookCompleted {
@@ -3631,7 +3865,7 @@ done
         expected_reason: &str,
     ) -> bool {
         responses.iter().any(|response| {
-            let Response::AgentResponse { payload, .. } = response else {
+            let Some(payload) = response_stream_event(response) else {
                 return false;
             };
             let StreamEvent::HookCompleted {
@@ -3659,10 +3893,10 @@ done
 
     fn done_output_contains(responses: &[Response], expected_output: &str) -> bool {
         responses.iter().any(|response| {
-            let Response::AgentResponse { payload, .. } = response else {
+            let Some(payload) = response_stream_event(response) else {
                 return false;
             };
-            let StreamEvent::Done { payload, .. } = payload else {
+            let StreamEvent::AssistantMessageFinalized { payload, .. } = payload else {
                 return false;
             };
             payload
@@ -3678,7 +3912,7 @@ done
         expected_source: &str,
     ) -> bool {
         responses.iter().any(|response| {
-            let Response::AgentResponse { payload, .. } = response else {
+            let Some(payload) = response_stream_event(response) else {
                 return false;
             };
             let StreamEvent::HookCompleted {

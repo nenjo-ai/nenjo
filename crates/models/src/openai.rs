@@ -85,6 +85,8 @@ struct NativeChatResponse {
 #[derive(Debug, Deserialize)]
 struct NativeChoice {
     message: NativeResponseMessage,
+    #[serde(default)]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -451,7 +453,10 @@ impl OpenAiProvider {
         Ok(native)
     }
 
-    fn parse_native_response(message: NativeResponseMessage) -> ChatResponse {
+    fn parse_native_response(
+        message: NativeResponseMessage,
+        finish_reason: Option<&str>,
+    ) -> ChatResponse {
         let tool_calls = message
             .tool_calls
             .unwrap_or_default()
@@ -463,11 +468,14 @@ impl OpenAiProvider {
             })
             .collect::<Vec<_>>();
 
+        let finish_reason =
+            crate::FinishReason::from_provider(finish_reason, !tool_calls.is_empty());
         ChatResponse {
             text: message.content,
             tool_calls,
             provider_tool_calls: vec![],
             usage: TokenUsage::default(),
+            finish_reason,
         }
     }
 
@@ -664,13 +672,13 @@ impl ModelProvider for OpenAiProvider {
                 output_tokens: u.completion_tokens,
             })
             .unwrap_or_default();
-        let message = native_response
+        let choice = native_response
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message)
             .ok_or_else(|| anyhow::anyhow!("No response from OpenAI"))?;
-        let mut result = Self::parse_native_response(message);
+        let mut result =
+            Self::parse_native_response(choice.message, choice.finish_reason.as_deref());
         result.usage = usage;
         Ok(result)
     }
@@ -925,14 +933,14 @@ mod tests {
             ),
             crate::ArtifactInputTransport::Inline { .. }
         ));
-        assert_eq!(
+        assert!(matches!(
             provider.artifact_input_transport(
                 "gpt-4o",
                 crate::ModelCapabilityId::Chat,
                 &crate::MediaType::parse("image/svg+xml").unwrap()
             ),
-            crate::ArtifactInputTransport::Unsupported
-        );
+            crate::ArtifactInputTransport::InlineText { .. }
+        ));
         assert!(matches!(
             provider.artifact_input_transport(
                 "gpt-4o",

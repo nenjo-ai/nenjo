@@ -120,6 +120,9 @@ pub struct RoutineCheckpoint {
     /// Original routine input required to restore provider execution after a
     /// worker restart. The platform stores the whole checkpoint encrypted.
     pub input: crate::routines::RoutineInput,
+    /// Effective retry policy snapshotted when the execution started.
+    #[serde(default)]
+    pub retry_policy: crate::routines::RoutineExecutionConfig,
     /// Latest committed result for each completed step.
     pub step_results: HashMap<Slug, StepResult>,
     /// Stable edge identities already traversed during this execution.

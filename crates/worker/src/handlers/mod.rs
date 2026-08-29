@@ -628,6 +628,8 @@ fn domain_context(ctx: &CommandContext) -> DomainCommandContext {
 impl CommandContext {
     pub(crate) fn chat_context(&self) -> ChatCommandContext<EventLoopResponseSender> {
         ChatCommandContext {
+            organization_id: self.org_id,
+            worker_instance_id: self.worker_id,
             response_sink: self.response_tx.clone(),
             worker_id: self.worker_name.clone(),
             state_dir: self.config.state_dir.clone(),

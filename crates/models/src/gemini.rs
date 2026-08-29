@@ -103,6 +103,8 @@ struct GenerateContentResponse {
 #[derive(Debug, Deserialize)]
 struct Candidate {
     content: CandidateContent,
+    #[serde(default, rename = "finishReason")]
+    finish_reason: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -392,9 +394,12 @@ impl ModelProvider for GeminiProvider {
             })
             .unwrap_or_default();
 
-        let text = result
-            .candidates
-            .and_then(|c| c.into_iter().next())
+        let candidate = result.candidates.and_then(|c| c.into_iter().next());
+        let finish_reason = crate::FinishReason::from_provider(
+            candidate.as_ref().and_then(|c| c.finish_reason.as_deref()),
+            false,
+        );
+        let text = candidate
             .and_then(|c| c.content.parts.into_iter().next())
             .and_then(|p| p.text);
 
@@ -403,6 +408,7 @@ impl ModelProvider for GeminiProvider {
             tool_calls: vec![],
             provider_tool_calls: vec![],
             usage,
+            finish_reason,
         })
     }
 

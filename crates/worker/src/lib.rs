@@ -213,11 +213,13 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     )?);
     let bootstrap_api = ApiClient::new(config.backend_api_url(), &config.api_key);
 
-    crate::bootstrap::sync(
+    crate::bootstrap::sync_for_startup(
         &bootstrap_api,
         &config.manifests_dir,
         &config.state_dir,
         &config.config_dir,
+        config.backend_api_url(),
+        &config.api_key,
     )
     .await?;
 
@@ -263,7 +265,7 @@ async fn run_once(config: &Config, shutdown: &CancellationToken) -> Result<()> {
     wait_for_enrollment_approval(
         &bootstrap_api,
         auth_provider.as_ref(),
-        api_key_id,
+        crate::crypto::WorkerEnrollmentBinding::new(org_id, api_key_id),
         ack_actor_user_id,
         build_harness_metadata(config),
         shutdown,
@@ -423,13 +425,14 @@ fn is_safe_nats_url(url: &str) -> bool {
 async fn wait_for_enrollment_approval(
     api: &nenjo_platform::api_client::ApiClient,
     auth_provider: &WorkerAuthProvider,
-    api_key_id: uuid::Uuid,
+    enrollment_binding: crate::crypto::WorkerEnrollmentBinding,
     ack_actor_user_id: uuid::Uuid,
     metadata: Option<serde_json::Value>,
     shutdown: &CancellationToken,
 ) -> Result<()> {
+    let api_key_id = enrollment_binding.api_key_id();
     auth_provider
-        .sync_worker_enrollment(api, api_key_id, ack_actor_user_id, metadata.clone())
+        .sync_worker_enrollment(api, enrollment_binding, ack_actor_user_id, metadata.clone())
         .await
         .map_err(|error| anyhow::anyhow!("Failed to initialize worker enrollment: {error}"))?;
 
@@ -456,7 +459,9 @@ async fn wait_for_enrollment_approval(
         match api.fetch_worker_enrollment_status(api_key_id).await {
             Ok(Some(status)) => match status.state {
                 nenjo_platform::api_client::WorkerEnrollmentState::Active => {
-                    auth_provider.apply_backend_enrollment(&status).await?;
+                    auth_provider
+                        .apply_backend_enrollment(&status, enrollment_binding)
+                        .await?;
                     info!("Worker enrollment approved");
                     debug!(%api_key_id, "Worker enrollment details");
                     return Ok(());

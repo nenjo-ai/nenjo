@@ -98,6 +98,7 @@ pub fn response_subject(org_id: Uuid, user_id: Uuid, response: &Response) -> Str
             session_id: Some(session_id),
             ..
         } => chat_stream_subject(org_id, *session_id),
+        Response::ChatStreamFrame { frame } => chat_stream_subject(org_id, frame.session_id),
         _ => response_user_subject(org_id, user_id),
     }
 }

@@ -6,13 +6,13 @@
 use std::sync::Arc;
 
 use anyhow::Result;
-use nenjo::Slug;
 use nenjo::manifest::{
     AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
     model_manifest_slug,
 };
 use nenjo::memory::MarkdownMemory;
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
+use nenjo::{Buffered, ChatInput, Slug};
 use nenjo_models::ModelProvider;
 use nenjo_models::openrouter::OpenRouterProvider;
 
@@ -143,7 +143,13 @@ async fn memory_store_writes_to_correct_scope() {
         .unwrap();
 
     let output = runner
-        .chat("Remember that we use Axum for HTTP. Category: architecture")
+        .chat(
+            ChatInput::new("Remember that we use Axum for HTTP. Category: architecture"),
+            Buffered,
+        )
+        .await
+        .expect("chat should start")
+        .output()
         .await
         .expect("chat should succeed");
 

@@ -8,7 +8,7 @@ use nenjo::manifest::{
     AbilityManifest, AbilityPromptConfig, AgentManifest, CommandManifest, ContextBlockManifest,
     CouncilDelegationStrategy, CouncilManifest, DomainManifest, DomainPromptConfig,
     KnowledgePackManifest, KnowledgePackSource, Manifest, ManifestResourceKind, McpServerManifest,
-    ModelManifest, ProjectManifest, RoutineManifest, RoutineMetadata,
+    ModelManifest, ProjectManifest, RoutineManifest,
 };
 use nenjo::provider::NoopToolFactory;
 use nenjo::{ModelProviderFactory, Provider, Slug};
@@ -415,6 +415,7 @@ impl nenjo::ModelProvider for TestModelProvider {
             tool_calls: vec![],
             provider_tool_calls: vec![],
             usage: nenjo_models::TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
         })
     }
 }
@@ -522,7 +523,7 @@ fn routine(_id: Uuid, name: &str) -> RoutineManifest {
         name: name.into(),
         slug: Slug::derive(name),
         description: None,
-        metadata: RoutineMetadata::default(),
+        entry_steps: Vec::new(),
         steps: Vec::new(),
         edges: Vec::new(),
     }

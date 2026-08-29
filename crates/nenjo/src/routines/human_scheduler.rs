@@ -13,7 +13,7 @@ use crate::Slug;
 use crate::manifest::{
     RoutineEdgeCondition, RoutineManifest, RoutineStepManifest, RoutineStepType,
 };
-use crate::routines::handoff_schema::{edge_handoff_schema, validate_handoff_payload};
+use crate::routines::handoff_schema::{validate_handoff_payload, validate_handoff_schema};
 use crate::routines::human_materialization::{
     PendingHumanRequestDraft, ROUTINE_CHECKPOINT_CONTRACT, ResolvedHumanRequest, RoutineCheckpoint,
     RoutineExecutionOutcome, RoutineFailure,
@@ -67,6 +67,18 @@ pub struct HumanReviewScheduler<'a> {
 impl<'a> HumanReviewScheduler<'a> {
     /// Create a scheduler at the graph entry steps.
     pub fn new(routine: &'a RoutineManifest, identity: RoutineCheckpointIdentity) -> Self {
+        Self::new_with_config(
+            routine,
+            identity,
+            crate::routines::RoutineExecutionConfig::default(),
+        )
+    }
+
+    pub fn new_with_config(
+        routine: &'a RoutineManifest,
+        identity: RoutineCheckpointIdentity,
+        retry_policy: crate::routines::RoutineExecutionConfig,
+    ) -> Self {
         Self {
             routine,
             checkpoint: RoutineCheckpoint {
@@ -78,11 +90,12 @@ impl<'a> HumanReviewScheduler<'a> {
                 input: identity
                     .input
                     .expect("routine runner supplies checkpoint input"),
+                retry_policy,
                 step_results: HashMap::new(),
                 traversed_edges: HashSet::new(),
                 retry_counts: HashMap::new(),
                 traversal_counts: HashMap::new(),
-                ready: routine.metadata.entry_steps.clone(),
+                ready: routine.entry_steps.clone(),
                 running: Vec::new(),
                 completed: Vec::new(),
                 waiting: Vec::new(),
@@ -246,7 +259,12 @@ impl<'a> HumanReviewScheduler<'a> {
                         "human step '{step_slug}' received duplicate input '{input}' in one round"
                     );
                 }
-                let schema = edge_handoff_schema(&edge.metadata)?.clone();
+                let schema = edge
+                    .handoff_schema
+                    .as_ref()
+                    .ok_or_else(|| anyhow::anyhow!("handoff_schema is required"))?;
+                validate_handoff_schema(schema)?;
+                let schema = schema.clone();
                 validate_handoff_payload(&schema, &handoff.handoff)?;
                 let source_name = self.require_step(&handoff.source_step)?.name.clone();
                 Ok(HumanReviewInput {
@@ -653,7 +671,7 @@ mod tests {
     use serde_json::json;
 
     use super::*;
-    use crate::manifest::{RoutineEdgeManifest, RoutineMetadata};
+    use crate::manifest::RoutineEdgeManifest;
     use crate::routines::human_materialization::ResolvedHumanRequest;
 
     fn step(
@@ -674,29 +692,30 @@ mod tests {
     }
 
     fn edge(from: &str, to: &str, condition: RoutineEdgeCondition) -> RoutineEdgeManifest {
-        let metadata = if matches!(
+        let handoff_schema = if matches!(
             condition,
             RoutineEdgeCondition::Always
                 | RoutineEdgeCondition::OnPass
                 | RoutineEdgeCondition::OnFail
         ) {
-            json!({
-                "handoff_schema": {
-                    "type": "object",
-                    "required": ["summary"],
-                    "properties": {"summary": {"type": "string"}},
-                    "additionalProperties": false
-                }
-            })
+            Some(json!({
+                "type": "object",
+                "required": ["summary"],
+                "properties": {"summary": {"type": "string"}},
+                "additionalProperties": false
+            }))
         } else {
-            json!({})
+            None
         };
         RoutineEdgeManifest {
             routine: Slug::derive("release"),
             source_step: Slug::derive(from),
             target_step: Slug::derive(to),
             condition,
-            metadata,
+            purpose: None,
+            handoff_instructions: None,
+            handoff_schema,
+            max_retries: None,
         }
     }
 
@@ -705,9 +724,7 @@ mod tests {
             name: "Release".to_string(),
             slug: Slug::derive("release"),
             description: None,
-            metadata: RoutineMetadata {
-                entry_steps: vec![Slug::derive("prepare")],
-            },
+            entry_steps: vec![Slug::derive("prepare")],
             steps: vec![
                 step("prepare", RoutineStepType::Agent, json!({})),
                 step(
@@ -748,6 +765,24 @@ mod tests {
             step_name: slug.to_string(),
             ..Default::default()
         }
+    }
+
+    #[test]
+    fn checkpoint_snapshots_retry_policy_for_resumed_execution() {
+        let routine = routine();
+        let identity = identity(Uuid::new_v4());
+        let original = crate::routines::RoutineExecutionConfig::new(
+            crate::routines::GateRetryLimit::new(5),
+            crate::routines::GateRetryLimit::new(8),
+        )
+        .unwrap();
+        let scheduler = HumanReviewScheduler::new_with_config(&routine, identity.clone(), original);
+        let checkpoint = scheduler.checkpoint();
+
+        // A caller may now have a different worker configuration, but restore
+        // consumes only the policy persisted with this run.
+        let restored = HumanReviewScheduler::restore(&routine, checkpoint, &identity).unwrap();
+        assert_eq!(restored.checkpoint().retry_policy, original);
     }
 
     #[test]
@@ -848,7 +883,7 @@ mod tests {
     #[test]
     fn waits_for_concurrent_producers_and_preserves_each_activated_input() {
         let mut routine = routine();
-        routine.metadata.entry_steps.push(Slug::derive("audit"));
+        routine.entry_steps.push(Slug::derive("audit"));
         routine
             .steps
             .push(step("audit", RoutineStepType::Agent, json!({})));
@@ -1058,9 +1093,7 @@ mod tests {
             name: "Conditional join".to_string(),
             slug: Slug::derive("conditional_join"),
             description: None,
-            metadata: RoutineMetadata {
-                entry_steps: vec![Slug::derive("prepare"), Slug::derive("verify")],
-            },
+            entry_steps: vec![Slug::derive("prepare"), Slug::derive("verify")],
             steps: vec![
                 step("prepare", RoutineStepType::Agent, json!({})),
                 step("verify", RoutineStepType::Gate, json!({})),

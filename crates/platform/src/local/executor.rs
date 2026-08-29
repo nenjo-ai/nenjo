@@ -10,7 +10,7 @@ use nenjo::{
         AbilityManifest, AgentManifest, CommandManifest, ContextBlockManifest,
         CouncilDelegationStrategy, CouncilManifest, CouncilMemberManifest, DomainManifest,
         ManifestIdentity, ModelManifest, ProjectManifest, PromptConfig, RoutineEdgeManifest,
-        RoutineManifest, RoutineMetadata, RoutineStepManifest,
+        RoutineManifest, RoutineStepManifest,
     },
 };
 
@@ -32,7 +32,7 @@ use crate::manifest_mcp::{
     KnowledgeDocUpdateParams, KnowledgePackCreateParams, KnowledgePackMutationResult,
     KnowledgePackUpdateParams, LibraryManifestBackend, ModelDeleteParams, ModelDocument,
     ModelGetResult, ModelManifestBackend, ModelMutationResult, ModelUpdateParams, ModelsGetParams,
-    ModelsListResult, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
+    ModelsListResult, NullablePatch, Patch, ProjectDeleteParams, ProjectDocument, ProjectGetResult,
     ProjectManifestBackend, ProjectMutationResult, ProjectSummary, ProjectUpdateParams,
     ProjectsGetParams, ProjectsListResult, RoutineConfigureParams, RoutineConfigureResult,
     RoutineDeleteParams, RoutineDocument, RoutineGetResult, RoutineGraphInput,
@@ -43,19 +43,8 @@ use crate::{CouncilCreateParams, ModelCreateParams, ProjectCreateParams};
 
 fn graph_input_to_manifest_parts(
     routine: Slug,
-    mut metadata: RoutineMetadata,
-    graph: Option<RoutineGraphInput>,
-) -> (
-    Vec<RoutineStepManifest>,
-    Vec<RoutineEdgeManifest>,
-    RoutineMetadata,
-) {
-    let Some(graph) = graph else {
-        return (Vec::new(), Vec::new(), metadata);
-    };
-
-    metadata.entry_steps = graph.entry_steps.clone();
-
+    graph: RoutineGraphInput,
+) -> (Vec<RoutineStepManifest>, Vec<RoutineEdgeManifest>) {
     let steps = graph
         .steps
         .into_iter()
@@ -79,11 +68,14 @@ fn graph_input_to_manifest_parts(
             source_step: edge.source_step,
             target_step: edge.target_step,
             condition: edge.condition,
-            metadata: edge.metadata,
+            purpose: edge.purpose,
+            handoff_instructions: edge.handoff_instructions,
+            handoff_schema: edge.handoff_schema,
+            max_retries: edge.max_retries,
         })
         .collect();
 
-    (steps, edges, metadata)
+    (steps, edges)
 }
 
 fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
@@ -232,24 +224,24 @@ where
     }
 
     async fn configure_agent(&self, params: AgentConfigureParams) -> Result<AgentConfigureResult> {
-        let old_slug = params.data.agent.clone();
-        let mut agent = match params.data.agent.as_ref() {
-            Some(agent) => local_agent_by_slug(self.reader.as_ref(), agent).await?,
+        let data = params.data;
+        let existing = self
+            .reader
+            .list_agents()
+            .await?
+            .into_iter()
+            .find(|agent| agent.manifest_slug() == &data.slug);
+        let mut agent = match existing {
+            Some(agent) => agent,
             None => {
-                let name = params
-                    .data
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.name.as_ref())
-                    .ok_or_else(|| anyhow!("metadata.name is required when creating an agent"))?
-                    .clone();
+                let Patch::Set(name) = data.name.clone() else {
+                    return Err(anyhow!(
+                        "name is required when creating agent `{}`",
+                        data.slug
+                    ));
+                };
                 AgentManifest {
-                    slug: params
-                        .data
-                        .metadata
-                        .as_ref()
-                        .and_then(|metadata| metadata.slug.clone())
-                        .unwrap_or_else(|| Slug::derive(&name)),
+                    slug: data.slug.clone(),
                     name,
                     description: None,
                     prompt_config: PromptConfig::default(),
@@ -268,57 +260,48 @@ where
             }
         };
 
-        if let Some(metadata) = params.data.metadata {
-            if let Some(name) = metadata.name {
-                agent.name = name;
-            }
-            if let Some(slug) = metadata.slug {
-                agent.slug = slug;
-            }
-            if let Some(description) = metadata.description {
-                agent.description = description;
-            }
-            if let Some(color) = metadata.color {
-                agent.color = color;
-            }
-            if let Some(model) = metadata.model {
-                agent.model = model;
-            }
+        if let Patch::Set(name) = data.name {
+            agent.name = name;
+        }
+        match data.description {
+            NullablePatch::Unchanged => {}
+            NullablePatch::Clear => agent.description = None,
+            NullablePatch::Set(description) => agent.description = Some(description),
+        }
+        match data.color {
+            NullablePatch::Unchanged => {}
+            NullablePatch::Clear => agent.color = None,
+            NullablePatch::Set(color) => agent.color = Some(color),
+        }
+        match data.model {
+            NullablePatch::Unchanged => {}
+            NullablePatch::Clear => agent.model = None,
+            NullablePatch::Set(model) => agent.model = Some(model),
         }
 
-        if let Some(prompt_patch) = params.data.prompt_config {
+        if let Patch::Set(prompt_patch) = data.prompt_config {
             if agent.prompt_locked {
                 return Err(anyhow!("agent prompt is locked: {}", agent.slug));
             }
             agent.prompt_config = merge_prompt_config(&agent.prompt_config, prompt_patch)?;
         }
 
-        if let Some(assignments) = params.data.assignments {
-            if let Some(abilities) = assignments.abilities {
-                agent.abilities = abilities;
-            }
-            if let Some(domains) = assignments.domains {
-                agent.domains = domains;
-            }
-            if let Some(mcp_servers) = assignments.mcp_servers {
-                agent.mcp_servers = mcp_servers;
-            }
+        if let Patch::Set(abilities) = data.abilities {
+            agent.abilities = abilities;
+        }
+        if let Patch::Set(domains) = data.domains {
+            agent.domains = domains;
+        }
+        if let Patch::Set(mcp_servers) = data.mcp_servers {
+            agent.mcp_servers = mcp_servers;
         }
 
         self.writer
             .upsert_resource(&ManifestResource::Agent(agent.clone()))
             .await?;
-        if let Some(old_slug) = old_slug
-            && old_slug != agent.slug
-        {
-            self.writer
-                .delete_resource(ManifestResourceKind::Agent, &old_slug)
-                .await?;
-        }
 
         Ok(AgentConfigureResult {
             agent: AgentDocument::from(agent),
-            warnings: Vec::new(),
         })
     }
 }
@@ -351,22 +334,30 @@ where
         &self,
         params: AbilityConfigureParams,
     ) -> Result<AbilityConfigureResult> {
-        let mut ability = match params.data.ability.as_ref() {
-            Some(ability) => self.resolve_ability(ability).await?,
+        let data = params.data;
+        let existing = self
+            .reader
+            .list_abilities()
+            .await?
+            .into_iter()
+            .find(|ability| ability.manifest_slug() == &data.slug);
+        let mut ability = match existing {
+            Some(ability) => ability,
             None => {
-                let name = params
-                    .data
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.name.as_ref())
-                    .ok_or_else(|| anyhow!("metadata.name is required when creating an ability"))?
-                    .clone();
-                let prompt_config =
-                    params.data.prompt_config.clone().ok_or_else(|| {
-                        anyhow!("prompt_config is required when creating an ability")
-                    })?;
+                let Patch::Set(name) = data.name.clone() else {
+                    return Err(anyhow!(
+                        "name is required when creating ability `{}`",
+                        data.slug
+                    ));
+                };
+                let Patch::Set(prompt_config) = data.prompt_config.clone() else {
+                    return Err(anyhow!(
+                        "prompt_config is required when creating ability `{}`",
+                        data.slug
+                    ));
+                };
                 AbilityManifest {
-                    slug: Slug::derive(&name),
+                    slug: data.slug.clone(),
                     name,
                     path: None,
                     description: None,
@@ -383,32 +374,27 @@ where
             }
         };
 
-        if let Some(metadata) = params.data.metadata {
-            if let Some(name) = metadata.name {
-                ability.name = name;
-            }
-            if let Some(path) = metadata.path {
-                ability.path = if path.is_empty() { None } else { Some(path) };
-            }
-            if let Some(description) = metadata.description {
-                ability.description = description;
-            }
-            if let Some(activation_condition) = metadata.activation_condition {
-                ability.activation_condition = activation_condition;
-            }
+        if let Patch::Set(name) = data.name {
+            ability.name = name;
+        }
+        if let Patch::Set(path) = data.path {
+            ability.path = if path.is_empty() { None } else { Some(path) };
+        }
+        match data.description {
+            NullablePatch::Unchanged => {}
+            NullablePatch::Clear => ability.description = None,
+            NullablePatch::Set(description) => ability.description = Some(description),
+        }
+        if let Patch::Set(activation_condition) = data.activation_condition {
+            ability.activation_condition = activation_condition;
         }
 
-        if let Some(prompt_config) = params.data.prompt_config {
+        if let Patch::Set(prompt_config) = data.prompt_config {
             ability.prompt_config = prompt_config;
         }
 
-        if let Some(assignments) = params.data.assignments {
-            if let Some(mcp_servers) = assignments.mcp_servers {
-                ability.mcp_servers = mcp_servers;
-            }
-            if let Some(script_tools) = assignments.script_tools {
-                ability.script_tools = script_tools;
-            }
+        if let Patch::Set(mcp_servers) = data.mcp_servers {
+            ability.mcp_servers = mcp_servers;
         }
 
         self.writer
@@ -417,7 +403,6 @@ where
 
         Ok(AbilityConfigureResult {
             ability: AbilityDocument::from(ability),
-            warnings: Vec::new(),
         })
     }
 }
@@ -458,43 +443,52 @@ where
         &self,
         params: CommandConfigureParams,
     ) -> Result<CommandConfigureResult> {
-        let mut command = match params.data.command_ref.as_deref() {
-            Some(command_ref) => {
-                let manifest = self.reader.load_manifest().await?;
-                let existing = manifest
-                    .commands
-                    .into_iter()
-                    .find(|command| command_matches_ref(command, command_ref))
-                    .ok_or_else(|| anyhow!("command not found in local manifest: {command_ref}"))?;
+        let data = params.data;
+        let existing = self
+            .reader
+            .load_manifest()
+            .await?
+            .commands
+            .into_iter()
+            .find(|command| command.manifest_slug() == &data.slug);
+        let mut command = match existing {
+            Some(existing) => {
                 if existing.read_only || existing.source_type != "native" {
                     return Err(anyhow!("package-managed commands cannot be edited locally"));
                 }
                 existing
             }
             None => {
-                let metadata = params
-                    .data
-                    .metadata
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("metadata is required when creating a command"))?;
-                let name = metadata
-                    .name
-                    .clone()
-                    .ok_or_else(|| anyhow!("metadata.name is required when creating a command"))?;
-                let slash_command = metadata.command.clone().ok_or_else(|| {
-                    anyhow!("metadata.command is required when creating a command")
-                })?;
-                let content = params
-                    .data
-                    .content
-                    .clone()
-                    .ok_or_else(|| anyhow!("content is required when creating a command"))?;
+                let Patch::Set(name) = data.name.clone() else {
+                    return Err(anyhow!(
+                        "name is required when creating command `{}`",
+                        data.slug
+                    ));
+                };
+                let Patch::Set(slash_command) = data.command.clone() else {
+                    return Err(anyhow!(
+                        "command is required when creating command `{}`",
+                        data.slug
+                    ));
+                };
+                let Patch::Set(content) = data.content.clone() else {
+                    return Err(anyhow!(
+                        "content is required when creating command `{}`",
+                        data.slug
+                    ));
+                };
                 CommandManifest {
-                    slug: Slug::derive(&name),
+                    slug: data.slug.clone(),
                     name,
-                    path: metadata.path.clone().unwrap_or_default(),
+                    path: match data.path.clone() {
+                        Patch::Unchanged => String::new(),
+                        Patch::Set(path) => path,
+                    },
                     command: slash_command,
-                    description: metadata.description.clone().flatten(),
+                    description: match data.description.clone() {
+                        NullablePatch::Unchanged | NullablePatch::Clear => None,
+                        NullablePatch::Set(description) => Some(description),
+                    },
                     entry_path: "command.md".to_string(),
                     content,
                     root_path: String::new(),
@@ -509,21 +503,21 @@ where
             }
         };
 
-        if let Some(metadata) = params.data.metadata {
-            if let Some(name) = metadata.name {
-                command.name = name;
-            }
-            if let Some(path) = metadata.path {
-                command.path = path;
-            }
-            if let Some(slash_command) = metadata.command {
-                command.command = slash_command;
-            }
-            if let Some(description) = metadata.description {
-                command.description = description;
-            }
+        if let Patch::Set(name) = data.name {
+            command.name = name;
         }
-        if let Some(content) = params.data.content {
+        if let Patch::Set(path) = data.path {
+            command.path = path;
+        }
+        if let Patch::Set(slash_command) = data.command {
+            command.command = slash_command;
+        }
+        match data.description {
+            NullablePatch::Unchanged => {}
+            NullablePatch::Clear => command.description = None,
+            NullablePatch::Set(description) => command.description = Some(description),
+        }
+        if let Patch::Set(content) = data.content {
             command.content = content;
         }
 
@@ -531,10 +525,7 @@ where
             .upsert_resource(&ManifestResource::Command(command.clone()))
             .await?;
 
-        Ok(CommandConfigureResult {
-            command,
-            warnings: Vec::new(),
-        })
+        Ok(CommandConfigureResult { command })
     }
 }
 
@@ -566,26 +557,30 @@ where
         &self,
         params: DomainConfigureParams,
     ) -> Result<DomainConfigureResult> {
-        let mut domain = match params.data.domain.as_ref() {
-            Some(domain) => local_domain_by_slug(self.reader.as_ref(), domain).await?,
+        let data = params.data;
+        let existing = self
+            .reader
+            .list_domains()
+            .await?
+            .into_iter()
+            .find(|domain| domain.manifest_slug() == &data.slug);
+        let mut domain = match existing {
+            Some(domain) => domain,
             None => {
-                let metadata = params
-                    .data
-                    .metadata
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("metadata is required when creating a domain"))?;
-                let name = metadata
-                    .name
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("metadata.name is required when creating a domain"))?
-                    .clone();
-                let command = metadata
-                    .command
-                    .as_ref()
-                    .ok_or_else(|| anyhow!("metadata.command is required when creating a domain"))?
-                    .clone();
+                let Patch::Set(name) = data.name.clone() else {
+                    return Err(anyhow!(
+                        "name is required when creating domain `{}`",
+                        data.slug
+                    ));
+                };
+                let Patch::Set(command) = data.command.clone() else {
+                    return Err(anyhow!(
+                        "command is required when creating domain `{}`",
+                        data.slug
+                    ));
+                };
                 DomainManifest {
-                    slug: Slug::derive(&name),
+                    slug: data.slug.clone(),
                     name,
                     path: String::new(),
                     description: None,
@@ -595,40 +590,38 @@ where
                     mcp_servers: Vec::new(),
                     script_tools: Vec::new(),
                     media: Vec::new(),
-                    prompt_config: params.data.prompt_config.clone().unwrap_or_default(),
+                    prompt_config: match data.prompt_config.clone() {
+                        Patch::Unchanged => Default::default(),
+                        Patch::Set(prompt_config) => prompt_config,
+                    },
                 }
             }
         };
 
-        if let Some(metadata) = params.data.metadata {
-            if let Some(name) = metadata.name {
-                domain.name = name;
-            }
-            if let Some(path) = metadata.path {
-                domain.path = path;
-            }
-            if let Some(description) = metadata.description {
-                domain.description = description;
-            }
-            if let Some(command) = metadata.command {
-                domain.command = command;
-            }
+        if let Patch::Set(name) = data.name {
+            domain.name = name;
+        }
+        if let Patch::Set(path) = data.path {
+            domain.path = path;
+        }
+        match data.description {
+            NullablePatch::Unchanged => {}
+            NullablePatch::Clear => domain.description = None,
+            NullablePatch::Set(description) => domain.description = Some(description),
+        }
+        if let Patch::Set(command) = data.command {
+            domain.command = command;
         }
 
-        if let Some(prompt_config) = params.data.prompt_config {
+        if let Patch::Set(prompt_config) = data.prompt_config {
             domain.prompt_config = prompt_config;
         }
 
-        if let Some(assignments) = params.data.assignments {
-            if let Some(abilities) = assignments.abilities {
-                domain.abilities = abilities;
-            }
-            if let Some(mcp_servers) = assignments.mcp_servers {
-                domain.mcp_servers = mcp_servers;
-            }
-            if let Some(script_tools) = assignments.script_tools {
-                domain.script_tools = script_tools;
-            }
+        if let Patch::Set(abilities) = data.abilities {
+            domain.abilities = abilities;
+        }
+        if let Patch::Set(mcp_servers) = data.mcp_servers {
+            domain.mcp_servers = mcp_servers;
         }
 
         self.writer
@@ -637,7 +630,6 @@ where
 
         Ok(DomainConfigureResult {
             domain: DomainDocument::from(domain),
-            warnings: Vec::new(),
         })
     }
 }
@@ -803,70 +795,31 @@ where
         &self,
         params: RoutineConfigureParams,
     ) -> Result<RoutineConfigureResult> {
-        let old_slug = params.data.routine.clone();
-        let mut routine = if let Some(routine_slug) = params.data.routine.as_ref() {
-            local_routine_by_slug(self.reader.as_ref(), routine_slug).await?
-        } else {
-            let name = params
-                .data
-                .metadata
-                .as_ref()
-                .and_then(|metadata| metadata.name.clone())
-                .filter(|name| !name.trim().is_empty())
-                .ok_or_else(|| anyhow!("metadata.name is required when creating a routine"))?;
-            RoutineManifest {
-                slug: params
-                    .data
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.slug.clone())
-                    .unwrap_or_else(|| Slug::derive(&name)),
-                name,
-                description: None,
-                metadata: RoutineMetadata::default(),
-                steps: Vec::new(),
-                edges: Vec::new(),
-            }
+        let data = params.data;
+        if data.name.trim().is_empty() {
+            return Err(anyhow!("name must not be blank"));
+        }
+        let graph = RoutineGraphInput {
+            entry_steps: data.entry_steps.clone(),
+            steps: data.steps,
+            edges: data.edges,
         };
-
-        if let Some(metadata) = params.data.metadata {
-            if let Some(name) = metadata.name {
-                routine.name = name;
-            }
-            if let Some(slug) = metadata.slug {
-                routine.slug = slug;
-            }
-            if let Some(description) = metadata.description {
-                routine.description = description;
-            }
-        }
-        if let Some(runtime_metadata) = params.data.runtime_metadata {
-            routine.metadata = serde_json::from_value(runtime_metadata)
-                .map_err(|err| anyhow!("invalid routine runtime_metadata: {err}"))?;
-        }
-        if let Some(graph) = params.data.graph {
-            let (steps, edges, metadata) = graph_input_to_manifest_parts(
-                routine.slug().clone(),
-                routine.metadata,
-                Some(graph),
-            );
-            routine.steps = steps;
-            routine.edges = edges;
-            routine.metadata = metadata;
-        }
+        let (steps, edges) = graph_input_to_manifest_parts(data.slug.clone(), graph);
+        let routine = RoutineManifest {
+            slug: data.slug,
+            name: data.name,
+            description: data.description,
+            entry_steps: data.entry_steps,
+            steps,
+            edges,
+        };
+        nenjo::routines::graph::validate_routine_manifest(&routine)
+            .map_err(|error| anyhow!("Routine graph is invalid: {error}"))?;
         self.writer
             .upsert_resource(&ManifestResource::Routine(routine.clone()))
             .await?;
-        if let Some(old_slug) = old_slug
-            && old_slug != routine.slug
-        {
-            self.writer
-                .delete_resource(ManifestResourceKind::Routine, &old_slug)
-                .await?;
-        }
         Ok(RoutineConfigureResult {
             routine: RoutineDocument::from(routine),
-            warnings: Vec::new(),
         })
     }
 
@@ -1154,26 +1107,30 @@ where
         &self,
         params: ContextBlockConfigureParams,
     ) -> Result<ContextBlockConfigureResult> {
-        let mut context_block = match params.data.context_block.as_ref() {
-            Some(context_block) => {
-                local_context_block_by_slug(self.reader.as_ref(), context_block).await?
-            }
+        let data = params.data;
+        let existing = self
+            .reader
+            .list_context_blocks()
+            .await?
+            .into_iter()
+            .find(|context_block| context_block.manifest_slug() == &data.slug);
+        let mut context_block = match existing {
+            Some(context_block) => context_block,
             None => {
-                let name = params
-                    .data
-                    .metadata
-                    .as_ref()
-                    .and_then(|metadata| metadata.name.as_ref())
-                    .ok_or_else(|| {
-                        anyhow!("metadata.name is required when creating a context block")
-                    })?
-                    .clone();
-                let template =
-                    params.data.template.clone().ok_or_else(|| {
-                        anyhow!("template is required when creating a context block")
-                    })?;
+                let Patch::Set(name) = data.name.clone() else {
+                    return Err(anyhow!(
+                        "name is required when creating context block `{}`",
+                        data.slug
+                    ));
+                };
+                let Patch::Set(template) = data.template.clone() else {
+                    return Err(anyhow!(
+                        "template is required when creating context block `{}`",
+                        data.slug
+                    ));
+                };
                 ContextBlockManifest {
-                    slug: Slug::derive(&name),
+                    slug: data.slug.clone(),
                     name,
                     path: String::new(),
                     description: None,
@@ -1182,18 +1139,18 @@ where
             }
         };
 
-        if let Some(metadata) = params.data.metadata {
-            if let Some(name) = metadata.name {
-                context_block.name = name;
-            }
-            if let Some(path) = metadata.path {
-                context_block.path = path;
-            }
-            if let Some(description) = metadata.description {
-                context_block.description = description;
-            }
+        if let Patch::Set(name) = data.name {
+            context_block.name = name;
         }
-        if let Some(template) = params.data.template {
+        if let Patch::Set(path) = data.path {
+            context_block.path = path;
+        }
+        match data.description {
+            NullablePatch::Unchanged => {}
+            NullablePatch::Clear => context_block.description = None,
+            NullablePatch::Set(description) => context_block.description = Some(description),
+        }
+        if let Patch::Set(template) = data.template {
             context_block.template = template;
         }
 
@@ -1202,7 +1159,6 @@ where
             .await?;
         Ok(ContextBlockConfigureResult {
             context_block: ContextBlockDocument::from(context_block),
-            warnings: Vec::new(),
         })
     }
 }
@@ -1217,14 +1173,14 @@ mod tests {
     use nenjo::manifest::{
         AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest,
         CouncilMemberManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
-        PromptConfig, PromptTemplates, RoutineEdgeCondition, RoutineEdgeManifest, RoutineManifest,
-        RoutineStepManifest, RoutineStepType,
+        PromptConfig, PromptTemplates, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest,
+        RoutineStepType,
     };
     use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
 
     use super::*;
     use crate::manifest_mcp::ManifestMcpContract;
-    use crate::{RoutineEdgeInput, RoutineGraphInput, RoutineStepConfigInput, RoutineStepInput};
+    use crate::{RoutineStepConfigInput, RoutineStepInput};
 
     struct SampleManifest {
         manifest: Manifest,
@@ -1359,9 +1315,7 @@ mod tests {
             name: "nightly-build".into(),
             slug: Slug::derive("nightly-build"),
             description: Some("Runs the nightly build".into()),
-            metadata: nenjo::manifest::RoutineMetadata {
-                entry_steps: vec![Slug::derive("compile")],
-            },
+            entry_steps: vec![Slug::derive("compile")],
             steps: vec![RoutineStepManifest {
                 slug: Slug::derive("compile"),
                 routine: Slug::derive("nightly-build"),
@@ -1377,7 +1331,10 @@ mod tests {
                 source_step: Slug::derive("compile"),
                 target_step: Slug::derive("compile"),
                 condition: nenjo::manifest::RoutineEdgeCondition::Always,
-                metadata: serde_json::json!({}),
+                purpose: None,
+                handoff_instructions: None,
+                handoff_schema: None,
+                max_retries: None,
             }],
         };
 
@@ -1512,19 +1469,11 @@ mod tests {
 
         let result = backend
             .configure_agent(AgentConfigureParams {
-                data: crate::AgentConfigureDocument {
-                    agent: Some(agent.slug.clone()),
-                    metadata: Some(crate::AgentConfigureMetadata {
-                        name: Some("reviewer".into()),
-                        slug: None,
-                        description: None,
-                        color: None,
-                        model: None,
-                    }),
-                    prompt_config: None,
-                    assignments: None,
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": agent.slug,
+                    "name": "reviewer"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -1542,19 +1491,13 @@ mod tests {
 
         let result = backend
             .configure_agent(AgentConfigureParams {
-                data: crate::AgentConfigureDocument {
-                    agent: Some(agent.slug.clone()),
-                    metadata: Some(crate::AgentConfigureMetadata {
-                        name: None,
-                        slug: None,
-                        description: Some(None),
-                        color: Some(None),
-                        model: Some(None),
-                    }),
-                    prompt_config: None,
-                    assignments: None,
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": agent.slug,
+                    "description": null,
+                    "color": null,
+                    "model": null
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -1571,17 +1514,11 @@ mod tests {
 
         let result = backend
             .configure_agent(AgentConfigureParams {
-                data: crate::AgentConfigureDocument {
-                    agent: Some(agent.slug.clone()),
-                    metadata: None,
-                    prompt_config: None,
-                    assignments: Some(crate::AgentConfigureAssignments {
-                        abilities: None,
-                        domains: None,
-                        mcp_servers: Some(vec![Slug::derive("review-server")]),
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": agent.slug,
+                    "mcp_servers": ["review-server"]
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -1598,25 +1535,18 @@ mod tests {
 
         let result = backend
             .configure_agent(AgentConfigureParams {
-                data: crate::AgentConfigureDocument {
-                    agent: Some(agent.slug.clone()),
-                    metadata: Some(crate::AgentConfigureMetadata {
-                        name: Some("builder".into()),
-                        slug: None,
-                        description: Some(Some("builds agents".into())),
-                        color: None,
-                        model: None,
-                    }),
-                    prompt_config: Some(serde_json::json!({
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": agent.slug,
+                    "name": "builder",
+                    "description": "builds agents",
+                    "prompt_config": {
                         "developer_prompt": "Build agent specs carefully."
-                    })),
-                    assignments: Some(crate::AgentConfigureAssignments {
-                        abilities: Some(vec![Slug::derive("design_agent")]),
-                        domains: Some(vec![Slug::derive("creator")]),
-                        mcp_servers: Some(vec![Slug::derive("review-server")]),
-                    }),
-                    ..Default::default()
-                },
+                    },
+                    "abilities": ["design_agent"],
+                    "domains": ["creator"],
+                    "mcp_servers": ["review-server"]
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -1644,18 +1574,16 @@ mod tests {
 
         let result = backend
             .configure_agent(AgentConfigureParams {
-                data: crate::AgentConfigureDocument {
-                    agent: Some(agent.slug.clone()),
-                    metadata: None,
-                    prompt_config: Some(serde_json::json!({
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": agent.slug,
+                    "prompt_config": {
                         "developer_prompt": "Prefer minimal diffs.",
                         "templates": {
                             "chat": "New chat template"
                         }
-                    })),
-                    assignments: None,
-                    ..Default::default()
-                },
+                    }
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -1683,15 +1611,13 @@ mod tests {
 
         let error = backend
             .configure_agent(AgentConfigureParams {
-                data: crate::AgentConfigureDocument {
-                    agent: Some(agent.slug.clone()),
-                    metadata: None,
-                    prompt_config: Some(serde_json::json!({
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": agent.slug,
+                    "prompt_config": {
                         "developer_prompt": "This should fail."
-                    })),
-                    assignments: None,
-                    ..Default::default()
-                },
+                    }
+                }))
+                .unwrap(),
             })
             .await
             .unwrap_err();
@@ -1707,10 +1633,8 @@ mod tests {
             &backend,
             "configure_agent",
             serde_json::json!({
-                "agent": agent.slug.clone(),
-                "metadata": {
-                    "name": "planner"
-                },
+                "slug": agent.slug.clone(),
+                "name": "planner",
                 "prompt_config": {
                     "templates": {
                         "chat": "Planner chat"
@@ -1729,28 +1653,22 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configure_agent_ignores_platform_scopes() {
+    async fn configure_agent_rejects_platform_scopes() {
         let TestContext { backend, agent, .. } = backend().await;
 
-        let result = ManifestMcpContract::dispatch(
+        let error = ManifestMcpContract::dispatch(
             &backend,
             "configure_agent",
             serde_json::json!({
-                "agent": agent.slug.clone(),
-                "metadata": {
-                    "name": "writer"
-                },
+                "slug": agent.slug.clone(),
+                "name": "writer",
                 "platform_scopes": ["agents:write"]
             }),
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(result["agent"]["name"], serde_json::json!("writer"));
-        assert_eq!(
-            result["agent"]["platform_scopes"],
-            serde_json::json!(["agents:read"])
-        );
+        assert!(error.to_string().contains("unknown field"));
     }
 
     #[tokio::test]
@@ -1761,10 +1679,9 @@ mod tests {
             &backend,
             "configure_agent",
             serde_json::json!({
-                "metadata": {
-                    "name": "writer",
-                    "description": "Writes manifests."
-                }
+                "slug": "writer",
+                "name": "writer",
+                "description": "Writes manifests."
             }),
         )
         .await
@@ -1821,14 +1738,11 @@ mod tests {
 
         let result = backend
             .configure_ability(AbilityConfigureParams {
-                data: crate::AbilityConfigureDocument {
-                    ability: Some(ability.slug.clone()),
-                    metadata: Some(crate::AbilityConfigureMetadata {
-                        activation_condition: Some("when reviewing code".into()),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": ability.slug,
+                    "activation_condition": "when reviewing code"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -1843,33 +1757,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contract_dispatch_does_not_modify_ability_platform_scopes() {
+    async fn contract_dispatch_rejects_ability_platform_scopes() {
         let TestContext {
             backend, ability, ..
         } = backend().await;
 
-        let result = ManifestMcpContract::dispatch(
+        let error = ManifestMcpContract::dispatch(
             &backend,
             "configure_ability",
             serde_json::json!({
-                "ability": ability.slug.clone(),
-                "metadata": {
-                    "description": "Updated"
-                },
+                "slug": ability.slug.clone(),
+                "description": "Updated",
                 "platform_scopes": ["projects:write"]
             }),
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(
-            result["ability"]["description"],
-            serde_json::json!("Updated")
-        );
-        assert_eq!(
-            result["ability"]["platform_scopes"],
-            serde_json::json!(["projects:read"])
-        );
+        assert!(error.to_string().contains("unknown field"));
+        let unchanged = backend
+            .get_ability(AbilitiesGetParams {
+                ability: ability.slug,
+            })
+            .await
+            .unwrap();
+        assert_eq!(unchanged.ability.platform_scopes, vec!["projects:read"]);
     }
 
     #[tokio::test]
@@ -1880,13 +1792,13 @@ mod tests {
 
         let result = backend
             .configure_ability(AbilityConfigureParams {
-                data: crate::AbilityConfigureDocument {
-                    ability: Some(ability.slug.clone()),
-                    prompt_config: Some(AbilityPromptConfig {
-                        developer_prompt: "New review prompt".into(),
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": ability.slug,
+                    "prompt_config": {
+                        "developer_prompt": "New review prompt"
+                    }
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -1991,14 +1903,11 @@ mod tests {
 
         let result = backend
             .configure_domain(DomainConfigureParams {
-                data: crate::DomainConfigureDocument {
-                    domain: Some(domain.slug()),
-                    metadata: Some(crate::DomainConfigureMetadata {
-                        description: Some(None),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": domain.slug(),
+                    "description": null
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -2009,30 +1918,31 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn contract_dispatch_does_not_modify_domain_platform_scopes() {
+    async fn contract_dispatch_rejects_domain_platform_scopes() {
         let TestContext {
             backend, domain, ..
         } = backend().await;
 
-        let result = ManifestMcpContract::dispatch(
+        let error = ManifestMcpContract::dispatch(
             &backend,
             "configure_domain",
             serde_json::json!({
-                "domain": domain.slug(),
-                "metadata": {
-                    "description": "Updated"
-                },
+                "slug": domain.slug(),
+                "description": "Updated",
                 "platform_scopes": ["agents:write"]
             }),
         )
         .await
-        .unwrap();
+        .unwrap_err();
 
-        assert_eq!(
-            result["domain"]["description"],
-            serde_json::json!("Updated")
-        );
-        assert_eq!(result["domain"]["platform_scopes"], serde_json::json!([]));
+        assert!(error.to_string().contains("unknown field"));
+        let unchanged = backend
+            .get_domain(DomainsGetParams {
+                domain: domain.slug(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(unchanged.domain.platform_scopes, domain.platform_scopes);
     }
 
     #[tokio::test]
@@ -2043,13 +1953,13 @@ mod tests {
 
         let result = backend
             .configure_domain(DomainConfigureParams {
-                data: crate::DomainConfigureDocument {
-                    domain: Some(domain.slug()),
-                    prompt_config: Some(DomainPromptConfig {
-                        developer_prompt_addon: Some("Builder mode".into()),
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": domain.slug(),
+                    "prompt_config": {
+                        "developer_prompt_addon": "Builder mode"
+                    }
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -2073,10 +1983,8 @@ mod tests {
             &backend,
             "configure_ability",
             serde_json::json!({
-                "ability": ability.slug.clone(),
-                "metadata": {
-                    "description": "Improved review helper"
-                }
+                "slug": ability.slug.clone(),
+                "description": "Improved review helper"
             }),
         )
         .await
@@ -2090,7 +1998,7 @@ mod tests {
             &backend,
             "configure_ability",
             serde_json::json!({
-                "ability": ability.slug.clone(),
+                "slug": ability.slug.clone(),
                 "prompt_config": {
                     "developer_prompt": "Upgraded prompt"
                 }
@@ -2107,10 +2015,8 @@ mod tests {
             &backend,
             "configure_domain",
             serde_json::json!({
-                "domain": domain.slug(),
-                "metadata": {
-                    "description": "Updated creator domain"
-                }
+                "slug": domain.slug(),
+                "description": "Updated creator domain"
             }),
         )
         .await
@@ -2124,7 +2030,7 @@ mod tests {
             &backend,
             "configure_domain",
             serde_json::json!({
-                "domain": domain.slug(),
+                "slug": domain.slug(),
                 "prompt_config": {
                     "developer_prompt_addon": "Build mode"
                 }
@@ -2270,204 +2176,39 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configure_routine_merges_partial_patch() {
-        let TestContext {
-            backend, routine, ..
-        } = backend().await;
-
-        let result = backend
-            .configure_routine(RoutineConfigureParams {
-                data: crate::RoutineConfigureDocument {
-                    routine: Some(routine.slug.clone()),
-                    metadata: Some(crate::RoutineConfigureMetadata {
-                        name: Some("nightly-release".into()),
-                        slug: None,
-                        description: None,
-                        project_id: None,
-                        is_active: None,
-                        max_retries: None,
-                    }),
-                    runtime_metadata: None,
-                    encrypted_payload: None,
-                    graph: None,
-                    id: None,
-                },
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(result.routine.summary.name, "nightly-release");
-        assert_eq!(result.routine.summary.slug, routine.slug);
-        assert_eq!(
-            result.routine.summary.description,
-            Some("Runs the nightly build".into())
-        );
-        assert_eq!(
-            result.routine.metadata.entry_steps,
-            vec![routine.steps[0].slug.clone()]
-        );
-    }
-
-    #[tokio::test]
-    async fn configure_routine_can_clear_description() {
-        let TestContext {
-            backend, routine, ..
-        } = backend().await;
-
-        let result = backend
-            .configure_routine(RoutineConfigureParams {
-                data: crate::RoutineConfigureDocument {
-                    routine: Some(routine.slug.clone()),
-                    metadata: Some(crate::RoutineConfigureMetadata {
-                        name: None,
-                        slug: None,
-                        description: Some(None),
-                        project_id: None,
-                        is_active: None,
-                        max_retries: None,
-                    }),
-                    runtime_metadata: None,
-                    encrypted_payload: None,
-                    graph: None,
-                    id: None,
-                },
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(result.routine.summary.name, "nightly-build");
-        assert_eq!(result.routine.summary.description, None);
-    }
-
-    #[tokio::test]
-    async fn contract_dispatch_supports_routine_configure() {
-        let TestContext {
-            backend, routine, ..
-        } = backend().await;
-
-        let result = ManifestMcpContract::dispatch(
-            &backend,
-            "configure_routine",
-            serde_json::json!({
-                "routine": routine.slug.clone(),
-                "runtime_metadata": {
-                    "entry_steps": [routine.steps[0].slug]
-                }
-            }),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            result["routine"]["metadata"],
-            serde_json::json!({
-                "entry_steps": [routine.steps[0].slug]
-            })
-        );
-    }
-
-    #[tokio::test]
-    async fn configure_routine_accepts_graph_payloads() {
+    async fn configure_routine_replaces_a_complete_flat_document() {
         let TestContext { backend, .. } = backend().await;
 
-        let created = backend
+        let result = backend
             .configure_routine(RoutineConfigureParams {
                 data: crate::RoutineConfigureDocument {
-                    id: None,
-                    routine: None,
-                    metadata: Some(crate::RoutineConfigureMetadata {
-                        name: Some("pipeline".into()),
-                        slug: None,
-                        description: Some(Some("Build workflow".into())),
-                        project_id: None,
-                        is_active: None,
-                        max_retries: None,
-                    }),
-                    runtime_metadata: Some(serde_json::json!({})),
-                    encrypted_payload: None,
-                    graph: Some(RoutineGraphInput {
-                        entry_steps: vec![Slug::derive("build")],
-                        steps: vec![
-                            RoutineStepInput {
-                                id: None,
-                                slug: Slug::derive("build"),
-                                name: "build".into(),
-                                step_type: RoutineStepType::Agent,
-                                council: None,
-                                agent: None,
-                                config: RoutineStepConfigInput::default(),
-                                encrypted_payload: None,
-                                position_x: None,
-                                position_y: None,
-                                order_index: 0,
-                            },
-                            RoutineStepInput {
-                                id: None,
-                                slug: Slug::derive("done"),
-                                name: "done".into(),
-                                step_type: RoutineStepType::Terminal,
-                                council: None,
-                                agent: None,
-                                config: RoutineStepConfigInput::default(),
-                                encrypted_payload: None,
-                                position_x: None,
-                                position_y: None,
-                                order_index: 1,
-                            },
-                        ],
-                        edges: vec![RoutineEdgeInput {
-                            source_step: Slug::derive("build"),
-                            target_step: Slug::derive("done"),
-                            condition: RoutineEdgeCondition::Always,
-                            metadata: serde_json::json!({}),
-                        }],
-                    }),
+                    slug: Slug::derive("pipeline"),
+                    name: "Pipeline".to_string(),
+                    description: Some("Build workflow".to_string()),
+                    project_id: None,
+                    entry_steps: vec![Slug::derive("done")],
+                    steps: vec![RoutineStepInput {
+                        id: None,
+                        slug: Slug::derive("done"),
+                        name: "Done".to_string(),
+                        step_type: RoutineStepType::Terminal,
+                        council: None,
+                        agent: None,
+                        config: RoutineStepConfigInput::default(),
+                        encrypted_payload: None,
+                        position_x: None,
+                        position_y: None,
+                        order_index: 0,
+                    }],
+                    edges: Vec::new(),
                 },
             })
             .await
             .unwrap();
 
-        assert_eq!(created.routine.steps.len(), 2);
-        assert_eq!(created.routine.edges.len(), 1);
-
-        let updated = backend
-            .configure_routine(RoutineConfigureParams {
-                data: crate::RoutineConfigureDocument {
-                    id: None,
-                    routine: Some(created.routine.summary.slug.clone()),
-                    metadata: None,
-                    runtime_metadata: None,
-                    encrypted_payload: None,
-                    graph: Some(RoutineGraphInput {
-                        entry_steps: vec![Slug::derive("build")],
-                        steps: vec![RoutineStepInput {
-                            id: None,
-                            slug: Slug::derive("build"),
-                            name: "build".into(),
-                            step_type: RoutineStepType::Agent,
-                            council: None,
-                            agent: None,
-                            config: RoutineStepConfigInput {
-                                instructions: None,
-                                metadata: Some(serde_json::json!({ "revised": true })),
-                                request: None,
-                                failure_reason: None,
-                            },
-                            encrypted_payload: None,
-                            position_x: None,
-                            position_y: None,
-                            order_index: 0,
-                        }],
-                        edges: vec![],
-                    }),
-                },
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(updated.routine.steps.len(), 1);
-        assert!(updated.routine.edges.is_empty());
-        assert_eq!(updated.routine.steps[0].config["metadata"]["revised"], true);
+        assert_eq!(result.routine.summary.slug, Slug::derive("pipeline"));
+        assert_eq!(result.routine.entry_steps, vec![Slug::derive("done")]);
+        assert_eq!(result.routine.steps.len(), 1);
     }
 
     #[tokio::test]
@@ -2775,14 +2516,11 @@ mod tests {
 
         let result = backend
             .configure_context_block(ContextBlockConfigureParams {
-                data: crate::ContextBlockConfigureDocument {
-                    context_block: Some(context_block.slug()),
-                    metadata: Some(crate::ContextBlockConfigureMetadata {
-                        description: Some(Some("Updated repository summary.".into())),
-                        ..Default::default()
-                    }),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": context_block.slug(),
+                    "description": "Updated repository summary."
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -2804,11 +2542,11 @@ mod tests {
 
         let result = backend
             .configure_context_block(ContextBlockConfigureParams {
-                data: crate::ContextBlockConfigureDocument {
-                    context_block: Some(context_block.slug()),
-                    template: Some("Repository: {{ repo_slug }}".into()),
-                    ..Default::default()
-                },
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": context_block.slug(),
+                    "template": "Repository: {{ repo_slug }}"
+                }))
+                .unwrap(),
             })
             .await
             .unwrap();
@@ -2839,7 +2577,7 @@ mod tests {
             &backend,
             "configure_context_block",
             serde_json::json!({
-                "context_block": context_block.slug(),
+                "slug": context_block.slug(),
                 "template": "Repository: {{ project_name }}"
             }),
         )
@@ -2849,6 +2587,124 @@ mod tests {
         assert_eq!(
             result["context_block"]["template"],
             serde_json::json!("Repository: {{ project_name }}")
+        );
+    }
+
+    #[tokio::test]
+    async fn configure_results_match_following_canonical_gets() {
+        let TestContext {
+            backend,
+            agent,
+            ability,
+            command,
+            domain,
+            context_block,
+            ..
+        } = backend().await;
+
+        let configured_agent = backend
+            .configure_agent(AgentConfigureParams {
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": agent.slug,
+                    "description": "Canonical agent"
+                }))
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let fetched_agent = backend
+            .get_agent(AgentsGetParams {
+                agent: configured_agent.agent.summary.slug.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(configured_agent.agent).unwrap(),
+            serde_json::to_value(fetched_agent.agent).unwrap()
+        );
+
+        let configured_ability = backend
+            .configure_ability(AbilityConfigureParams {
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": ability.slug,
+                    "description": "Canonical ability"
+                }))
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let fetched_ability = backend
+            .get_ability(AbilitiesGetParams {
+                ability: configured_ability.ability.summary.slug.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(configured_ability.ability).unwrap(),
+            serde_json::to_value(fetched_ability.ability).unwrap()
+        );
+
+        let configured_command = backend
+            .configure_command(CommandConfigureParams {
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": command.slug,
+                    "description": "Canonical command"
+                }))
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let fetched_command = backend
+            .get_command(CommandsGetParams {
+                command: configured_command.command.slug.to_string(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(configured_command.command).unwrap(),
+            serde_json::to_value(fetched_command.command).unwrap()
+        );
+
+        let configured_domain = backend
+            .configure_domain(DomainConfigureParams {
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": domain.slug(),
+                    "description": "Canonical domain"
+                }))
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let fetched_domain = backend
+            .get_domain(DomainsGetParams {
+                domain: configured_domain.domain.summary.slug.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(configured_domain.domain).unwrap(),
+            serde_json::to_value(fetched_domain.domain).unwrap()
+        );
+
+        let configured_context = backend
+            .configure_context_block(ContextBlockConfigureParams {
+                data: serde_json::from_value(serde_json::json!({
+                    "slug": context_block.slug(),
+                    "description": "Canonical context"
+                }))
+                .unwrap(),
+            })
+            .await
+            .unwrap();
+        let fetched_context = backend
+            .get_context_block(ContextBlocksGetParams {
+                context_block: configured_context.context_block.summary.slug.clone(),
+            })
+            .await
+            .unwrap();
+        assert_eq!(
+            serde_json::to_value(configured_context.context_block).unwrap(),
+            serde_json::to_value(fetched_context.context_block).unwrap()
         );
     }
 }
