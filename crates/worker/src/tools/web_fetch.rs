@@ -1,23 +1,53 @@
 //! Fetch web pages and convert HTML to clean plain text for LLM consumption.
 
-use crate::tools::security::SecurityPolicy;
-use crate::tools::{Tool, ToolCategory, ToolResult};
-use async_trait::async_trait;
-use futures_util::StreamExt;
-use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
+use async_trait::async_trait;
+use futures_util::StreamExt;
+use serde::{Deserialize, Serialize};
+use serde_json::json;
+
+use crate::config::{FirecrawlConfig, WebFetchConfig, WebFetchProvider};
+use crate::tools::security::SecurityPolicy;
+use crate::tools::{Tool, ToolCategory, ToolResult};
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FirecrawlScrapeRequest<'a> {
+    url: &'a str,
+    formats: [&'static str; 1],
+    only_main_content: bool,
+    max_age: u64,
+    timeout: u64,
+}
+
+#[derive(Debug, Deserialize)]
+struct FirecrawlScrapeResponse {
+    success: bool,
+    #[serde(default)]
+    data: Option<FirecrawlScrapeData>,
+    #[serde(default)]
+    error: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct FirecrawlScrapeData {
+    #[serde(default)]
+    markdown: Option<String>,
+}
+
 /// Web fetch tool: fetches a web page and converts HTML to plain text for LLM consumption.
 ///
-/// Unlike `http_request` (an API client returning raw responses), this tool:
-/// - Only supports GET
-/// - Follows redirects (up to 10)
-/// - Converts HTML to clean plain text via `nanohtml2text`
-/// - Passes through text/plain, text/markdown, and application/json as-is
-/// - Sets a descriptive User-Agent
+/// Unlike `http_request` (an API client returning raw responses), this tool returns
+/// extracted text through either direct HTTP retrieval or a configured Firecrawl backend.
+/// Direct retrieval follows redirects and converts HTML with `nanohtml2text`; Firecrawl
+/// retrieval requests Markdown from `/v2/scrape`.
 pub struct WebFetchTool {
+    client: Result<reqwest::Client, String>,
     security: Arc<SecurityPolicy>,
+    provider: WebFetchProvider,
+    firecrawl: FirecrawlConfig,
     allowed_hosts: Vec<String>,
     blocked_hosts: Vec<String>,
     allow_private_hosts: bool,
@@ -34,14 +64,60 @@ impl WebFetchTool {
         max_response_size: usize,
         timeout_secs: u64,
     ) -> Self {
+        let allowed_hosts = normalize_allowed_hosts_or_public_default(allowed_hosts);
+        let blocked_hosts = normalize_allowed_hosts(blocked_hosts);
+        let timeout_secs = effective_timeout_secs(timeout_secs);
         Self {
+            client: build_web_fetch_client(
+                WebFetchProvider::Direct,
+                &allowed_hosts,
+                &blocked_hosts,
+                allow_private_hosts,
+                timeout_secs,
+            ),
             security,
-            allowed_hosts: normalize_allowed_hosts(allowed_hosts),
-            blocked_hosts: normalize_allowed_hosts(blocked_hosts),
+            provider: WebFetchProvider::Direct,
+            firecrawl: FirecrawlConfig::default(),
+            allowed_hosts,
+            blocked_hosts,
             allow_private_hosts,
             max_response_size,
             timeout_secs,
         }
+    }
+
+    /// Construct the tool from worker configuration.
+    pub fn from_config(
+        security: Arc<SecurityPolicy>,
+        config: &WebFetchConfig,
+        allow_private_hosts: bool,
+    ) -> Self {
+        let allowed_hosts = normalize_allowed_hosts_or_public_default(config.allowed_hosts.clone());
+        let blocked_hosts = normalize_allowed_hosts(config.blocked_hosts.clone());
+        let timeout_secs = effective_timeout_secs(config.timeout_secs);
+        Self {
+            client: build_web_fetch_client(
+                config.provider,
+                &allowed_hosts,
+                &blocked_hosts,
+                allow_private_hosts,
+                timeout_secs,
+            ),
+            security,
+            provider: config.provider,
+            firecrawl: config.firecrawl.clone(),
+            allowed_hosts,
+            blocked_hosts,
+            allow_private_hosts,
+            max_response_size: config.max_response_size,
+            timeout_secs,
+        }
+    }
+
+    fn client(&self) -> anyhow::Result<&reqwest::Client> {
+        self.client
+            .as_ref()
+            .map_err(|error| anyhow::anyhow!("Failed to build web fetch HTTP client: {error}"))
     }
 
     fn validate_url(&self, raw_url: &str) -> anyhow::Result<String> {
@@ -84,6 +160,137 @@ impl WebFetchTool {
 
         Ok(String::from_utf8_lossy(&bytes).into_owned())
     }
+
+    fn firecrawl_endpoint(&self) -> anyhow::Result<String> {
+        let base_url = self.firecrawl.base_url.trim().trim_end_matches('/');
+        if base_url.is_empty() {
+            anyhow::bail!("Firecrawl base_url cannot be empty");
+        }
+
+        let endpoint = format!("{base_url}/v2/scrape");
+        let parsed = reqwest::Url::parse(&endpoint)
+            .map_err(|error| anyhow::anyhow!("Invalid Firecrawl base_url: {error}"))?;
+        match parsed.scheme() {
+            "http" | "https" => Ok(endpoint),
+            scheme => anyhow::bail!("Unsupported Firecrawl URL scheme: {scheme}"),
+        }
+    }
+
+    async fn fetch_with_firecrawl(&self, url: &str) -> anyhow::Result<ToolResult> {
+        let payload = FirecrawlScrapeRequest {
+            url,
+            formats: ["markdown"],
+            only_main_content: self.firecrawl.only_main_content,
+            max_age: self.firecrawl.max_age_ms,
+            timeout: self.timeout_secs.saturating_mul(1_000),
+        };
+
+        let mut request = self
+            .client()?
+            .post(self.firecrawl_endpoint()?)
+            .json(&payload);
+        if let Some(api_key) = self.firecrawl.api_key.as_deref() {
+            let api_key = api_key.trim();
+            if !api_key.is_empty() {
+                request = request.bearer_auth(api_key);
+            }
+        }
+
+        let response = request.send().await?;
+        let status = response.status();
+        if !status.is_success() {
+            let error = response
+                .text()
+                .await
+                .ok()
+                .filter(|body| !body.trim().is_empty())
+                .unwrap_or_else(|| status.canonical_reason().unwrap_or("Unknown").to_string());
+            return Ok(ToolResult::failure(format!(
+                "Firecrawl HTTP {}: {error}",
+                status.as_u16()
+            )));
+        }
+
+        let response: FirecrawlScrapeResponse = response.json().await?;
+        if !response.success {
+            return Ok(ToolResult::failure(
+                response
+                    .error
+                    .unwrap_or_else(|| "Firecrawl scrape failed".to_string()),
+            ));
+        }
+
+        let markdown = response
+            .data
+            .and_then(|data| data.markdown)
+            .filter(|markdown| !markdown.trim().is_empty());
+        let Some(markdown) = markdown else {
+            return Ok(ToolResult::failure(
+                "Firecrawl returned no Markdown content",
+            ));
+        };
+
+        Ok(ToolResult::success(self.truncate_response(&markdown)))
+    }
+}
+
+fn effective_timeout_secs(timeout_secs: u64) -> u64 {
+    if timeout_secs == 0 {
+        tracing::warn!("fetch_web_page: timeout_secs is 0, using safe default of 30s");
+        30
+    } else {
+        timeout_secs
+    }
+}
+
+fn build_web_fetch_client(
+    provider: WebFetchProvider,
+    allowed_hosts: &[String],
+    blocked_hosts: &[String],
+    allow_private_hosts: bool,
+    timeout_secs: u64,
+) -> Result<reqwest::Client, String> {
+    let user_agent = match provider {
+        WebFetchProvider::Direct => format!("Nenjo/{} (fetch_web_page)", env!("CARGO_PKG_VERSION")),
+        WebFetchProvider::Firecrawl => format!(
+            "Nenjo/{} (fetch_web_page/firecrawl)",
+            env!("CARGO_PKG_VERSION")
+        ),
+    };
+    let builder = reqwest::Client::builder()
+        .timeout(Duration::from_secs(timeout_secs))
+        .connect_timeout(Duration::from_secs(10))
+        .user_agent(user_agent);
+
+    let builder = match provider {
+        WebFetchProvider::Direct => {
+            let allowed_hosts = allowed_hosts.to_vec();
+            let blocked_hosts = blocked_hosts.to_vec();
+            builder.redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() >= 10 {
+                    return attempt.error(std::io::Error::other("Too many redirects (max 10)"));
+                }
+
+                if let Err(error) = validate_target_url(
+                    attempt.url().as_str(),
+                    &allowed_hosts,
+                    &blocked_hosts,
+                    allow_private_hosts,
+                    "web_fetch",
+                ) {
+                    return attempt.error(std::io::Error::new(
+                        std::io::ErrorKind::PermissionDenied,
+                        format!("Blocked redirect target: {error}"),
+                    ));
+                }
+
+                attempt.follow()
+            }))
+        }
+        WebFetchProvider::Firecrawl => builder,
+    };
+
+    builder.build().map_err(|error| error.to_string())
 }
 
 #[async_trait]
@@ -93,7 +300,7 @@ impl Tool for WebFetchTool {
     }
 
     fn name(&self) -> &str {
-        "web_fetch"
+        "fetch_web_page"
     }
 
     fn description(&self) -> &str {
@@ -150,50 +357,25 @@ impl Tool for WebFetchTool {
             }
         };
 
-        // Build client: follow redirects, set timeout, set User-Agent
-        let timeout_secs = if self.timeout_secs == 0 {
-            tracing::warn!("web_fetch: timeout_secs is 0, using safe default of 30s");
-            30
-        } else {
-            self.timeout_secs
-        };
-
-        let allowed_hosts = self.allowed_hosts.clone();
-        let blocked_hosts = self.blocked_hosts.clone();
-        let allow_private_hosts = self.allow_private_hosts;
-        let redirect_policy = reqwest::redirect::Policy::custom(move |attempt| {
-            if attempt.previous().len() >= 10 {
-                return attempt.error(std::io::Error::other("Too many redirects (max 10)"));
+        match self.provider {
+            WebFetchProvider::Firecrawl => {
+                return match self.fetch_with_firecrawl(&url).await {
+                    Ok(result) => Ok(result),
+                    Err(error) => Ok(ToolResult::failure(format!(
+                        "Firecrawl request failed: {error}"
+                    ))),
+                };
             }
+            WebFetchProvider::Direct => {}
+        }
 
-            if let Err(err) = validate_target_url(
-                attempt.url().as_str(),
-                &allowed_hosts,
-                &blocked_hosts,
-                allow_private_hosts,
-                "web_fetch",
-            ) {
-                return attempt.error(std::io::Error::new(
-                    std::io::ErrorKind::PermissionDenied,
-                    format!("Blocked redirect target: {err}"),
-                ));
-            }
-
-            attempt.follow()
-        });
-
-        let builder = reqwest::Client::builder()
-            .timeout(Duration::from_secs(timeout_secs))
-            .connect_timeout(Duration::from_secs(10))
-            .redirect(redirect_policy)
-            .user_agent("Nenjo/0.1 (web_fetch)");
-        let client = match builder.build() {
-            Ok(c) => c,
-            Err(e) => {
+        let client = match self.client() {
+            Ok(client) => client,
+            Err(error) => {
                 return Ok(ToolResult {
                     success: false,
                     output: String::new().into(),
-                    error: Some(format!("Failed to build HTTP client: {e}")),
+                    error: Some(error.to_string()),
                 });
             }
         };
@@ -243,7 +425,7 @@ impl Tool for WebFetchTool {
                 output: String::new().into(),
                 error: Some(format!(
                     "Unsupported content type: {content_type}. \
-                     web_fetch supports text/html, text/plain, text/markdown, and application/json."
+                     fetch_web_page supports text/html, text/plain, text/markdown, and application/json."
                 )),
             });
         };
@@ -362,6 +544,14 @@ fn normalize_allowed_hosts(hosts: Vec<String>) -> Vec<String> {
     normalized
 }
 
+fn normalize_allowed_hosts_or_public_default(hosts: Vec<String>) -> Vec<String> {
+    if hosts.is_empty() {
+        vec!["*".into()]
+    } else {
+        normalize_allowed_hosts(hosts)
+    }
+}
+
 fn normalize_host_rule(raw: &str) -> Option<String> {
     let mut d = raw.trim().to_lowercase();
     if d.is_empty() {
@@ -417,7 +607,7 @@ fn extract_host(url: &str) -> anyhow::Result<TargetHost> {
     }
 
     if authority.starts_with('[') {
-        anyhow::bail!("IPv6 hosts are not supported in web_fetch");
+        anyhow::bail!("IPv6 hosts are not supported in fetch_web_page");
     }
 
     let (host, port) = split_host_port(authority)?;
@@ -560,8 +750,13 @@ fn is_non_global_v6(v6: std::net::Ipv6Addr) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::TcpListener;
+
+    use crate::config::{FirecrawlConfig, WebFetchConfig, WebFetchProvider};
     use crate::tools::security::{AutonomyLevel, SecurityPolicy};
+
+    use super::*;
 
     fn test_tool(allowed_hosts: Vec<&str>) -> WebFetchTool {
         test_tool_with_blocklist(allowed_hosts, vec![])
@@ -588,9 +783,9 @@ mod tests {
     // ── Name and schema ──────────────────────────────────────────
 
     #[test]
-    fn name_is_web_fetch() {
+    fn name_is_fetch_web_page() {
         let tool = test_tool(vec!["example.com"]);
-        assert_eq!(tool.name(), "web_fetch");
+        assert_eq!(tool.name(), "fetch_web_page");
     }
 
     #[test]
@@ -600,6 +795,54 @@ mod tests {
         assert!(schema["properties"]["url"].is_object());
         let required = schema["required"].as_array().unwrap();
         assert!(required.iter().any(|v| v.as_str() == Some("url")));
+    }
+
+    #[tokio::test]
+    async fn local_firecrawl_fetches_markdown_without_authentication() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = vec![0; 8_192];
+            let bytes_read = stream.read(&mut request).await.unwrap();
+            let request = String::from_utf8_lossy(&request[..bytes_read]);
+
+            assert!(request.starts_with("POST /v2/scrape HTTP/1.1"));
+            assert!(!request.to_ascii_lowercase().contains("authorization:"));
+            assert!(request.contains("\"url\":\"https://example.com/article\""));
+            assert!(request.contains("\"onlyMainContent\":true"));
+
+            let body = r##"{"success":true,"data":{"markdown":"# Local result\n\nFetched by Firecrawl."}}"##;
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let config = WebFetchConfig {
+            provider: WebFetchProvider::Firecrawl,
+            firecrawl: FirecrawlConfig {
+                base_url: format!("http://{address}"),
+                ..FirecrawlConfig::default()
+            },
+            allowed_hosts: vec!["example.com".into()],
+            ..WebFetchConfig::default()
+        };
+        let security = Arc::new(SecurityPolicy {
+            autonomy: AutonomyLevel::Supervised,
+            ..SecurityPolicy::default()
+        });
+        let tool = WebFetchTool::from_config(security, &config, false);
+
+        let result = tool
+            .execute(json!({"url": "https://example.com/article"}))
+            .await
+            .unwrap();
+
+        server.await.unwrap();
+        assert!(result.success);
+        assert!(result.output.contains("Local result"));
+        assert!(result.output.contains("Fetched by Firecrawl"));
     }
 
     // ── HTML to text conversion ──────────────────────────────────
@@ -678,14 +921,12 @@ mod tests {
     }
 
     #[test]
-    fn validate_requires_allowlist() {
+    fn empty_allowlist_defaults_to_public_hosts() {
         let security = Arc::new(SecurityPolicy::default());
         let tool = WebFetchTool::new(security, vec![], vec![], false, 500_000, 30);
-        let err = tool
-            .validate_url("https://example.com")
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("allowed_hosts"));
+        assert_eq!(tool.allowed_hosts, vec!["*"]);
+        assert!(tool.validate_url("https://example.com").is_ok());
+        assert!(tool.validate_url("http://127.0.0.1").is_err());
     }
 
     // ── SSRF protection ──────────────────────────────────────────

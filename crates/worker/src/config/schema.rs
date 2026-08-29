@@ -155,15 +155,80 @@ pub struct WebConfig {
 
 // ── Web search ───────────────────────────────────────────────────
 
+/// Backend used by the worker-native `search_web` tool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebSearchProvider {
+    /// Scrape DuckDuckGo's HTML search results.
+    #[default]
+    #[serde(rename = "duckduckgo", alias = "ddg")]
+    DuckDuckGo,
+    /// Use the Brave Search API.
+    Brave,
+    /// Use Parallel's Search API.
+    Parallel,
+}
+
+/// Parallel Search API latency and quality preset.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ParallelSearchMode {
+    /// Lowest-latency search.
+    Turbo,
+    /// High-quality search within a roughly one-second latency budget.
+    #[default]
+    Fast,
+    /// Low-latency search optimized for a few strong queries.
+    Basic,
+    /// Highest-quality retrieval and compression.
+    Advanced,
+}
+
+/// Parallel Search API configuration (`[web_search.parallel]` section).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ParallelSearchConfig {
+    /// Parallel service origin. Nenjo appends `/v1/search`.
+    #[serde(default = "default_parallel_search_base_url")]
+    pub base_url: String,
+    /// Parallel API key. Prefer the `PARALLEL_API_KEY` environment variable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Search latency and quality preset.
+    #[serde(default)]
+    pub mode: ParallelSearchMode,
+    /// Upper bound on total excerpt characters returned across results.
+    #[serde(default = "default_parallel_search_max_chars_total")]
+    pub max_chars_total: usize,
+}
+
+fn default_parallel_search_base_url() -> String {
+    "https://api.parallel.ai".into()
+}
+
+fn default_parallel_search_max_chars_total() -> usize {
+    16_000
+}
+
+impl Default for ParallelSearchConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_parallel_search_base_url(),
+            api_key: None,
+            mode: ParallelSearchMode::Fast,
+            max_chars_total: default_parallel_search_max_chars_total(),
+        }
+    }
+}
+
 /// Web search tool configuration (`[web_search]` section).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebSearchConfig {
-    /// Enable `web_search_tool` for web searches (default: true, uses DuckDuckGo)
+    /// Enable `search_web` for web searches (default: true, uses DuckDuckGo)
     #[serde(default = "default_true")]
     pub enabled: bool,
-    /// Search provider: "duckduckgo" (free, no API key) or "brave" (requires API key)
-    #[serde(default = "default_web_search_provider")]
-    pub provider: String,
+    /// Search backend.
+    #[serde(default)]
+    pub provider: WebSearchProvider,
     /// Brave Search API key (required if provider is "brave")
     #[serde(default)]
     pub brave_api_key: Option<String>,
@@ -173,10 +238,9 @@ pub struct WebSearchConfig {
     /// Request timeout in seconds
     #[serde(default = "default_web_search_timeout_secs")]
     pub timeout_secs: u64,
-}
-
-fn default_web_search_provider() -> String {
-    "duckduckgo".into()
+    /// Parallel-specific settings, used when `provider = "parallel"`.
+    #[serde(default)]
+    pub parallel: ParallelSearchConfig,
 }
 
 fn default_web_search_max_results() -> usize {
@@ -191,29 +255,81 @@ impl Default for WebSearchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            provider: default_web_search_provider(),
+            provider: WebSearchProvider::DuckDuckGo,
             brave_api_key: None,
             max_results: default_web_search_max_results(),
             timeout_secs: default_web_search_timeout_secs(),
+            parallel: ParallelSearchConfig::default(),
         }
     }
 }
 
 // ── Web fetch ────────────────────────────────────────────────────
 
+/// Backend used by the worker-native `fetch_web_page` tool.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebFetchProvider {
+    /// Fetch the target URL directly from the worker.
+    #[default]
+    Direct,
+    /// Ask a Firecrawl deployment to scrape the target URL.
+    Firecrawl,
+}
+
+/// Firecrawl scrape backend configuration (`[web_fetch.firecrawl]` section).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FirecrawlConfig {
+    /// Firecrawl service origin. Nenjo appends `/v2/scrape`.
+    #[serde(default = "default_firecrawl_base_url")]
+    pub base_url: String,
+    /// Optional API key. Local deployments with authentication disabled do not need one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    /// Exclude navigation, footers, and other non-primary page content.
+    #[serde(default = "default_true")]
+    pub only_main_content: bool,
+    /// Maximum age of a cached scrape accepted by Firecrawl, in milliseconds.
+    #[serde(default = "default_firecrawl_max_age_ms")]
+    pub max_age_ms: u64,
+}
+
+fn default_firecrawl_base_url() -> String {
+    "http://127.0.0.1:3002".into()
+}
+
+fn default_firecrawl_max_age_ms() -> u64 {
+    3_600_000
+}
+
+impl Default for FirecrawlConfig {
+    fn default() -> Self {
+        Self {
+            base_url: default_firecrawl_base_url(),
+            api_key: None,
+            only_main_content: true,
+            max_age_ms: default_firecrawl_max_age_ms(),
+        }
+    }
+}
+
 /// Web fetch tool configuration (`[web_fetch]` section).
 ///
 /// Fetches web pages and converts HTML to plain text for LLM consumption.
 /// Host filtering: `allowed_hosts` controls which hosts are reachable (use `["*"]`
 /// for all public hosts). `blocked_hosts` takes priority over `allowed_hosts`.
-/// If `allowed_hosts` is empty, all requests are rejected (deny-by-default).
+/// If `allowed_hosts` is missing or empty, it defaults to `["*"]`; private and local
+/// addresses remain blocked unless separately enabled and explicitly allowlisted.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WebFetchConfig {
-    /// Enable `web_fetch` tool for fetching web page content
+    /// Enable `fetch_web_page` for fetching web page content
     #[serde(default)]
     pub enabled: bool,
-    /// Allowed hosts for web fetch (exact/subdomain match; optional `:port`; `["*"]` = all public hosts)
+    /// Backend used to retrieve and extract page content.
     #[serde(default)]
+    pub provider: WebFetchProvider,
+    /// Allowed hosts for web fetch (exact/subdomain match; optional `:port`; `["*"]` = all public hosts)
+    #[serde(default = "default_web_fetch_allowed_hosts")]
     pub allowed_hosts: Vec<String>,
     /// Blocked hosts (exact/subdomain match; optional `:port`; always takes priority over allowed_hosts)
     #[serde(default)]
@@ -224,10 +340,17 @@ pub struct WebFetchConfig {
     /// Request timeout in seconds (default: 30)
     #[serde(default = "default_web_fetch_timeout_secs")]
     pub timeout_secs: u64,
+    /// Firecrawl-specific settings, used when `provider = "firecrawl"`.
+    #[serde(default)]
+    pub firecrawl: FirecrawlConfig,
 }
 
 fn default_web_fetch_max_response_size() -> usize {
     500_000 // 500KB
+}
+
+fn default_web_fetch_allowed_hosts() -> Vec<String> {
+    vec!["*".into()]
 }
 
 fn default_web_fetch_timeout_secs() -> u64 {
@@ -238,10 +361,12 @@ impl Default for WebFetchConfig {
     fn default() -> Self {
         Self {
             enabled: true,
-            allowed_hosts: vec!["*".into()],
+            provider: WebFetchProvider::Direct,
+            allowed_hosts: default_web_fetch_allowed_hosts(),
             blocked_hosts: vec![],
             max_response_size: default_web_fetch_max_response_size(),
             timeout_secs: default_web_fetch_timeout_secs(),
+            firecrawl: FirecrawlConfig::default(),
         }
     }
 }
@@ -1096,6 +1221,34 @@ impl Config {
             }
         }
 
+        if let Ok(val) = std::env::var("FIRECRAWL_BASE_URL") {
+            let val = val.trim().to_string();
+            if !val.is_empty() {
+                self.web_fetch.firecrawl.base_url = val;
+            }
+        }
+
+        if let Ok(val) = std::env::var("FIRECRAWL_API_KEY") {
+            let val = val.trim().to_string();
+            if !val.is_empty() {
+                self.web_fetch.firecrawl.api_key = Some(val);
+            }
+        }
+
+        if let Ok(val) = std::env::var("PARALLEL_BASE_URL") {
+            let val = val.trim().to_string();
+            if !val.is_empty() {
+                self.web_search.parallel.base_url = val;
+            }
+        }
+
+        if let Ok(val) = std::env::var("PARALLEL_API_KEY") {
+            let val = val.trim().to_string();
+            if !val.is_empty() {
+                self.web_search.parallel.api_key = Some(val);
+            }
+        }
+
         // ── Model provider API key overrides ─────────────────
         let provider_vars = crate::providers::provider_env_vars();
         for (provider, env_var_candidates) in &provider_vars {
@@ -1214,8 +1367,8 @@ fn apply_bool_env(name: &str, target: &mut bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MediaProviderConfig, PdfConfig, RoutineConfig, SecureBusConfig, SecurityConfig,
-        SessionConfig, VllmConfig,
+        Config, MediaProviderConfig, ParallelSearchMode, PdfConfig, RoutineConfig, SecureBusConfig,
+        SecurityConfig, SessionConfig, VllmConfig, WebFetchProvider, WebSearchProvider,
     };
     use nenjo::Slug;
     use nenjo_models::MediaOperation;
@@ -1285,6 +1438,64 @@ streaming = false
         .unwrap();
 
         assert!(!config.vllm.streaming);
+    }
+
+    #[test]
+    fn web_fetch_config_selects_local_firecrawl() {
+        let config: Config = toml::from_str(
+            r#"
+api_key = "test"
+
+[model_provider_api_keys]
+
+[web_fetch]
+provider = "firecrawl"
+timeout_secs = 45
+
+[web_fetch.firecrawl]
+base_url = "http://127.0.0.1:3002"
+only_main_content = true
+max_age_ms = 3600000
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.web_fetch.provider, WebFetchProvider::Firecrawl);
+        assert_eq!(config.web_fetch.allowed_hosts, vec!["*"]);
+        assert_eq!(config.web_fetch.firecrawl.base_url, "http://127.0.0.1:3002");
+        assert_eq!(config.web_fetch.firecrawl.api_key, None);
+        assert!(config.web_fetch.firecrawl.only_main_content);
+        assert_eq!(config.web_fetch.firecrawl.max_age_ms, 3_600_000);
+        assert_eq!(config.web_fetch.timeout_secs, 45);
+    }
+
+    #[test]
+    fn web_search_config_selects_parallel_fast_mode() {
+        let config: Config = toml::from_str(
+            r#"
+api_key = "test"
+
+[model_provider_api_keys]
+
+[web_search]
+provider = "parallel"
+max_results = 8
+timeout_secs = 10
+
+[web_search.parallel]
+base_url = "https://api.parallel.ai"
+mode = "fast"
+max_chars_total = 12000
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(config.web_search.provider, WebSearchProvider::Parallel);
+        assert_eq!(config.web_search.parallel.mode, ParallelSearchMode::Fast);
+        assert_eq!(config.web_search.parallel.api_key, None);
+        assert_eq!(config.web_search.parallel.max_chars_total, 12_000);
+        assert_eq!(config.web_search.max_results, 8);
+        assert_eq!(config.web_search.timeout_secs, 10);
     }
 
     #[test]

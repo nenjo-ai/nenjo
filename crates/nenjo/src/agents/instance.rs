@@ -518,7 +518,7 @@ fn native_model_tool_shadows_local_tool(
     native_tools
         .iter()
         .any(|tool| tool.as_str() == "web_search")
-        && local_tool_name == "web_search_tool"
+        && local_tool_name == "search_web"
 }
 
 fn populate_project_working_directory(project: &mut ProjectContext, workspace_dir: &Path) {
@@ -554,14 +554,14 @@ mod tests {
     use super::*;
 
     #[test]
-    fn xai_native_web_search_shadows_local_web_search_tool() {
+    fn xai_native_web_search_shadows_local_search_web() {
         assert!(native_model_tool_shadows_local_tool(
             &[NativeModelToolId::from("web_search")],
-            "web_search_tool",
+            "search_web",
         ));
         assert!(!native_model_tool_shadows_local_tool(
             &[NativeModelToolId::from("x_search")],
-            "web_search_tool",
+            "search_web",
         ));
         assert!(!native_model_tool_shadows_local_tool(
             &[NativeModelToolId::from("web_search")],

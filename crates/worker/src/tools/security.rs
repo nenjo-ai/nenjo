@@ -383,8 +383,8 @@ fn blocked_command_suggestion(command: &str) -> Option<ShellSuggestion> {
             instruction: "Remove the scoped file or directory with remove".into(),
         }),
         "curl" | "wget" => Some(ShellSuggestion {
-            tool: "web_fetch",
-            instruction: "Fetch the resource with web_fetch or http_request".into(),
+            tool: "fetch_web_page",
+            instruction: "Fetch the resource with fetch_web_page or http_request".into(),
         }),
         "kill" | "killall" | "pkill" => Some(ShellSuggestion {
             tool: "stop",

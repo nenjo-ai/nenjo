@@ -256,6 +256,71 @@ The equivalent environment variables are `NENJO_PDF_MAX_PAGES`,
 `NENJO_PDF_RENDER_MAX_EDGE`, `NENJO_PDF_MAX_TOTAL_PIXELS`, and
 `NENJO_PDF_MAX_RENDERED_BYTES`.
 
+### Parallel web search
+
+The worker-native `search_web` tool supports Parallel Search alongside the
+default DuckDuckGo and optional Brave backends. Put the API key in the
+environment and select Parallel in `~/.nenjo/config.toml`:
+
+```bash
+export PARALLEL_API_KEY="your-api-key"
+```
+
+```toml
+[web_search]
+enabled = true
+provider = "parallel"
+max_results = 8
+timeout_secs = 10
+
+[web_search.parallel]
+base_url = "https://api.parallel.ai"
+mode = "fast"
+max_chars_total = 16000
+```
+
+Supported modes are `turbo`, `fast`, `basic`, and `advanced`. The tool accepts
+a required search objective plus an optional list of one to five concise search
+queries; when omitted, it searches the objective directly. Set
+`PARALLEL_BASE_URL` to override the configured service origin. Multiple read-only
+tool calls can also execute concurrently when the agent's `parallel_tools`
+setting is enabled (the default). Search results use a versioned JSON envelope
+with ranked source IDs, titles, URLs, publication dates, and evidence excerpts.
+Agents are instructed to cite supporting sources as Markdown links using only
+URLs present in that result.
+
+### Local Firecrawl web fetch
+
+The worker's `fetch_web_page` tool retrieves pages directly by default. To extract
+pages through a local Firecrawl deployment, start Firecrawl on its default port
+and configure `~/.nenjo/config.toml`:
+
+```toml
+[web_fetch]
+enabled = true
+provider = "firecrawl"
+allowed_hosts = ["*"]
+blocked_hosts = []
+max_response_size = 500000
+timeout_secs = 60
+
+[web_fetch.firecrawl]
+base_url = "http://127.0.0.1:3002"
+only_main_content = true
+max_age_ms = 3600000
+```
+
+Local deployments with authentication disabled do not need an API key. Set
+`FIRECRAWL_API_KEY` when using an authenticated deployment and
+`FIRECRAWL_BASE_URL` to override the configured service origin. Target URLs
+still pass through `allowed_hosts`, `blocked_hosts`, and private-host checks
+before they are sent to Firecrawl. A missing or empty `allowed_hosts` defaults
+to `["*"]` for public websites; private and local targets remain blocked unless
+they are separately enabled and explicitly allowlisted.
+
+Together, Parallel handles fast source discovery and Firecrawl extracts the
+selected pages through the model-independent Nenjo tool loop.
+
 ### Worker Capabilities
 
 Workers can be scoped to handle only specific workloads:
