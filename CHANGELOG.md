@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.34.0](https://github.com/nenjo-ai/nenjo/compare/v0.33.0...v0.34.0) - 2026-08-29
+
+### Added
+
+- added native support for parallel web search provider and web fetch provider ([#110](https://github.com/nenjo-ai/nenjo/pull/110))
+
+### Other
+
+- Finalized core feature improvements ([#56](https://github.com/nenjo-ai/nenjo/pull/56))
+
 ## [0.33.0](https://github.com/nenjo-ai/nenjo/compare/v0.32.0...v0.33.0) - 2026-08-29
 
 ### Added
