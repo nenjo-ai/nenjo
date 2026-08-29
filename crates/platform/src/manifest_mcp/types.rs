@@ -15,18 +15,13 @@ use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
 use serde_json::Value;
 
 /// Patch state for a non-nullable configure field.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum Patch<T> {
     /// Leave the saved value unchanged.
+    #[default]
     Unchanged,
     /// Replace the saved value.
     Set(T),
-}
-
-impl<T> Default for Patch<T> {
-    fn default() -> Self {
-        Self::Unchanged
-    }
 }
 
 impl<T> Patch<T> {
@@ -70,20 +65,15 @@ where
 }
 
 /// Patch state for a configure field that can be explicitly cleared.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum NullablePatch<T> {
     /// Leave the saved value unchanged.
+    #[default]
     Unchanged,
     /// Clear the saved value.
     Clear,
     /// Replace the saved value.
     Set(T),
-}
-
-impl<T> Default for NullablePatch<T> {
-    fn default() -> Self {
-        Self::Unchanged
-    }
 }
 
 impl<T> NullablePatch<T> {

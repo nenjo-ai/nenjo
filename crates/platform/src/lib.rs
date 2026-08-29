@@ -96,6 +96,6 @@ pub use scope::{PlatformScope, ScopeAction, ScopeResource};
 pub use task_tools::{
     ExecutionRunMutationResult, ExecutionRunStatus, ExecutionRunSummary, ExecutionRunTrigger,
     ExecutionRunsListResult, ScheduledTaskState, TaskConfigureResult, TaskDispatch, TaskDocument,
-    TaskGetResult, TaskPriority, TaskSummary, TaskTarget, TasksListResult,
+    TaskGetResult, TaskPriority, TaskScheduleDocument, TaskSummary, TaskTarget, TasksListResult,
 };
 pub use types::{BootstrapManifestResponse, PlatformManifestItem, PlatformManifestWriteRequest};

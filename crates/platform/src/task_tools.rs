@@ -1,11 +1,15 @@
 //! Agent-facing task CRUD, dispatch, and durable execution history.
 
+use std::sync::Arc;
+
 use anyhow::{Context, Result, anyhow, bail};
 use async_trait::async_trait;
+use chrono::NaiveDateTime;
+use chrono_tz::Tz;
 use nenjo::{Slug, Tool, ToolCategory, ToolOrigin, ToolResult};
+use nenjo_events::{TaskScheduleEnd, TaskScheduleRecurrence};
 use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use serde_json::{Value, json};
-use std::sync::Arc;
 use tracing::warn;
 use uuid::Uuid;
 
@@ -26,10 +30,13 @@ pub use execution_responses::{
     ExecutionRunsListResult,
 };
 use execution_responses::{execution_mutation_result, execution_run_summaries};
-use responses::{PlatformTaskLabelRecord, PlatformTaskRecord, PlatformTaskTarget};
+use responses::{
+    PlatformTaskLabelRecord, PlatformTaskRecord, PlatformTaskScheduleRecord, PlatformTaskTarget,
+};
 pub use responses::{
     ScheduledTaskState, TaskConfigureResult, TaskDispatch, TaskDocument, TaskGetResult,
-    TaskLabelSummary, TaskLabelsListResult, TaskPriority, TaskSummary, TaskTarget, TasksListResult,
+    TaskLabelSummary, TaskLabelsListResult, TaskPriority, TaskScheduleDocument, TaskSummary,
+    TaskTarget, TasksListResult,
 };
 
 const READ_TOOLS: &[&str] = &[
@@ -400,6 +407,15 @@ where
                 body.insert("target".into(), serde_json::to_value(target)?);
             }
         }
+        match args.schedule {
+            ConfigureField::Unset => {}
+            ConfigureField::Clear => {
+                body.insert("schedule".into(), Value::Null);
+            }
+            ConfigureField::Set(schedule) => {
+                body.insert("schedule".into(), serde_json::to_value(schedule)?);
+            }
+        }
         if let Some(labels) = args.labels {
             body.insert("labels".into(), json!(labels));
         }
@@ -463,9 +479,15 @@ where
             None => record.instructions.clone(),
         };
         let summary = self.task_summary_with_references(&record, references)?;
+        let schedule = record
+            .schedule
+            .as_ref()
+            .map(task_schedule_document)
+            .transpose()?;
         Ok(TaskDocument {
             summary,
             instructions,
+            schedule,
             created_at: record.created_at,
             updated_at: record.updated_at,
             completed_at: record.completed_at,
@@ -677,7 +699,19 @@ struct ConfigureTaskArgs {
     project: ConfigureField<Slug>,
     #[serde(default)]
     target: ConfigureField<TaskTargetArg>,
+    #[serde(default)]
+    schedule: ConfigureField<ConfigureTaskScheduleArg>,
     labels: Option<Vec<String>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ConfigureTaskScheduleArg {
+    enabled: Option<bool>,
+    starts_at: Option<NaiveDateTime>,
+    timezone: Option<String>,
+    recurrence: Option<TaskScheduleRecurrence>,
+    end: Option<TaskScheduleEnd>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -701,6 +735,35 @@ where
             None => Self::Clear,
         })
     }
+}
+
+fn task_schedule_document(record: &PlatformTaskScheduleRecord) -> Result<TaskScheduleDocument> {
+    let timezone = record
+        .definition
+        .timezone
+        .parse::<Tz>()
+        .context("platform returned an invalid task schedule timezone")?;
+    let starts_at = record
+        .definition
+        .starts_at
+        .with_timezone(&timezone)
+        .format("%Y-%m-%dT%H:%M:%S%.f")
+        .to_string();
+    let starts_at = starts_at
+        .trim_end_matches('0')
+        .trim_end_matches('.')
+        .to_string();
+    Ok(TaskScheduleDocument {
+        enabled: record.enabled,
+        starts_at,
+        timezone: record.definition.timezone.clone(),
+        recurrence: record.definition.recurrence.clone(),
+        end: record.definition.end.clone(),
+        occurrence_count: u32::try_from(record.occurrence_count)
+            .context("platform returned a negative task schedule occurrence count")?,
+        next_run_at: record.next_run_at.clone(),
+        last_run_at: record.last_run_at.clone(),
+    })
 }
 
 fn value_uuid(value: &Value, field: &str, entity: &str) -> Result<Uuid> {
@@ -788,16 +851,19 @@ mod tests {
         .unwrap();
         assert!(matches!(omitted.project, ConfigureField::Unset));
         assert!(matches!(omitted.target, ConfigureField::Unset));
+        assert!(matches!(omitted.schedule, ConfigureField::Unset));
 
         let cleared: ConfigureTaskArgs = serde_json::from_value(json!({
             "task_slug": "private-task-a1b2c3d4",
             "project": null,
             "target": null,
+            "schedule": null,
             "labels": []
         }))
         .unwrap();
         assert!(matches!(cleared.project, ConfigureField::Clear));
         assert!(matches!(cleared.target, ConfigureField::Clear));
+        assert!(matches!(cleared.schedule, ConfigureField::Clear));
         assert_eq!(cleared.labels, Some(Vec::new()));
     }
 
@@ -847,6 +913,7 @@ mod tests {
                 status: None,
                 project: ConfigureField::Unset,
                 target: ConfigureField::Unset,
+                schedule: ConfigureField::Unset,
                 labels: None,
             };
             let error = backend
@@ -984,6 +1051,7 @@ mod tests {
         );
         assert!(spec.description.contains("omit instructions to preserve"));
         assert!(spec.description.contains("do not repeat the same update"));
+        assert!(spec.description.contains("current schedule"));
         assert!(spec.description.contains("list_projects and get_project"));
         assert!(spec.description.contains("list_task_labels"));
         assert!(spec.description.contains("list_agents and get_agent"));
@@ -1000,6 +1068,24 @@ mod tests {
         assert!(project.contains("leave the current project unchanged"));
         assert!(project.contains("pass null to remove"));
         assert!(project.contains("not project_slug"));
+
+        let schedule = &spec.parameters["properties"]["schedule"];
+        let description = schedule["description"].as_str().unwrap();
+        assert!(description.contains("Omit to preserve"));
+        assert!(description.contains("pass null to remove"));
+        assert!(description.contains("explicitly include enabled: true"));
+        assert!(description.contains("Updating may include only changed fields"));
+        let enabled = schedule["oneOf"][0]["properties"]["enabled"]["description"]
+            .as_str()
+            .unwrap();
+        assert!(enabled.contains("Set true when the user wants the task to run"));
+        assert!(enabled.contains("Omit on update only to preserve"));
+        assert_eq!(
+            schedule["oneOf"][0]["properties"]["recurrence"]["oneOf"][0]["properties"]["frequency"]
+                ["const"],
+            "interval"
+        );
+        assert!(!schedule.to_string().contains("operation"));
     }
 
     #[tokio::test]
@@ -1025,6 +1111,22 @@ mod tests {
                     target: ConfigureField::Set(TaskTargetArg::Routine {
                         slug: Slug::parse("code-generation-pipeline").unwrap(),
                     }),
+                    schedule: ConfigureField::Set(ConfigureTaskScheduleArg {
+                        enabled: Some(true),
+                        starts_at: Some(
+                            NaiveDateTime::parse_from_str(
+                                "2026-08-28T14:00:00",
+                                "%Y-%m-%dT%H:%M:%S",
+                            )
+                            .unwrap(),
+                        ),
+                        timezone: Some("America/Chicago".into()),
+                        recurrence: Some(TaskScheduleRecurrence::Interval {
+                            every: 1,
+                            unit: nenjo_events::TaskScheduleIntervalUnit::Hours,
+                        }),
+                        end: Some(TaskScheduleEnd::Never),
+                    }),
                     labels: Some(vec!["backend".into(), "urgent".into()]),
                 },
                 Some(task_id),
@@ -1042,6 +1144,11 @@ mod tests {
         );
         assert_eq!(body["labels"], json!(["backend", "urgent"]));
         assert_eq!(body["status"], "Todo");
+        assert_eq!(body["schedule"]["enabled"], true);
+        assert_eq!(body["schedule"]["starts_at"], "2026-08-28T14:00:00");
+        assert_eq!(body["schedule"]["timezone"], "America/Chicago");
+        assert_eq!(body["schedule"]["recurrence"]["frequency"], "interval");
+        assert!(body["schedule"].get("operation").is_none());
         assert!(!body.to_string().contains("Do not expose this"));
         assert_eq!(
             encoder.payload.lock().unwrap().as_ref().unwrap(),
@@ -1130,6 +1237,18 @@ mod tests {
         );
         task["instructions"] = Value::Null;
         task["encrypted_payload"] = json!({"ciphertext": "encrypted"});
+        task["schedule"] = json!({
+            "definition": {
+                "starts_at": "2026-08-28T19:00:00.123Z",
+                "timezone": "America/Chicago",
+                "recurrence": {"frequency": "interval", "every": 1, "unit": "hours"},
+                "end": {"type": "never"}
+            },
+            "occurrence_count": 2,
+            "next_run_at": "2026-08-28T21:00:00Z",
+            "enabled": true,
+            "last_run_at": "2026-08-28T20:00:00Z"
+        });
 
         let summaries = backend.task_summaries(json!([task.clone()])).unwrap();
         assert_eq!(
@@ -1157,6 +1276,16 @@ mod tests {
         );
         assert_eq!(value["task"]["created_at"], "2026-07-17T00:00:00Z");
         assert_eq!(value["task"]["updated_at"], "2026-07-17T01:00:00Z");
+        assert_eq!(value["task"]["schedule"]["enabled"], true);
+        assert_eq!(
+            value["task"]["schedule"]["starts_at"],
+            "2026-08-28T14:00:00.123"
+        );
+        assert_eq!(
+            value["task"]["schedule"]["recurrence"]["frequency"],
+            "interval"
+        );
+        assert_eq!(value["task"]["schedule"]["occurrence_count"], 2);
         assert!(value["task"].get("id").is_none());
         assert!(value["task"].get("org_id").is_none());
         assert!(value["task"].get("project_id").is_none());
