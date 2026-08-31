@@ -1108,6 +1108,8 @@ mod tests {
     fn command_chat_message_roundtrip() {
         let cmd = Command::ChatMessage {
             id: Some("msg-123".into()),
+            attempt_id: None,
+            retry_of_run_id: None,
             content: "hello".into(),
             encrypted_content: None,
             artifacts: Vec::new(),
@@ -1150,6 +1152,8 @@ mod tests {
         };
         let cmd = Command::ChatMessage {
             id: None,
+            attempt_id: None,
+            retry_of_run_id: None,
             content: String::new(),
             encrypted_content: Some(payload.clone()),
             artifacts: Vec::new(),

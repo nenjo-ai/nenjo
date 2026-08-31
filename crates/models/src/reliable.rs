@@ -76,6 +76,16 @@ fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
     None
 }
 
+fn stream_event_prevents_retry(event: &super::ProviderStreamEvent) -> bool {
+    matches!(
+        event,
+        super::ProviderStreamEvent::TextDelta(_)
+            | super::ProviderStreamEvent::ReasoningDelta(_)
+            | super::ProviderStreamEvent::ProviderToolStarted(_)
+            | super::ProviderStreamEvent::ProviderToolCompleted(_)
+    )
+}
+
 /// Provider wrapper with retry, fallback, auth rotation, and model failover.
 pub struct ReliableProvider {
     providers: Vec<(String, Box<dyn ModelProvider>)>,
@@ -277,7 +287,7 @@ impl ModelProvider for ReliableProvider {
                                 break result;
                             }
                             Either::Right((Some(event), pending_provider_call)) => {
-                                emitted_event = true;
+                                emitted_event |= stream_event_prevents_retry(&event);
                                 events.send(event).await.map_err(|_| {
                                     anyhow::anyhow!("provider stream consumer closed")
                                 })?;
@@ -289,7 +299,7 @@ impl ModelProvider for ReliableProvider {
                         }
                     };
                     while let Ok(event) = attempt_events_rx.try_recv() {
-                        emitted_event = true;
+                        emitted_event |= stream_event_prevents_retry(&event);
                         events
                             .send(event)
                             .await
@@ -518,6 +528,50 @@ mod tests {
 
     struct PartialStreamingFailure {
         calls: Arc<AtomicUsize>,
+    }
+
+    struct CapacityThenRecovery {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CapacityThenRecovery {
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            unreachable!("the streaming path must not fall back to chat")
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+            events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
+        ) -> anyhow::Result<ChatResponse> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            events
+                .send(ProviderStreamEvent::CapacityWaiting { limit: 1 })
+                .await
+                .ok();
+            events
+                .send(ProviderStreamEvent::CapacityAcquired)
+                .await
+                .ok();
+            if call == 0 {
+                anyhow::bail!("temporary provider failure");
+            }
+            Ok(ChatResponse {
+                text: Some("recovered".into()),
+                tool_calls: Vec::new(),
+                provider_tool_calls: Vec::new(),
+                usage: TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop,
+            })
+        }
     }
 
     #[async_trait]
@@ -915,6 +969,37 @@ mod tests {
             Ok(ProviderStreamEvent::TextDelta(delta)) if delta == "partial"
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn capacity_events_do_not_suppress_a_safe_provider_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = ReliableProvider::new(
+            vec![(
+                "vllm".into(),
+                Box::new(CapacityThenRecovery {
+                    calls: Arc::clone(&calls),
+                }) as Box<dyn ModelProvider>,
+            )],
+            1,
+            1,
+        );
+        let messages = vec![ConversationMessage::user("hello")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        let result = provider
+            .chat_stream(request, "test-model", 0.0, tx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.text_or_empty(), "recovered");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

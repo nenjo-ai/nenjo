@@ -82,6 +82,13 @@ pub enum Command {
         /// Client-generated message ID for delivery tracking.
         #[serde(default)]
         id: Option<String>,
+        /// Stable identity for this execution attempt. Reconnecting clients reuse it;
+        /// an explicit user retry creates a new value while retaining `id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_id: Option<Uuid>,
+        /// Failed run that this attempt is replaying, when explicitly requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_of_run_id: Option<Uuid>,
         /// The user's message text.
         content: String,
         /// Optional encrypted content body. When present, workers should prefer this over `content`.
@@ -124,6 +131,12 @@ pub enum Command {
         /// Client-generated message ID for delivery tracking.
         #[serde(default)]
         id: Option<String>,
+        /// Stable identity for this execution attempt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_id: Option<Uuid>,
+        /// Failed run that this attempt is replaying, when explicitly requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_of_run_id: Option<Uuid>,
         /// The installed slash command, including its leading slash.
         command: String,
         /// The user's original message text.
@@ -513,8 +526,12 @@ mod tests {
     fn chat_artifacts_round_trip_and_legacy_commands_default_to_empty() {
         let reference = artifact();
         let session_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let retry_of_run_id = Uuid::new_v4();
         let command = Command::ChatMessage {
             id: Some(Uuid::new_v4().to_string()),
+            attempt_id: Some(attempt_id),
+            retry_of_run_id: Some(retry_of_run_id),
             content: String::new(),
             encrypted_content: None,
             artifacts: vec![reference.clone()],
@@ -536,7 +553,14 @@ mod tests {
         let decoded: Command = serde_json::from_value(encoded).expect("deserialize chat command");
         assert!(matches!(
             decoded,
-            Command::ChatMessage { artifacts, .. } if artifacts == vec![reference]
+            Command::ChatMessage {
+                attempt_id: Some(decoded_attempt_id),
+                retry_of_run_id: Some(decoded_retry_of_run_id),
+                artifacts,
+                ..
+            } if decoded_attempt_id == attempt_id
+                && decoded_retry_of_run_id == retry_of_run_id
+                && artifacts == vec![reference]
         ));
 
         let legacy: Command = serde_json::from_value(serde_json::json!({
@@ -547,7 +571,12 @@ mod tests {
         .expect("deserialize command without artifact field");
         assert!(matches!(
             legacy,
-            Command::ChatMessage { artifacts, .. } if artifacts.is_empty()
+            Command::ChatMessage {
+                attempt_id: None,
+                retry_of_run_id: None,
+                artifacts,
+                ..
+            } if artifacts.is_empty()
         ));
     }
 

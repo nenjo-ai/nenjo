@@ -125,6 +125,22 @@ pub fn turn_event_to_stream_events(
                 encrypted_payload: None,
             }]
         }
+        nenjo::TurnEvent::ModelCapacityWaiting { limit, .. } => {
+            vec![StreamEvent::ProgressUpdate {
+                run_id: run_id.to_string(),
+                status: "waiting_for_model_capacity".to_string(),
+                message: format!(
+                    "Waiting for model capacity ({limit} provider requests may run at once)."
+                ),
+            }]
+        }
+        nenjo::TurnEvent::ModelCapacityAcquired { .. } => {
+            vec![StreamEvent::ProgressUpdate {
+                run_id: run_id.to_string(),
+                status: "model_capacity_acquired".to_string(),
+                message: "Model capacity acquired.".to_string(),
+            }]
+        }
         nenjo::TurnEvent::ProviderRetryScheduled {
             request_id,
             provider,
@@ -415,6 +431,12 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 "assistant_reasoning_delta(request={request_id}, len={})",
                 delta.len()
             )
+        }
+        nenjo::TurnEvent::ModelCapacityWaiting { request_id, limit } => {
+            format!("model_capacity_waiting(request={request_id}, limit={limit})")
+        }
+        nenjo::TurnEvent::ModelCapacityAcquired { request_id } => {
+            format!("model_capacity_acquired(request={request_id})")
         }
         nenjo::TurnEvent::ProviderRetryScheduled {
             request_id,
@@ -1220,6 +1242,8 @@ pub fn turn_event_to_workflow_step_response(
         | nenjo::TurnEvent::ModelRequestStarted { .. }
         | nenjo::TurnEvent::AssistantTextDelta { .. }
         | nenjo::TurnEvent::AssistantReasoningDelta { .. }
+        | nenjo::TurnEvent::ModelCapacityWaiting { .. }
+        | nenjo::TurnEvent::ModelCapacityAcquired { .. }
         | nenjo::TurnEvent::ProviderRetryScheduled { .. }
         | nenjo::TurnEvent::ModelRequestCompleted { .. } => None,
         nenjo::TurnEvent::Done { output } if context.emit_done => {

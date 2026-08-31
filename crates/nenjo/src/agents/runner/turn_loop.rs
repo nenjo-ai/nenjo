@@ -206,6 +206,19 @@ where
                         started_provider_tools.insert(trace.id.clone());
                         completed_provider_tools.insert(trace.id);
                     }
+                    ProviderStreamEvent::CapacityWaiting { limit } => emit_event(
+                        events_tx,
+                        TurnEvent::ModelCapacityWaiting {
+                            request_id: request_id.to_string(),
+                            limit,
+                        },
+                    ),
+                    ProviderStreamEvent::CapacityAcquired => emit_event(
+                        events_tx,
+                        TurnEvent::ModelCapacityAcquired {
+                            request_id: request_id.to_string(),
+                        },
+                    ),
                     ProviderStreamEvent::RetryScheduled {
                         provider,
                         model,
@@ -280,6 +293,19 @@ where
                             started_provider_tools.insert(trace.id.clone());
                             completed_provider_tools.insert(trace.id);
                         }
+                        ProviderStreamEvent::CapacityWaiting { limit } => emit_event(
+                            events_tx,
+                            TurnEvent::ModelCapacityWaiting {
+                                request_id: request_id.to_string(),
+                                limit,
+                            },
+                        ),
+                        ProviderStreamEvent::CapacityAcquired => emit_event(
+                            events_tx,
+                            TurnEvent::ModelCapacityAcquired {
+                                request_id: request_id.to_string(),
+                            },
+                        ),
                         ProviderStreamEvent::RetryScheduled {
                             provider,
                             model,

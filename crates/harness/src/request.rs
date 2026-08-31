@@ -31,6 +31,9 @@ pub struct ChatRequest {
     pub session_id: Uuid,
     /// Durable identity of the user message that initiated this turn.
     pub input_message_id: Option<Uuid>,
+    /// Failed run being deliberately replayed. Retry attempts reuse the logical
+    /// user turn without appending it to provider history a second time.
+    pub retry_of_run_id: Option<Uuid>,
     pub agent: Slug,
     pub message: String,
     pub project: Option<Slug>,
@@ -48,6 +51,7 @@ impl ChatRequest {
         Self {
             session_id: Uuid::new_v4(),
             input_message_id: None,
+            retry_of_run_id: None,
             agent: agent.into_slug(),
             message: message.into(),
             project: None,
@@ -69,6 +73,11 @@ impl ChatRequest {
     /// Associate this execution with its persisted user-message identity.
     pub fn with_input_message_id(mut self, input_message_id: Uuid) -> Self {
         self.input_message_id = Some(input_message_id);
+        self
+    }
+
+    pub fn retrying_run(mut self, run_id: Uuid) -> Self {
+        self.retry_of_run_id = Some(run_id);
         self
     }
 

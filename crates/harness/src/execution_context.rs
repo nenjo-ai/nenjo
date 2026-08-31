@@ -29,6 +29,12 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 delta.len()
             )
         }
+        nenjo::TurnEvent::ModelCapacityWaiting { request_id, limit } => {
+            format!("model_capacity_waiting(request={request_id}, limit={limit})")
+        }
+        nenjo::TurnEvent::ModelCapacityAcquired { request_id } => {
+            format!("model_capacity_acquired(request={request_id})")
+        }
         nenjo::TurnEvent::ProviderRetryScheduled {
             request_id,
             attempt,

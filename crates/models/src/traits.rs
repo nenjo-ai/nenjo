@@ -307,6 +307,10 @@ impl FinishReason {
 pub enum ProviderStreamEvent {
     TextDelta(String),
     ReasoningDelta(String),
+    CapacityWaiting {
+        limit: usize,
+    },
+    CapacityAcquired,
     ProviderToolStarted(ProviderToolTrace),
     ProviderToolCompleted(ProviderToolTrace),
     RetryScheduled {

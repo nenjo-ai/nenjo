@@ -55,6 +55,11 @@ pub struct Config {
     #[serde(default)]
     pub reliability: ReliabilityConfig,
 
+    /// Worker-wide model admission control shared by chats, tasks, abilities,
+    /// delegated agents, and media analyzers.
+    #[serde(default)]
+    pub model_runtime: ModelRuntimeConfig,
+
     #[serde(default)]
     pub routines: RoutineConfig,
 
@@ -140,6 +145,27 @@ pub struct VllmConfig {
 impl Default for VllmConfig {
     fn default() -> Self {
         Self { streaming: true }
+    }
+}
+
+// ── Model runtime admission control ─────────────────────────────
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+pub struct ModelRuntimeConfig {
+    /// Maximum physical provider requests in flight across the worker.
+    #[serde(default = "default_model_max_concurrent_requests")]
+    pub max_concurrent_requests: usize,
+}
+
+fn default_model_max_concurrent_requests() -> usize {
+    3
+}
+
+impl Default for ModelRuntimeConfig {
+    fn default() -> Self {
+        Self {
+            max_concurrent_requests: default_model_max_concurrent_requests(),
+        }
     }
 }
 
@@ -1096,6 +1122,7 @@ impl Default for Config {
             nats_url: None,
             autonomy: AutonomyConfig::default(),
             reliability: ReliabilityConfig::default(),
+            model_runtime: ModelRuntimeConfig::default(),
             routines: RoutineConfig::default(),
             vllm: VllmConfig::default(),
             pdf: PdfConfig::default(),
@@ -1286,6 +1313,22 @@ impl Config {
             "NENJO_PDF_MAX_RENDERED_BYTES",
             &mut self.pdf.max_rendered_bytes,
         )?;
+        apply_numeric_env(
+            "NENJO_MODEL_MAX_CONCURRENT_REQUESTS",
+            &mut self.model_runtime.max_concurrent_requests,
+        )?;
+        apply_numeric_env(
+            "NENJO_AGENT_MAX_DELEGATION_DEPTH",
+            &mut self.agent.max_delegation_depth,
+        )?;
+        apply_numeric_env(
+            "NENJO_AGENT_MAX_ACTIVE_NESTED_RUNS",
+            &mut self.agent.max_active_nested_runs,
+        )?;
+        apply_numeric_env(
+            "NENJO_AGENT_MAX_SUB_AGENTS_PER_SPAWN",
+            &mut self.agent.max_sub_agents_per_spawn,
+        )?;
         apply_bool_env("NENJO_VLLM_STREAMING", &mut self.vllm.streaming)?;
         Ok(())
     }
@@ -1310,6 +1353,20 @@ impl Config {
             );
         }
         self.validate_media_providers()?;
+        if !(1..=64).contains(&self.model_runtime.max_concurrent_requests) {
+            anyhow::bail!("model_runtime.max_concurrent_requests must be between 1 and 64");
+        }
+        if self.agent.max_delegation_depth > 16 {
+            anyhow::bail!("agent.max_delegation_depth must be between 0 and 16");
+        }
+        if !(1..=64).contains(&self.agent.max_active_nested_runs) {
+            anyhow::bail!("agent.max_active_nested_runs must be between 1 and 64");
+        }
+        if !(1..=self.agent.max_active_nested_runs).contains(&self.agent.max_sub_agents_per_spawn) {
+            anyhow::bail!(
+                "agent.max_sub_agents_per_spawn must be between 1 and agent.max_active_nested_runs"
+            );
+        }
         self.pdf.validate()?;
         self.routines.execution_config()?;
         Ok(())
@@ -1367,8 +1424,9 @@ fn apply_bool_env(name: &str, target: &mut bool) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        Config, MediaProviderConfig, ParallelSearchMode, PdfConfig, RoutineConfig, SecureBusConfig,
-        SecurityConfig, SessionConfig, VllmConfig, WebFetchProvider, WebSearchProvider,
+        AgentConfig, Config, MediaProviderConfig, ModelRuntimeConfig, ParallelSearchMode,
+        PdfConfig, RoutineConfig, SecureBusConfig, SecurityConfig, SessionConfig, VllmConfig,
+        WebFetchProvider, WebSearchProvider,
     };
     use nenjo::Slug;
     use nenjo_models::MediaOperation;
@@ -1438,6 +1496,38 @@ streaming = false
         .unwrap();
 
         assert!(!config.vllm.streaming);
+    }
+
+    #[test]
+    fn model_runtime_defaults_to_three_physical_provider_requests() {
+        assert_eq!(ModelRuntimeConfig::default().max_concurrent_requests, 3);
+
+        let config = Config {
+            api_key: "test".into(),
+            model_runtime: ModelRuntimeConfig {
+                max_concurrent_requests: 0,
+            },
+            ..Default::default()
+        };
+        assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn nested_run_limits_are_bounded_and_consistent() {
+        let defaults = Config::default();
+        assert_eq!(defaults.agent.max_active_nested_runs, 3);
+        assert_eq!(defaults.agent.max_sub_agents_per_spawn, 3);
+
+        let too_wide = Config {
+            api_key: "test".into(),
+            agent: AgentConfig {
+                max_active_nested_runs: 2,
+                max_sub_agents_per_spawn: 3,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert!(too_wide.validate().is_err());
     }
 
     #[test]

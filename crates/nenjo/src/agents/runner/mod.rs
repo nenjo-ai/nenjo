@@ -516,6 +516,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                 SubAgentRuntimeOptions {
                     limits: SubAgentLimits {
                         max_depth: inst.runtime.config.max_delegation_depth,
+                        max_per_spawn: inst.runtime.config.max_sub_agents_per_spawn,
                     },
                     delegation_ctx: inst.runtime.sub_agent_ctx.clone(),
                     async_ops: inst.runtime.async_ops.clone(),

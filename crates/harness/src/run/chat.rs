@@ -166,6 +166,7 @@ where
     let ChatRequest {
         session_id,
         input_message_id,
+        retry_of_run_id,
         agent,
         message,
         project,
@@ -354,6 +355,7 @@ where
                 hook_transcript_dir,
                 artifacts,
                 transcript_events,
+                is_retry: retry_of_run_id.is_some(),
                 events_tx,
                 worker_id,
             },
@@ -378,6 +380,7 @@ where
             hook_transcript_dir,
             artifacts,
             transcript_events,
+            is_retry: retry_of_run_id.is_some(),
             events_tx,
             worker_id,
         },
@@ -399,6 +402,7 @@ struct PreparedChatInput {
     hook_scopes: Vec<ActiveHookScope>,
     hook_transcript_dir: Option<std::path::PathBuf>,
     transcript_events: Vec<nenjo_sessions::SessionTranscriptEvent>,
+    is_retry: bool,
     artifacts: Vec<ArtifactRef>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
@@ -426,29 +430,33 @@ where
         hook_scopes,
         hook_transcript_dir,
         transcript_events,
+        is_retry,
         artifacts,
         events_tx,
         worker_id,
     } = input;
-    let history = replay_transcript_history(&transcript_events);
-    sessions.record_events(
-        lease.clone(),
-        vec![SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
-            session_id,
-            turn_id: Some(turn_id),
-            payload: SessionTranscriptEventPayload::ConversationMessage {
-                message: ConversationMessage::chat(
-                    ChatMessage::user(effective_content.clone())
-                        .with_artifacts(user_artifact_inputs(&artifacts)),
-                ),
-            },
-        })],
-    );
+    let history = replay_history_for_chat_attempt(&transcript_events, turn_id, is_retry);
+    if !is_retry {
+        sessions.record_events(
+            lease.clone(),
+            vec![SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
+                session_id,
+                turn_id: Some(turn_id),
+                payload: SessionTranscriptEventPayload::ConversationMessage {
+                    message: ConversationMessage::chat(
+                        ChatMessage::user(effective_content.clone())
+                            .with_artifacts(user_artifact_inputs(&artifacts)),
+                    ),
+                },
+            })],
+        );
+    }
     debug!(
         agent = %agent,
         session = %session_id,
         history_len = history.len(),
-        "Preparing chat: queued user message transcript"
+        is_retry,
+        "Prepared chat transcript history"
     );
     info!(
         agent = %agent_name,
@@ -478,6 +486,25 @@ where
         worker_id,
         lease,
     })
+}
+
+fn replay_history_for_chat_attempt(
+    transcript_events: &[nenjo_sessions::SessionTranscriptEvent],
+    turn_id: Uuid,
+    is_retry: bool,
+) -> Vec<ConversationMessage> {
+    if !is_retry {
+        return replay_transcript_history(transcript_events);
+    }
+    // The original attempt already wrote this logical turn. Excluding every
+    // event for the turn prevents its user prompt, partial assistant output,
+    // and tool transcript from being replayed before the same current input.
+    let prior_turns = transcript_events
+        .iter()
+        .filter(|event| event.turn_id != Some(turn_id))
+        .cloned()
+        .collect::<Vec<_>>();
+    replay_transcript_history(&prior_turns)
 }
 
 fn user_artifact_inputs(artifacts: &[ArtifactRef]) -> Vec<ArtifactInput> {
@@ -1071,4 +1098,63 @@ where
         .ok()
         .flatten()
         .and_then(|record| record.domain.map(|domain| domain.domain_command))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use nenjo_sessions::SessionTranscriptEvent;
+
+    fn transcript_message(
+        session_id: Uuid,
+        turn_id: Uuid,
+        seq: u64,
+        message: ChatMessage,
+    ) -> SessionTranscriptEvent {
+        SessionTranscriptEvent {
+            session_id,
+            seq,
+            recorded_at: Utc::now(),
+            turn_id: Some(turn_id),
+            payload: SessionTranscriptEventPayload::ConversationMessage {
+                message: ConversationMessage::chat(message),
+            },
+        }
+    }
+
+    #[test]
+    fn retry_history_excludes_the_original_logical_turn() {
+        let session_id = Uuid::new_v4();
+        let prior_turn_id = Uuid::new_v4();
+        let retried_turn_id = Uuid::new_v4();
+        let events = vec![
+            transcript_message(
+                session_id,
+                prior_turn_id,
+                1,
+                ChatMessage::user("prior question"),
+            ),
+            transcript_message(
+                session_id,
+                retried_turn_id,
+                2,
+                ChatMessage::user("same logical prompt"),
+            ),
+            transcript_message(
+                session_id,
+                retried_turn_id,
+                3,
+                ChatMessage::assistant("partial failed answer"),
+            ),
+        ];
+
+        let history = replay_history_for_chat_attempt(&events, retried_turn_id, true);
+
+        assert_eq!(history.len(), 1);
+        assert!(matches!(
+            &history[0],
+            ConversationMessage::Chat(message)
+                if message.content == "prior question"
+        ));
+    }
 }

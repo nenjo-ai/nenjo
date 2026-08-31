@@ -204,6 +204,32 @@ streaming = true
 `NENJO_VLLM_STREAMING` overrides the TOML value and accepts
 `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off`.
 
+### Model concurrency and nested runs
+
+All physical model requests share one worker-wide admission gate, including
+chat, task, ability, delegated-agent, retry, and media-analysis calls. This is
+intentionally below the task inbox so nested work cannot bypass it:
+
+```toml
+[model_runtime]
+max_concurrent_requests = 3
+
+[agent]
+max_delegation_depth = 3
+max_active_nested_runs = 3
+max_sub_agents_per_spawn = 3
+```
+
+For a local vLLM server configured with `MAX_NUM_SEQS=4`, the default worker
+limit of `3` leaves one scheduler slot for decode/prefill overlap and direct
+health or administrative requests. Override these values with
+`NENJO_MODEL_MAX_CONCURRENT_REQUESTS` and
+`NENJO_AGENT_MAX_DELEGATION_DEPTH`. Nested ability, delegation, and sub-agent
+runs share the `max_active_nested_runs` budget; one `spawn_sub_agents` call is
+also bounded by `max_sub_agents_per_spawn`. Override those with
+`NENJO_AGENT_MAX_ACTIVE_NESTED_RUNS` and
+`NENJO_AGENT_MAX_SUB_AGENTS_PER_SPAWN`.
+
 ### Routine gate retries
 
 Routine gate retries are configured independently from model-provider request

@@ -37,8 +37,8 @@ pub mod types;
 // Re-export key types at the crate root.
 pub use agents::{AgentBuilder, AgentError, AgentInstance, AgentRunner};
 pub use agents::{
-    AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent, Buffered,
-    BufferedChatEvent, BufferedDelta, ChatDelivery, ChatHandle, ExecutionHandle,
+    AsyncOpStartError, AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent,
+    Buffered, BufferedChatEvent, BufferedDelta, ChatDelivery, ChatHandle, ExecutionHandle,
     StartAsyncOperation, Streaming, StreamingChatEvent, SubAgentTranscriptEvent, TurnEvent,
     TurnLoopConfig, TurnLoopError, TurnOutput, current_async_operation_runtime,
 };

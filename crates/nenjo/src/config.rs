@@ -4,6 +4,8 @@ use serde::{Deserialize, Serialize};
 
 /// Default upper bound for model turns in an agent execution.
 pub const DEFAULT_AGENT_MAX_TURNS: usize = 100;
+pub const DEFAULT_MAX_ACTIVE_NESTED_RUNS: usize = 3;
+pub const DEFAULT_MAX_SUB_AGENTS_PER_SPAWN: usize = 3;
 
 /// Per-agent configuration that controls turn loop behavior.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -24,10 +26,24 @@ pub struct AgentConfig {
     pub tool_dispatcher: String,
     #[serde(default = "default_max_delegation_depth")]
     pub max_delegation_depth: u32,
+    /// Maximum ability, delegation, and sub-agent runs active for one agent.
+    #[serde(default = "default_max_active_nested_runs")]
+    pub max_active_nested_runs: usize,
+    /// Maximum child requests accepted by one `spawn_sub_agents` call.
+    #[serde(default = "default_max_sub_agents_per_spawn")]
+    pub max_sub_agents_per_spawn: usize,
 }
 
 fn default_max_delegation_depth() -> u32 {
     3
+}
+
+fn default_max_active_nested_runs() -> usize {
+    DEFAULT_MAX_ACTIVE_NESTED_RUNS
+}
+
+fn default_max_sub_agents_per_spawn() -> usize {
+    DEFAULT_MAX_SUB_AGENTS_PER_SPAWN
 }
 
 fn default_compact_context() -> bool {
@@ -65,6 +81,8 @@ impl Default for AgentConfig {
             parallel_tools: true,
             tool_dispatcher: default_agent_tool_dispatcher(),
             max_delegation_depth: default_max_delegation_depth(),
+            max_active_nested_runs: default_max_active_nested_runs(),
+            max_sub_agents_per_spawn: default_max_sub_agents_per_spawn(),
         }
     }
 }
@@ -99,5 +117,12 @@ mod tests {
         .expect("agent config with compaction disabled");
 
         assert!(!disabled.compact_context);
+    }
+
+    #[test]
+    fn nested_run_limits_default_to_three() {
+        let config = AgentConfig::default();
+        assert_eq!(config.max_active_nested_runs, 3);
+        assert_eq!(config.max_sub_agents_per_spawn, 3);
     }
 }

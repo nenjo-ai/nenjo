@@ -256,6 +256,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
     match command {
         Command::ChatMessage {
             id,
+            attempt_id,
+            retry_of_run_id,
             content,
             artifacts,
             project,
@@ -272,6 +274,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     &ctx.chat_context(),
                     ChatCommandRequest {
                         message_id: id.as_deref(),
+                        attempt_id,
+                        retry_of_run_id,
                         content: &content,
                         artifacts: &artifacts,
                         project: project.as_deref(),
@@ -290,6 +294,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
 
         Command::ChatCommand {
             id,
+            attempt_id,
+            retry_of_run_id,
             command,
             content,
             artifacts,
@@ -307,6 +313,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     &ctx.chat_context(),
                     ChatSlashCommandRequest {
                         message_id: id.as_deref(),
+                        attempt_id,
+                        retry_of_run_id,
                         command: &command,
                         content: &content,
                         artifacts: &artifacts,

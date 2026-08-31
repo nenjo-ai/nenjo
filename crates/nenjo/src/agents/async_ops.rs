@@ -10,11 +10,13 @@ use std::time::Instant;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, mpsc, watch};
 use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
-use crate::tools::{AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind};
+use crate::tools::{
+    AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind, ToolResult,
+};
 pub(crate) use crate::tools::{
     AsyncOperationKind as AsyncOpKind, AsyncOperationStatus as AsyncOpStatus,
 };
@@ -28,6 +30,43 @@ const WAIT_EVENTS_PER_OPERATION: usize = 12;
 const INSPECT_LIMIT_CAP: usize = 50;
 const OPERATION_INBOX_CAP: usize = 8;
 const TERMINAL_OPERATION_CAP: usize = 128;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+#[error(
+    "nested run capacity reached (limit {limit}); wait for or stop an active ability, delegation, or sub-agent before retrying"
+)]
+pub struct AsyncOpStartError {
+    limit: usize,
+}
+
+impl AsyncOpStartError {
+    pub fn code(self) -> &'static str {
+        "nested_run_capacity"
+    }
+
+    pub fn limit(self) -> usize {
+        self.limit
+    }
+
+    pub fn retryable(self) -> bool {
+        true
+    }
+
+    pub(crate) fn into_tool_result(self) -> ToolResult {
+        ToolResult {
+            success: false,
+            output: serde_json::json!({
+                "code": self.code(),
+                "message": self.to_string(),
+                "retryable": self.retryable(),
+                "limit": self.limit(),
+            })
+            .to_string()
+            .into(),
+            error: Some(self.to_string()),
+        }
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub(crate) struct AsyncOpId(String);
@@ -267,6 +306,8 @@ struct ManagerInner {
     change_tx: watch::Sender<u64>,
     next_sequence: AtomicU64,
     cancel: CancellationToken,
+    nested_run_slots: Arc<Semaphore>,
+    max_active_nested_runs: usize,
 }
 
 struct AsyncOperation {
@@ -290,6 +331,7 @@ enum AsyncOpLifecycle {
     Active {
         phase: AsyncOpActivePhase,
         abort: Option<AbortHandle>,
+        nested_run_permit: Option<OwnedSemaphorePermit>,
     },
     Terminal(AsyncOpStatus),
 }
@@ -348,10 +390,16 @@ impl AsyncOpLifecycle {
             status,
             AsyncOpStatus::Completed | AsyncOpStatus::Failed | AsyncOpStatus::Stopped
         ));
-        let Self::Active { abort, .. } = self else {
+        let Self::Active {
+            abort,
+            nested_run_permit,
+            ..
+        } = self
+        else {
             return TerminalTransition::AlreadyTerminal;
         };
         let abort = abort.take();
+        drop(nested_run_permit.take());
         *self = Self::Terminal(status);
         TerminalTransition::Applied(abort)
     }
@@ -526,6 +574,13 @@ impl AsyncOpManager {
     }
 
     pub(crate) fn with_cancel(cancel: CancellationToken) -> Self {
+        Self::with_cancel_and_nested_limit(cancel, crate::config::DEFAULT_MAX_ACTIVE_NESTED_RUNS)
+    }
+
+    pub(crate) fn with_cancel_and_nested_limit(
+        cancel: CancellationToken,
+        max_active_nested_runs: usize,
+    ) -> Self {
         let (change_tx, _change_rx) = watch::channel(0);
         Self {
             inner: Arc::new(ManagerInner {
@@ -533,6 +588,8 @@ impl AsyncOpManager {
                 change_tx,
                 next_sequence: AtomicU64::new(1),
                 cancel,
+                nested_run_slots: Arc::new(Semaphore::new(max_active_nested_runs)),
+                max_active_nested_runs,
             }),
         }
     }
@@ -541,6 +598,38 @@ impl AsyncOpManager {
         &self,
         request: StartAsyncOp,
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) -> StartedAsyncOp {
+        self.start_with_nested_permit(request, events_tx, None)
+            .await
+    }
+
+    pub(crate) async fn start_nested(
+        &self,
+        request: StartAsyncOp,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) -> Result<StartedAsyncOp, AsyncOpStartError> {
+        debug_assert!(matches!(
+            request.kind,
+            AsyncOpKind::Ability | AsyncOpKind::Delegation | AsyncOpKind::SubAgent
+        ));
+        let nested_run_permit = self
+            .inner
+            .nested_run_slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| AsyncOpStartError {
+                limit: self.inner.max_active_nested_runs,
+            })?;
+        Ok(self
+            .start_with_nested_permit(request, events_tx, Some(nested_run_permit))
+            .await)
+    }
+
+    async fn start_with_nested_permit(
+        &self,
+        request: StartAsyncOp,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+        nested_run_permit: Option<OwnedSemaphorePermit>,
     ) -> StartedAsyncOp {
         let (inbox_tx, inbox_rx) = mpsc::channel(OPERATION_INBOX_CAP);
         let operation = Arc::new(AsyncOperation {
@@ -555,6 +644,7 @@ impl AsyncOpManager {
             lifecycle: Mutex::new(AsyncOpLifecycle::Active {
                 phase: AsyncOpActivePhase::Running,
                 abort: None,
+                nested_run_permit,
             }),
             signals: Mutex::new(VecDeque::new()),
             latest_output: Mutex::new(None),
@@ -1307,6 +1397,82 @@ mod tests {
             model_visible: true,
             controls: all_controls(),
         }
+    }
+
+    fn nested_request(id: impl Into<String>, kind: AsyncOpKind) -> StartAsyncOp {
+        StartAsyncOp {
+            id: AsyncOpId::new(id),
+            kind,
+            label: kind.as_str().into(),
+            parent_operation_id: None,
+            parent_tool_name: Some("nested_test".into()),
+            started_summary: "starting nested run".into(),
+            model_visible: true,
+            controls: all_controls(),
+        }
+    }
+
+    #[tokio::test]
+    async fn nested_run_capacity_is_shared_and_released_by_terminal_states() {
+        let manager = AsyncOpManager::with_cancel_and_nested_limit(CancellationToken::new(), 1);
+        let ability = manager
+            .start_nested(nested_request("ability-1", AsyncOpKind::Ability), None)
+            .await
+            .expect("first nested run should start");
+
+        let capacity = match manager
+            .start_nested(
+                nested_request("delegation-1", AsyncOpKind::Delegation),
+                None,
+            )
+            .await
+        {
+            Ok(_) => panic!("all nested kinds must share one capacity budget"),
+            Err(error) => error,
+        };
+        assert_eq!(capacity.code(), "nested_run_capacity");
+        assert_eq!(capacity.limit(), 1);
+        assert!(capacity.retryable());
+
+        ability
+            .handle
+            .complete(
+                AsyncOpSignal::Completed {
+                    summary: "done".into(),
+                    output: None,
+                },
+                None,
+            )
+            .await;
+        let delegation = manager
+            .start_nested(
+                nested_request("delegation-1", AsyncOpKind::Delegation),
+                None,
+            )
+            .await
+            .expect("completion should release nested capacity");
+        delegation
+            .handle
+            .complete(
+                AsyncOpSignal::Failed {
+                    error: "failed".into(),
+                    output: None,
+                },
+                None,
+            )
+            .await;
+
+        manager
+            .start_nested(nested_request("sub-agent-1", AsyncOpKind::SubAgent), None)
+            .await
+            .expect("failure should release nested capacity");
+        manager
+            .stop(vec!["sub-agent-1".into()], None, None, None)
+            .await;
+        manager
+            .start_nested(nested_request("ability-2", AsyncOpKind::Ability), None)
+            .await
+            .expect("stop should release nested capacity");
     }
 
     #[tokio::test]

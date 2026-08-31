@@ -663,10 +663,10 @@ where
         .with(AsyncControl::SendInput)
         .with(AsyncControl::Stop)
         .with(AsyncControl::Wait);
-    let started = instance
+    let started = match instance
         .runtime
         .async_ops
-        .start(
+        .start_nested(
             StartAsyncOp {
                 id: operation_id.clone(),
                 kind: AsyncOpKind::Ability,
@@ -679,7 +679,11 @@ where
             },
             parent_events_tx.clone(),
         )
-        .await;
+        .await
+    {
+        Ok(started) => started,
+        Err(error) => return Ok(error.into_tool_result()),
+    };
 
     let instance = instance.clone();
     let ability = ability.clone();
@@ -913,6 +917,10 @@ where
                     // transport carry an internal agent-to-agent stream that no user consumes.
                     TurnEvent::AssistantTextDelta { .. }
                     | TurnEvent::AssistantReasoningDelta { .. } => {}
+                    TurnEvent::ModelCapacityWaiting { .. }
+                    | TurnEvent::ModelCapacityAcquired { .. } => {
+                        let _ = parent_tx.send(event);
+                    }
                     TurnEvent::ModelRequestCompleted {
                         request_id,
                         parent_call_id,
@@ -1129,6 +1137,8 @@ async fn bridge_ability_transcript(
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
         | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ModelCapacityWaiting { .. }
+        | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::ProviderRetryScheduled { .. }
         | TurnEvent::ModelRequestCompleted { .. }
         | TurnEvent::HookStarted { .. }

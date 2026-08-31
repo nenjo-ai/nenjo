@@ -34,6 +34,7 @@ Instructions:
 #[derive(Debug, Clone)]
 pub(crate) struct SubAgentLimits {
     pub(crate) max_depth: u32,
+    pub(crate) max_per_spawn: usize,
 }
 
 pub(crate) struct SubAgentRuntimeOptions {
@@ -81,6 +82,7 @@ struct RuntimeInner<P: ProviderRuntime> {
     inherited_host_tools: Vec<Arc<dyn Tool>>,
     delegation_ctx: DelegationContext,
     async_ops: AsyncOpManager,
+    max_per_spawn: usize,
     runs: Mutex<HashMap<Slug, Arc<SubAgentRun>>>,
     events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
 }
@@ -133,6 +135,7 @@ impl<P: ProviderRuntime> SubAgentRuntime<P> {
                 inherited_host_tools,
                 delegation_ctx,
                 async_ops: options.async_ops,
+                max_per_spawn: options.limits.max_per_spawn,
                 runs: Mutex::new(HashMap::new()),
                 events_tx: options.events_tx,
             }),
@@ -171,15 +174,20 @@ impl<P: ProviderRuntime> RuntimeInner<P> {
 }
 
 impl<P: ProviderRuntime> SubAgentHandle<P> {
+    pub(crate) fn max_per_spawn(&self) -> usize {
+        self.inner.max_per_spawn
+    }
+
     pub(crate) async fn spawn_many(
         &self,
         requests: Vec<SpawnRequest>,
-    ) -> Vec<Result<SpawnedSubAgent, SubAgentError>> {
+    ) -> Result<Vec<Result<SpawnedSubAgent, SubAgentError>>, SubAgentError> {
+        validate_spawn_batch_size(requests.len(), self.inner.max_per_spawn)?;
         let mut results = Vec::with_capacity(requests.len());
         for request in requests {
             results.push(self.spawn_one(request).await);
         }
-        results
+        Ok(results)
     }
 
     async fn spawn_one(&self, request: SpawnRequest) -> Result<SpawnedSubAgent, SubAgentError> {
@@ -204,7 +212,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         let started = self
             .inner
             .async_ops
-            .start(
+            .start_nested(
                 StartAsyncOp {
                     id: AsyncOpId::new(slug.to_string()),
                     kind: AsyncOpKind::SubAgent,
@@ -217,7 +225,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
                 },
                 self.inner.events_tx.clone(),
             )
-            .await;
+            .await?;
         let run = Arc::new(SubAgentRun {
             slug: slug.clone(),
             agent_name: request.agent_name.clone(),
@@ -390,6 +398,13 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
                 .await;
         }
     }
+}
+
+fn validate_spawn_batch_size(requested: usize, limit: usize) -> Result<(), SubAgentError> {
+    if requested > limit {
+        return Err(SubAgentError::BatchLimit { requested, limit });
+    }
+    Ok(())
 }
 
 impl<P: ProviderRuntime> ChildRuntimeHandle<P> {
@@ -609,6 +624,8 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
         | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ModelCapacityWaiting { .. }
+        | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::ProviderRetryScheduled { .. }
         | TurnEvent::ModelRequestCompleted { .. }
         | TurnEvent::HookActivated { .. }
@@ -666,4 +683,21 @@ fn truncate(text: &str, max_chars: usize) -> String {
         .collect::<String>();
     out.push('…');
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sub_agent_batch_limit_rejects_n_plus_one() {
+        assert!(validate_spawn_batch_size(3, 3).is_ok());
+        assert!(matches!(
+            validate_spawn_batch_size(4, 3),
+            Err(SubAgentError::BatchLimit {
+                requested: 4,
+                limit: 3,
+            })
+        ));
+    }
 }

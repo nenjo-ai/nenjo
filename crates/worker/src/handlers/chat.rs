@@ -256,6 +256,8 @@ pub struct ChatCommandContext<S> {
 
 pub struct ChatCommandRequest<'a> {
     pub message_id: Option<&'a str>,
+    pub attempt_id: Option<Uuid>,
+    pub retry_of_run_id: Option<Uuid>,
     pub content: &'a str,
     pub artifacts: &'a [ArtifactRef],
     pub project: Option<&'a str>,
@@ -271,6 +273,8 @@ pub struct ChatCommandRequest<'a> {
 
 pub struct ChatSlashCommandRequest<'a> {
     pub message_id: Option<&'a str>,
+    pub attempt_id: Option<Uuid>,
+    pub retry_of_run_id: Option<Uuid>,
     pub command: &'a str,
     pub content: &'a str,
     pub artifacts: &'a [ArtifactRef],
@@ -392,6 +396,8 @@ where
     let request_accepted_at = Instant::now();
     let ChatCommandRequest {
         message_id,
+        attempt_id,
+        retry_of_run_id,
         content,
         artifacts,
         project,
@@ -431,6 +437,8 @@ where
             ctx,
             CouncilChatAdapterRequest {
                 input_message_id,
+                attempt_id,
+                retry_of_run_id,
                 content,
                 artifacts,
                 project,
@@ -456,6 +464,9 @@ where
         .with_artifacts(artifacts.to_vec());
     if let Some(input_message_id) = input_message_id {
         chat = chat.with_input_message_id(input_message_id);
+    }
+    if let Some(retry_of_run_id) = retry_of_run_id {
+        chat = chat.retrying_run(retry_of_run_id);
     }
     if let Some(template_override) = template_override {
         chat = chat.with_template_override(template_override);
@@ -491,7 +502,7 @@ where
     let provider = harness.provider();
     let manifest = provider.manifest_snapshot();
     let aname = agent_name(&manifest, agent_id);
-    if harness.try_enqueue_chat_message(&chat).await? {
+    if retry_of_run_id.is_none() && harness.try_enqueue_chat_message(&chat).await? {
         debug!(
             session = %session_id,
             agent = %aname,
@@ -502,7 +513,7 @@ where
     let notification_emitter = platform_notification_emitter(ctx.response_sink.clone(), session_id);
     let _notification_registration =
         register_platform_notification_emitter(notification_emitter.clone());
-    let run_id = Uuid::new_v4().to_string();
+    let run_id = attempt_id.unwrap_or_else(Uuid::new_v4).to_string();
     let mut writer = ChatStreamWriter {
         context: ctx,
         run_id: &run_id,
@@ -515,7 +526,7 @@ where
             run_id: run_id.clone(),
             session_id: session_id.to_string(),
             input_message_id,
-            parent_run_id: None,
+            parent_run_id: retry_of_run_id.map(|run_id| run_id.to_string()),
             agent_id: Some(agent_slug.to_string()),
             agent_name: Some(aname.clone()),
         },
@@ -548,6 +559,7 @@ where
 
     let mut assistant_delta_buffer = AssistantDeltaBuffer::default();
     let mut provider_request_observed = false;
+    let mut tool_execution_observed = false;
     loop {
         let event = if let Some(flush_at) = assistant_delta_buffer.next_flush_at() {
             tokio::select! {
@@ -592,6 +604,9 @@ where
             } => {
                 for mut se in turn_event_to_stream_events(&ev, &aname, &run_id, event_session_id) {
                     bind_chat_response_context(&mut se, &run_id, input_message_id);
+                    if matches!(se, StreamEvent::ToolCallStarted { .. }) {
+                        tool_execution_observed = true;
+                    }
                     if !provider_request_observed
                         && matches!(se, StreamEvent::ModelRequestStarted { .. })
                     {
@@ -629,6 +644,10 @@ where
         Err(error) => {
             warn!(session = %session_id, agent = %aname, error = %error, "Chat run failed");
             let (code, message, retryable) = normalize_chat_error(&error);
+            // A generic replay cannot prove ability/tool side effects are safe to
+            // repeat. Keep provider-only failures retryable; require deliberate
+            // user intervention once any tool execution has begun.
+            let retryable = retryable && !tool_execution_observed;
             writer.send(
                 session_id,
                 StreamEvent::RunFailed {
@@ -669,6 +688,17 @@ fn normalize_chat_error(error: &impl std::fmt::Display) -> (ChatStreamErrorCode,
             true,
         );
     }
+    if diagnostic
+        .split(|character: char| !character.is_ascii_digit())
+        .filter_map(|word| word.parse::<u16>().ok())
+        .any(|status| (400..500).contains(&status) && status != 408 && status != 429)
+    {
+        return (
+            ChatStreamErrorCode::InvalidRequest,
+            "The model provider rejected this request or its configuration.".to_string(),
+            false,
+        );
+    }
     if diagnostic.contains("context") && diagnostic.contains("length") {
         return (
             ChatStreamErrorCode::ContextLengthExceeded,
@@ -697,6 +727,26 @@ fn normalize_chat_error(error: &impl std::fmt::Display) -> (ChatStreamErrorCode,
         return (
             ChatStreamErrorCode::InvalidRequest,
             "The model provider could not process this request.".to_string(),
+            false,
+        );
+    }
+    if diagnostic.contains("not found")
+        || diagnostic.contains("unknown model")
+        || diagnostic.contains("missing model")
+    {
+        return (
+            ChatStreamErrorCode::InvalidRequest,
+            "The selected model or provider configuration could not be found.".to_string(),
+            false,
+        );
+    }
+    if diagnostic.contains("encrypt")
+        || diagnostic.contains("decrypt")
+        || diagnostic.contains("content key")
+    {
+        return (
+            ChatStreamErrorCode::EncryptionFailed,
+            "The worker could not access the encrypted chat content.".to_string(),
             false,
         );
     }
@@ -799,6 +849,8 @@ where
         ctx,
         ChatCommandRequest {
             message_id: request.message_id,
+            attempt_id: request.attempt_id,
+            retry_of_run_id: request.retry_of_run_id,
             content: &user_content,
             artifacts: request.artifacts,
             project: request.project,
@@ -951,6 +1003,8 @@ fn relative_manifest_path<'a>(raw_path: &'a str, label: &str) -> Result<&'a Path
 
 struct CouncilChatAdapterRequest<'a> {
     input_message_id: Option<Uuid>,
+    attempt_id: Option<Uuid>,
+    retry_of_run_id: Option<Uuid>,
     content: &'a str,
     artifacts: &'a [ArtifactRef],
     project: Option<&'a str>,
@@ -976,7 +1030,7 @@ where
 
     let council = Slug::parse(request.council)?;
     let project = request.project.map(Slug::parse).transpose()?;
-    let run_id = Uuid::new_v4().to_string();
+    let run_id = request.attempt_id.unwrap_or_else(Uuid::new_v4).to_string();
     let mut writer = ChatStreamWriter {
         context: ctx,
         run_id: &run_id,
@@ -989,7 +1043,7 @@ where
             run_id: run_id.clone(),
             session_id: request.session_id.to_string(),
             input_message_id: request.input_message_id,
-            parent_run_id: None,
+            parent_run_id: request.retry_of_run_id.map(|run_id| run_id.to_string()),
             agent_id: None,
             agent_name: Some(council.as_str().to_string()),
         },
@@ -1272,6 +1326,22 @@ mod tests {
             normalize_chat_error(&"provider ended the response with finish reason ContentFilter");
         assert_eq!(code, ChatStreamErrorCode::ContentFiltered);
         assert!(message.contains("content policy"));
+        assert!(!retryable);
+
+        let (code, message, retryable) =
+            normalize_chat_error(&"provider returned HTTP 404 for model deepseek");
+        assert_eq!(code, ChatStreamErrorCode::InvalidRequest);
+        assert!(message.contains("configuration"));
+        assert!(!retryable);
+
+        let (code, _, retryable) = normalize_chat_error(&"provider request timed out with 408");
+        assert_eq!(code, ChatStreamErrorCode::ProviderUnavailable);
+        assert!(retryable);
+
+        let (code, message, retryable) =
+            normalize_chat_error(&"failed to decrypt content key for chat");
+        assert_eq!(code, ChatStreamErrorCode::EncryptionFailed);
+        assert!(message.contains("encrypted chat content"));
         assert!(!retryable);
     }
 
@@ -1581,6 +1651,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatSlashCommandRequest {
                     message_id: Some(&input_message_id_text),
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     command: "/ralph-loop",
                     content: "/ralph-loop copy the demo repo",
                     artifacts: &[],
@@ -1816,6 +1888,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatCommandRequest {
                     message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: "Use the Ralph Loop skill for this task.",
                     artifacts: &[],
                     project: Some("demo-project"),
@@ -2053,6 +2127,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatCommandRequest {
                     message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: "Use the Ralph Loop skill and write a note.",
                     artifacts: &[],
                     project: Some("demo-project"),
@@ -2225,6 +2301,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatCommandRequest {
                     message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: "Use the Ralph Loop skill and write a blocked file.",
                     artifacts: &[],
                     project: Some("demo-project"),
@@ -2429,6 +2507,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatCommandRequest {
                     message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: "Use the Ralph Loop skill, write a note, then read a missing file.",
                     artifacts: &[],
                     project: Some("demo-project"),
@@ -2603,6 +2683,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatCommandRequest {
                     message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: "Use the MCP skill to review the demo project.",
                     artifacts: &[],
                     project: Some("demo-project"),
@@ -2717,6 +2799,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatSlashCommandRequest {
                     message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     command: "/ralph-loop",
                     content: "/ralph-loop add prompt context",
                     artifacts: &[],
@@ -2853,6 +2937,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatSlashCommandRequest {
                     message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     command: "/ralph-loop",
                     content: "/ralph-loop produce the final answer",
                     artifacts: &[],
@@ -2980,6 +3066,8 @@ Original user message: {{ chat.message }}
                 &ctx,
                 ChatSlashCommandRequest {
                     message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     command: "/ralph-loop",
                     content: "/ralph-loop keep trying",
                     artifacts: &[],

@@ -741,6 +741,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
         match command {
             Command::ChatMessage {
                 id,
+                attempt_id,
+                retry_of_run_id,
                 content: _,
                 encrypted_content: Some(payload),
                 artifacts,
@@ -757,6 +759,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 Ok(content) => Ok(DecodeCommandResult::Command(Box::new(
                     Command::ChatMessage {
                         id,
+                        attempt_id,
+                        retry_of_run_id,
                         content,
                         encrypted_content: None,
                         artifacts,
@@ -783,6 +787,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
             } => Ok(self.unsecured_command_result(command, &command_label, "encrypted_content")),
             Command::ChatCommand {
                 id,
+                attempt_id,
+                retry_of_run_id,
                 command,
                 content: _,
                 encrypted_content: Some(payload),
@@ -798,6 +804,8 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 Ok(content) => Ok(DecodeCommandResult::Command(Box::new(
                     Command::ChatCommand {
                         id,
+                        attempt_id,
+                        retry_of_run_id,
                         command,
                         content,
                         encrypted_content: None,
@@ -1263,6 +1271,8 @@ mod tests {
                 &actor_ctx,
                 Command::ChatMessage {
                     id: Some("actor-confusion".into()),
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: String::new(),
                     encrypted_content: Some(encrypted_payload.clone()),
                     artifacts: Vec::new(),
@@ -1292,6 +1302,8 @@ mod tests {
                 &actor_ctx,
                 Command::ChatMessage {
                     id: Some("actor-confusion".into()),
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: String::new(),
                     encrypted_content: Some(encrypted_payload),
                     artifacts: Vec::new(),
@@ -1337,6 +1349,8 @@ mod tests {
                 &CodecContext::for_actor(actor_user_id),
                 Command::ChatMessage {
                     id: Some("plain".into()),
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: "plaintext prompt".into(),
                     encrypted_content: None,
                     artifacts: Vec::new(),
@@ -1375,6 +1389,8 @@ mod tests {
                 &CodecContext::for_actor(actor_user_id),
                 Command::ChatMessage {
                     id: Some("plain".into()),
+                    attempt_id: None,
+                    retry_of_run_id: None,
                     content: "plaintext prompt".into(),
                     encrypted_content: None,
                     artifacts: Vec::new(),
