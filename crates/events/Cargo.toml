@@ -12,7 +12,7 @@ categories = ["encoding", "api-bindings"]
 
 [dependencies]
 chrono = { workspace = true, features = ["serde"] }
-chrono-tz = { workspace = true }
+chrono-tz = { workspace = true, features = ["serde"] }
 cron = { workspace = true }
 nenjo-content = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

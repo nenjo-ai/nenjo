@@ -9,8 +9,8 @@ use anyhow::Result;
 use uuid::Uuid;
 
 use nenjo::manifest::{
-    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
-    RoutineManifest, RoutineStepManifest, RoutineStepType, model_manifest_slug,
+    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, RoutineManifest,
+    RoutineStepManifest, RoutineStepType, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
 use nenjo::{Slug, TaskInput};
@@ -70,11 +70,6 @@ fn make_agent(model: &ModelManifest) -> AgentManifest {
             system_prompt:
                 "You execute routine steps exactly. When given a task, complete it concisely, include the marker ROUTINE_OK in your final answer text, and then call pass_verdict exactly once as your final action with verdict 'pass' and brief reasoning."
                     .into(),
-            templates: PromptTemplates {
-                task_execution: "Task title: {{ task.title }}\nTask description: {{ task.description }}".into(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval: String::new(),
-            },
             ..Default::default()
         },
         color: None,

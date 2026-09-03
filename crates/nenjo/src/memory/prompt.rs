@@ -1,6 +1,4 @@
-//! Memory → prompt template variable injection.
-
-use std::collections::HashMap;
+//! Memory serialization for runtime-owned session context.
 
 use anyhow::Result;
 
@@ -33,14 +31,8 @@ fn categories_to_contexts(
         .collect()
 }
 
-/// Build memory template variables from all 3 tiers.
-///
-/// Returns a `HashMap` with keys: `memories`, `memories.core`,
-/// `memories.project`, `memories.shared` (only non-empty tiers).
-pub async fn build_memory_vars<M>(
-    memory: &M,
-    scope: &MemoryScope,
-) -> Result<HashMap<String, String>>
+/// Build the session memory snapshot from all three tiers.
+pub async fn build_memory_context<M>(memory: &M, scope: &MemoryScope) -> Result<String>
 where
     M: Memory + ?Sized,
 {
@@ -54,20 +46,14 @@ where
     };
     let shared_cats = memory.list_categories(&scope.shared).await?;
 
-    let mut vars = HashMap::new();
-
     if core_cats.is_empty() && project_cats.is_empty() && shared_cats.is_empty() {
-        return Ok(vars);
+        return Ok(String::new());
     }
 
     let core = if !core_cats.is_empty() {
         let ctx = MemoriesCoreContext {
             categories: categories_to_contexts(&core_cats),
         };
-        vars.insert(
-            "memories.core".to_string(),
-            nenjo_xml::to_xml_pretty(&ctx, 2),
-        );
         Some(ctx)
     } else {
         None
@@ -77,10 +63,6 @@ where
         let ctx = MemoriesProjectContext {
             categories: categories_to_contexts(&project_cats),
         };
-        vars.insert(
-            "memories.project".to_string(),
-            nenjo_xml::to_xml_pretty(&ctx, 2),
-        );
         Some(ctx)
     } else {
         None
@@ -90,10 +72,6 @@ where
         let ctx = MemoriesSharedContext {
             categories: categories_to_contexts(&shared_cats),
         };
-        vars.insert(
-            "memories.shared".to_string(),
-            nenjo_xml::to_xml_pretty(&ctx, 2),
-        );
         Some(ctx)
     } else {
         None
@@ -104,7 +82,5 @@ where
         project,
         shared,
     };
-    vars.insert("memories".to_string(), nenjo_xml::to_xml_pretty(&full, 2));
-
-    Ok(vars)
+    Ok(nenjo_xml::to_xml_pretty(&full, 2))
 }

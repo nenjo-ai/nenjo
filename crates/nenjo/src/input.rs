@@ -4,7 +4,7 @@
 //! locations, such as checked-out worktrees, can be supplied by the caller via
 //! [`ProjectLocation`].
 
-use nenjo_models::{ArtifactRef, ConversationMessage};
+use nenjo_models::{ArtifactRef, ConversationMessage, RuntimeContextMessage, RuntimeContextScope};
 use std::path::PathBuf;
 use uuid::Uuid;
 
@@ -20,12 +20,7 @@ pub(crate) fn render_context_from_agent_run(run: &AgentRun) -> crate::context::R
             ctx.task = task_to_context(task);
             ctx.git = git_to_context(run.execution.project_location.as_ref());
         }
-        AgentRunKind::Chat(chat) => {
-            ctx.chat_message = chat.message.clone();
-        }
-        AgentRunKind::FollowUp(follow_up) => {
-            ctx.chat_message = follow_up.message.clone();
-        }
+        AgentRunKind::Chat(_) | AgentRunKind::FollowUp(_) => {}
         AgentRunKind::Gate(gate) => {
             if let Some(task) = &gate.task {
                 ctx.task = task_to_context(task);
@@ -134,9 +129,12 @@ pub struct ChatInput {
     pub project: Option<Slug>,
     pub message: String,
     pub history: Vec<ConversationMessage>,
-    pub template_override: Option<String>,
+    /// Persisted turn contexts reused only when retrying the same logical turn.
+    #[doc(hidden)]
+    pub replayed_turn_contexts: Vec<RuntimeContextMessage>,
     /// Immutable artifact revisions attached to this user turn.
     pub artifacts: Vec<ArtifactRef>,
+    pub timezone: chrono_tz::Tz,
 }
 
 impl ChatInput {
@@ -145,8 +143,9 @@ impl ChatInput {
             project: None,
             message: message.into(),
             history: Vec::new(),
-            template_override: None,
+            replayed_turn_contexts: Vec::new(),
             artifacts: Vec::new(),
+            timezone: chrono_tz::UTC,
         }
     }
 
@@ -160,13 +159,27 @@ impl ChatInput {
         self
     }
 
-    pub fn template_override(mut self, template: impl Into<String>) -> Self {
-        self.template_override = Some(template.into());
+    #[doc(hidden)]
+    pub fn replayed_turn_contexts(
+        mut self,
+        contexts: impl IntoIterator<Item = RuntimeContextMessage>,
+    ) -> Self {
+        self.replayed_turn_contexts = contexts.into_iter().collect();
+        debug_assert!(
+            self.replayed_turn_contexts
+                .iter()
+                .all(|context| context.scope() == RuntimeContextScope::Turn)
+        );
         self
     }
 
     pub fn artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
         self.artifacts = artifacts;
+        self
+    }
+
+    pub fn timezone(mut self, timezone: chrono_tz::Tz) -> Self {
+        self.timezone = timezone;
         self
     }
 }
@@ -188,7 +201,7 @@ pub struct GateInput {
 }
 
 /// Runtime options common to agent and routine runs.
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct ExecutionOptions {
     pub execution_run_id: Option<Uuid>,
     pub session_binding: Option<SessionBinding>,
@@ -196,6 +209,20 @@ pub struct ExecutionOptions {
     pub project_location: Option<ProjectLocation>,
     /// Runtime argument bindings resolved by the host for this execution.
     pub argument_bindings: Vec<ResolvedArgumentBinding>,
+    /// IANA timezone used by runtime-owned clock context.
+    pub timezone: chrono_tz::Tz,
+}
+
+impl Default for ExecutionOptions {
+    fn default() -> Self {
+        Self {
+            execution_run_id: None,
+            session_binding: None,
+            project_location: None,
+            argument_bindings: Vec::new(),
+            timezone: chrono_tz::UTC,
+        }
+    }
 }
 
 impl ExecutionOptions {
@@ -219,6 +246,11 @@ impl ExecutionOptions {
         bindings: impl IntoIterator<Item = ResolvedArgumentBinding>,
     ) -> Self {
         self.argument_bindings.extend(bindings);
+        self
+    }
+
+    pub fn timezone(mut self, timezone: chrono_tz::Tz) -> Self {
+        self.timezone = timezone;
         self
     }
 }
@@ -247,9 +279,13 @@ impl AgentRun {
     }
 
     pub fn chat(chat: ChatInput) -> Self {
+        let timezone = chat.timezone;
         Self {
             kind: AgentRunKind::Chat(chat),
-            execution: ExecutionOptions::default(),
+            execution: ExecutionOptions {
+                timezone,
+                ..ExecutionOptions::default()
+            },
         }
     }
 
@@ -273,6 +309,11 @@ impl AgentRun {
         bindings: impl IntoIterator<Item = ResolvedArgumentBinding>,
     ) -> Self {
         self.execution.argument_bindings.extend(bindings);
+        self
+    }
+
+    pub fn timezone(mut self, timezone: chrono_tz::Tz) -> Self {
+        self.execution.timezone = timezone;
         self
     }
 }
@@ -317,6 +358,11 @@ impl RoutineRun {
         bindings: impl IntoIterator<Item = ResolvedArgumentBinding>,
     ) -> Self {
         self.execution.argument_bindings.extend(bindings);
+        self
+    }
+
+    pub fn timezone(mut self, timezone: chrono_tz::Tz) -> Self {
+        self.execution.timezone = timezone;
         self
     }
 }

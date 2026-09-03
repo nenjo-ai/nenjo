@@ -31,7 +31,7 @@ use super::instance::{AgentExecutionMode, AgentInstance, AgentPromptState, Agent
 use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
 use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
-use crate::manifest::{AbilityManifest, PromptConfig, PromptTemplates};
+use crate::manifest::{AbilityManifest, PromptConfig};
 use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
 
 pub const LIST_ASSIGNED_ABILITIES_TOOL_NAME: &str = "list_assigned_abilities";
@@ -657,6 +657,7 @@ where
     );
 
     let caller_history_snapshot = turn_loop::current_chat_history().unwrap_or_default();
+    let timezone = turn_loop::current_execution_timezone().unwrap_or(chrono_tz::UTC);
     let parent_events_tx = turn_loop::current_events_tx();
     let operation_id = next_ability_operation_id(ability_id);
     let controls = AsyncControls::new(AsyncControl::Inspect)
@@ -700,6 +701,7 @@ where
             call_id,
             task_description,
             caller_history_snapshot,
+            timezone,
             child_handle,
             op_handle,
             parent_events_tx: join_events_tx,
@@ -724,6 +726,7 @@ struct AbilityOperation<P: ProviderRuntime> {
     call_id: String,
     task_description: String,
     caller_history_snapshot: Vec<nenjo_models::ConversationMessage>,
+    timezone: chrono_tz::Tz,
     child_handle: AsyncOpChildHandle,
     op_handle: super::async_ops::AsyncOpHandle,
     parent_events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
@@ -739,6 +742,7 @@ where
         call_id,
         task_description,
         caller_history_snapshot,
+        timezone,
         child_handle,
         op_handle,
         parent_events_tx,
@@ -757,8 +761,9 @@ where
         message: task_description.clone(),
         history: vec![],
         project: None,
-        template_override: None,
+        replayed_turn_contexts: Vec::new(),
         artifacts: Vec::new(),
+        timezone,
     });
     if let Some(parent_tx) = parent_events_tx.clone() {
         debug!(
@@ -831,16 +836,28 @@ where
     messages.push(nenjo_models::ConversationMessage::developer(
         ABILITY_COMPLETION_GUIDANCE.to_string(),
     ));
+    messages.extend(
+        prompts
+            .session_context
+            .messages()
+            .iter()
+            .cloned()
+            .map(nenjo_models::ConversationMessage::runtime_context),
+    );
 
     if let crate::input::AgentRunKind::Chat(chat) = &task.kind {
         messages.extend(chat.history.iter().cloned());
     }
 
-    let user_message = if prompts.user_message.is_empty() {
-        task_description.clone()
-    } else {
-        prompts.user_message
-    };
+    messages.extend(
+        prompts
+            .turn_context
+            .messages()
+            .iter()
+            .cloned()
+            .map(nenjo_models::ConversationMessage::runtime_context),
+    );
+    let user_message = task_description.clone();
     debug!(
         ability = ability.name,
         user_message = %user_message,
@@ -1128,7 +1145,8 @@ async fn bridge_ability_transcript(
                 }
                 nenjo_models::ConversationMessage::AssistantToolCalls { .. }
                 | nenjo_models::ConversationMessage::ToolResults(_)
-                | nenjo_models::ConversationMessage::ArtifactAnalysis(_) => return,
+                | nenjo_models::ConversationMessage::ArtifactAnalysis(_)
+                | nenjo_models::ConversationMessage::RuntimeContext(_) => return,
             };
             handle.transcript(transcript, events_tx).await;
         }
@@ -1223,10 +1241,6 @@ where
     let prompt_config = PromptConfig {
         system_prompt: caller.prompt_config().system_prompt.clone(),
         developer_prompt: ability.prompt_config.developer_prompt.clone(),
-        templates: PromptTemplates {
-            chat_task: "{{ chat.message }}".into(),
-            ..Default::default()
-        },
         memory_profile: caller.prompt_config().memory_profile.clone(),
     };
 
@@ -1296,7 +1310,6 @@ where
 
     // Build a prompt context without ability recursion.
     let mut prompt_context = caller.prompt.context.clone();
-    prompt_context.agent_name = format!("{}:{}", caller.name(), ability.name);
     prompt_context.active_domain = None;
     prompt_context.append_active_domain_addon = false;
 
@@ -1325,7 +1338,7 @@ where
         prompt: AgentPromptState {
             context: prompt_context,
             renderer: caller.prompt.renderer.clone(),
-            memory_vars: caller.prompt.memory_vars.clone(),
+            memory_context: caller.prompt.memory_context.clone(),
         },
         runtime: AgentRuntime {
             tools,
@@ -1606,7 +1619,6 @@ mod tests {
                 prompt_config: PromptConfig {
                     system_prompt: "caller system".into(),
                     developer_prompt: "caller developer".into(),
-                    templates: Default::default(),
                     memory_profile: Default::default(),
                 },
                 color: None,
@@ -1644,8 +1656,6 @@ mod tests {
             },
             prompt: AgentPromptState {
                 context: PromptContext {
-                    agent_name: "nenji".into(),
-                    agent_description: "system agent".into(),
                     current_project: crate::manifest::ProjectManifest {
                         name: String::new(),
                         slug: crate::Slug::derive("project"),
@@ -1675,7 +1685,7 @@ mod tests {
                     argument_bindings: Default::default(),
                 },
                 renderer: ContextRenderer::from_blocks(&[]),
-                memory_vars: Default::default(),
+                memory_context: Default::default(),
             },
             runtime: AgentRuntime {
                 tools: vec![],
@@ -1721,8 +1731,9 @@ mod tests {
                 message: "build an agent".into(),
                 history: vec![],
                 project: None,
-                template_override: None,
+                replayed_turn_contexts: Vec::new(),
                 artifacts: Vec::new(),
+                timezone: chrono_tz::UTC,
             }))
             .unwrap();
 
@@ -2077,6 +2088,7 @@ mod tests {
             call_id: operation_id.to_string(),
             task_description: "Build the routine".into(),
             caller_history_snapshot: Vec::new(),
+            timezone: chrono_tz::UTC,
             child_handle: started.child,
             op_handle: started.handle,
             parent_events_tx: Some(events_tx),
@@ -2174,21 +2186,21 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ability_sub_instance_renders_context_blocks_and_user_message() {
+    async fn ability_sub_instance_renders_context_blocks_and_session_identity() {
         let mut caller = test_instance_with_active_domain();
         caller.manifest.prompt_config.system_prompt = "{{ pkg.nenjo.core.methodology }}".into();
         caller.prompt.renderer = ContextRenderer::from_blocks(&[
             RenderContextBlock {
                 name: "methodology".into(),
                 path: "pkg/nenjo/core".into(),
-                template: "<methodology>{{ agent.name }}</methodology>".into(),
+                template: "<methodology>METHOD</methodology>".into(),
                 package_name: None,
                 package_version: None,
             },
             RenderContextBlock {
                 name: "tool_usage".into(),
                 path: "pkg/nenjo/core".into(),
-                template: "<tool_usage>{{ agent.name }}</tool_usage>".into(),
+                template: "<tool_usage>TOOLS</tool_usage>".into(),
                 package_name: None,
                 package_version: None,
             },
@@ -2217,20 +2229,26 @@ mod tests {
                 message: "build an agent".into(),
                 history: vec![],
                 project: None,
-                template_override: None,
+                replayed_turn_contexts: Vec::new(),
                 artifacts: Vec::new(),
+                timezone: chrono_tz::UTC,
             }))
             .unwrap();
 
-        assert_eq!(
-            prompts.system,
-            "<methodology>nenji:agent_builder</methodology>"
+        assert_eq!(prompts.system, "<methodology>METHOD</methodology>");
+        assert_eq!(prompts.developer, "<tool_usage>TOOLS</tool_usage>");
+        assert!(prompts.session_context.messages().iter().any(|context| {
+            context.authority() == nenjo_models::RuntimeContextAuthority::Control
+                && context.content().contains("name=\"nenji:agent_builder\"")
+                && context.content().contains("description=\"Builds agents\"")
+        }));
+        assert!(
+            prompts
+                .turn_context
+                .messages()
+                .iter()
+                .any(|context| context.content().contains("kind=\"chat\""))
         );
-        assert_eq!(
-            prompts.developer,
-            "<tool_usage>nenji:agent_builder</tool_usage>"
-        );
-        assert_eq!(prompts.user_message, "build an agent");
     }
 
     #[tokio::test]

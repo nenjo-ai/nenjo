@@ -2187,9 +2187,6 @@ mod tests {
                 Some("manifest.agent.prompt") => Ok(Some(json!({
                     "system_prompt": "DECODED_AGENT_SYSTEM_PROMPT_123",
                     "developer_prompt": "DECODED_AGENT_DEVELOPER_PROMPT_456",
-                    "templates": {
-                        "chat": "DECODED_AGENT_CHAT_TEMPLATE_789"
-                    },
                     "memory_profile": {}
                 }))),
                 Some("manifest.ability.prompt") => Ok(Some(json!({
@@ -2605,8 +2602,7 @@ mod tests {
             .with_cached_org_id(Some(org_id));
 
         let prompt_patch = json!({
-            "developer_prompt": "Sensitive agent prompt",
-            "templates": { "chat": "Sensitive chat template" }
+            "developer_prompt": "Sensitive agent prompt"
         });
         let configured = backend
             .configure_agent(AgentConfigureParams {
@@ -2629,7 +2625,6 @@ mod tests {
         assert!(body.get("prompt_config").is_none());
         assert!(body.get("encrypted_payload").is_some());
         assert!(!requests[0].body.contains("Sensitive agent prompt"));
-        assert!(!requests[0].body.contains("Sensitive chat template"));
     }
 
     #[tokio::test]
@@ -2666,7 +2661,6 @@ mod tests {
                 "prompt_config": {
                     "system_prompt": "",
                     "developer_prompt": "",
-                    "templates": {},
                     "memory_profile": {}
                 },
                 "encrypted_payload": {
@@ -2727,11 +2721,6 @@ mod tests {
             configured.agent.prompt_config.developer_prompt,
             "DECODED_AGENT_DEVELOPER_PROMPT_456"
         );
-        assert_eq!(
-            configured.agent.prompt_config.templates.chat_task,
-            "DECODED_AGENT_CHAT_TEMPLATE_789"
-        );
-
         let requests = server.await.unwrap().unwrap();
         let body: serde_json::Value = serde_json::from_str(&requests[0].body).unwrap();
         assert_eq!(body["slug"], "reviewer");

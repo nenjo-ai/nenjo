@@ -23,7 +23,7 @@ use crate::native::{
     ReferenceToVideoRequest, TranscribeAudioRequest, TranscriptSegment, media_input_schema,
 };
 use crate::traits::{
-    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, ProviderStreamEvent,
+    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, ProviderStreamEvent,
     ProviderToolTrace, TokenUsage, ToolCall,
 };
 
@@ -708,7 +708,10 @@ fn native_responses_tools(
     Ok(tools)
 }
 
-fn responses_input(messages: &[ConversationMessage]) -> Vec<ResponsesInput> {
+fn responses_input(
+    messages: &[ConversationMessage],
+    supports_developer_role: bool,
+) -> Vec<ResponsesInput> {
     let mut input = Vec::with_capacity(messages.len());
 
     for message in messages {
@@ -736,13 +739,29 @@ fn responses_input(messages: &[ConversationMessage]) -> Vec<ResponsesInput> {
                 },
             )),
             ConversationMessage::Chat(message) => input.push(ResponsesInput::Message {
-                role: message.role.to_string(),
+                role: if message.role == ChatRole::Developer && !supports_developer_role {
+                    ChatRole::User
+                } else {
+                    message.role
+                }
+                .to_string(),
                 content: message.content.clone(),
             }),
             ConversationMessage::ArtifactAnalysis(analysis) => {
                 input.push(ResponsesInput::Message {
                     role: "user".to_string(),
                     content: analysis.model_context(),
+                });
+            }
+            ConversationMessage::RuntimeContext(context) => {
+                input.push(ResponsesInput::Message {
+                    role: if supports_developer_role {
+                        context.preferred_role()
+                    } else {
+                        context.fallback_role()
+                    }
+                    .to_string(),
+                    content: context.content().to_string(),
                 });
             }
         }
@@ -1161,7 +1180,7 @@ impl XAiProvider {
         let api_key = self.api_key()?;
         let body = ResponsesRequest {
             model: model.to_string(),
-            input: responses_input(request.messages),
+            input: responses_input(request.messages, self.supports_developer_role(model)),
             tools: native_responses_tools(native_tools, request.tools)?,
             temperature,
             stream: false,
@@ -1220,7 +1239,7 @@ impl XAiProvider {
         let api_key = self.api_key()?;
         let body = ResponsesRequest {
             model: model.to_string(),
-            input: responses_input(request.messages),
+            input: responses_input(request.messages, self.supports_developer_role(model)),
             tools: native_responses_tools(native_tools, request.tools)?,
             temperature,
             stream: true,
@@ -1864,6 +1883,27 @@ mod tests {
     fn creates_with_default_base_url() {
         let provider = XAiProvider::new(Some("xai-key"));
         assert_eq!(provider.base_url, XAI_DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn responses_input_runtime_control_role_follows_model_capability() {
+        let messages = vec![
+            ConversationMessage::developer("instructions"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "clock",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data("memory")),
+        ];
+
+        let supported = serde_json::to_value(responses_input(&messages, true)).unwrap();
+        assert_eq!(supported[0]["role"], "developer");
+        assert_eq!(supported[1]["role"], "developer");
+        assert_eq!(supported[2]["role"], "user");
+
+        let fallback = serde_json::to_value(responses_input(&messages, false)).unwrap();
+        assert_eq!(fallback[0]["role"], "user");
+        assert_eq!(fallback[1]["role"], "user");
+        assert_eq!(fallback[2]["role"], "user");
     }
 
     #[test]

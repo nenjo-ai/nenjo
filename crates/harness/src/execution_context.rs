@@ -194,6 +194,11 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 analysis.source_inputs.len(),
                 analysis.text.len()
             ),
+            nenjo_models::ConversationMessage::RuntimeContext(context) => format!(
+                "transcript_message(kind=runtime_context, scope={}, authority={})",
+                context.scope().as_str(),
+                context.authority().as_str()
+            ),
         },
         nenjo::TurnEvent::Paused => "paused".to_string(),
         nenjo::TurnEvent::Resumed => "resumed".to_string(),

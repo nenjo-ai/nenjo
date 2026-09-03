@@ -823,20 +823,7 @@ fn slug_segment(value: &str, fallback: &str) -> String {
 pub struct PromptConfig {
     pub system_prompt: String,
     pub developer_prompt: String,
-    pub templates: PromptTemplates,
     pub memory_profile: MemoryProfile,
-}
-
-/// Task-specific prompt templates.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct PromptTemplates {
-    /// Template for task execution.
-    #[serde(default, rename = "task")]
-    pub task_execution: String,
-    #[serde(default, rename = "chat")]
-    pub chat_task: String,
-    #[serde(default, rename = "gate")]
-    pub gate_eval: String,
 }
 
 /// Configures what a role wants its memory system to focus on.
@@ -872,7 +859,6 @@ impl MemoryProfile {
 ///     .with_name("reviewer")
 ///     .with_system_prompt("Act as a focused review worker.")
 ///     .with_developer_prompt("Be concise and evidence-driven.")
-///     .with_task_template("Task: {{ task.title }}\n\n{{ task.description }}")
 ///     .build()?;
 /// # let _ = agent;
 /// # Ok(())
@@ -948,14 +934,6 @@ impl AgentManifestBuilder {
     pub fn with_developer_prompt(mut self, prompt: impl Into<String>) -> Self {
         let mut prompt_config = self.prompt_config.take().unwrap_or_default();
         prompt_config.developer_prompt = prompt.into();
-        self.prompt_config = Some(prompt_config);
-        self
-    }
-
-    /// Set the task execution template without manually constructing [`PromptConfig`].
-    pub fn with_task_template(mut self, template: impl Into<String>) -> Self {
-        let mut prompt_config = self.prompt_config.take().unwrap_or_default();
-        prompt_config.templates.task_execution = template.into();
         self.prompt_config = Some(prompt_config);
         self
     }

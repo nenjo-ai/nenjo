@@ -187,9 +187,7 @@ impl AnthropicProvider {
 
         for message in messages {
             match message {
-                ConversationMessage::Chat(msg)
-                    if matches!(msg.role, ChatRole::System | ChatRole::Developer) =>
-                {
+                ConversationMessage::Chat(msg) if msg.role == ChatRole::System => {
                     match &mut system_prompt {
                         Some(existing) => {
                             existing.push_str("\n\n");
@@ -203,10 +201,10 @@ impl AnthropicProvider {
                 ConversationMessage::Chat(msg) => {
                     let role = match msg.role {
                         ChatRole::Assistant => "assistant",
-                        ChatRole::User => "user",
-                        ChatRole::System | ChatRole::Developer => unreachable!(
-                            "system and developer messages are handled by the guarded arm"
-                        ),
+                        ChatRole::Developer | ChatRole::User => "user",
+                        ChatRole::System => {
+                            unreachable!("system messages are handled by the guarded arm")
+                        }
                     };
                     native_messages.push(NativeMessage {
                         role: role.to_string(),
@@ -229,6 +227,14 @@ impl AnthropicProvider {
                         role: "user".to_string(),
                         content: vec![NativeContentOut::Text {
                             text: analysis.model_context(),
+                        }],
+                    });
+                }
+                ConversationMessage::RuntimeContext(context) => {
+                    native_messages.push(NativeMessage {
+                        role: "user".to_string(),
+                        content: vec![NativeContentOut::Text {
+                            text: context.content().to_string(),
                         }],
                     });
                 }
@@ -480,19 +486,35 @@ mod tests {
     }
 
     #[test]
-    fn convert_messages_combines_system_and_developer() {
+    fn convert_messages_keeps_one_system_and_degrades_developer_to_user() {
         let messages = vec![
             ConversationMessage::system("System prompt"),
             ConversationMessage::developer("Developer instructions"),
             ConversationMessage::user("hello"),
         ];
         let (system, native_msgs) = AnthropicProvider::convert_messages(&messages);
-        assert_eq!(
-            system.as_deref(),
-            Some("System prompt\n\nDeveloper instructions")
-        );
-        assert_eq!(native_msgs.len(), 1);
+        assert_eq!(system.as_deref(), Some("System prompt"));
+        assert_eq!(native_msgs.len(), 2);
         assert_eq!(native_msgs[0].role, "user");
+        assert!(matches!(
+            native_msgs[0].content.as_slice(),
+            [NativeContentOut::Text { text }] if text == "Developer instructions"
+        ));
+        assert_eq!(native_msgs[1].role, "user");
+    }
+
+    #[test]
+    fn runtime_control_context_is_mapped_to_user() {
+        let messages = vec![ConversationMessage::runtime_context(
+            crate::RuntimeContextMessage::turn_control("clock"),
+        )];
+        let (system, native_msgs) = AnthropicProvider::convert_messages(&messages);
+        assert!(system.is_none());
+        assert_eq!(native_msgs[0].role, "user");
+        assert!(matches!(
+            native_msgs[0].content.as_slice(),
+            [NativeContentOut::Text { text }] if text == "clock"
+        ));
     }
 
     #[test]

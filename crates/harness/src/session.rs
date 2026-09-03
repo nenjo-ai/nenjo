@@ -1,9 +1,10 @@
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use chrono::{DateTime, Utc};
 use dashmap::DashMap;
-use nenjo_models::ConversationMessage;
+use nenjo_models::{ConversationMessage, RuntimeContextAuthority, RuntimeContextScope};
 use nenjo_sessions::{
     ChatSessionUpsert, CheckpointQuery, DomainSessionUpsert, SessionCheckpoint,
     SessionCheckpointUpdate, SessionKind, SessionLeaseGrant, SessionLeaseRequest, SessionOwnerKind,
@@ -496,10 +497,92 @@ fn domain_deactivated_to_message(domain_command: &str, domain_name: &str) -> Con
     ))
 }
 
+#[derive(Clone)]
+struct RuntimeContextSnapshot {
+    scope: RuntimeContextScope,
+    control: Option<nenjo_models::RuntimeContextMessage>,
+    data: Option<nenjo_models::RuntimeContextMessage>,
+}
+
+impl RuntimeContextSnapshot {
+    fn new(scope: RuntimeContextScope) -> Self {
+        Self {
+            scope,
+            control: None,
+            data: None,
+        }
+    }
+
+    fn insert(&mut self, context: nenjo_models::RuntimeContextMessage) {
+        if context.scope() != self.scope {
+            return;
+        }
+        match context.authority() {
+            RuntimeContextAuthority::Control => self.control = Some(context),
+            RuntimeContextAuthority::Data => self.data = Some(context),
+        }
+    }
+
+    fn messages(&self) -> impl Iterator<Item = ConversationMessage> + '_ {
+        self.contexts().map(ConversationMessage::runtime_context)
+    }
+
+    fn contexts(&self) -> impl Iterator<Item = nenjo_models::RuntimeContextMessage> + '_ {
+        self.control.iter().chain(self.data.iter()).cloned()
+    }
+}
+
+pub(crate) fn canonical_turn_runtime_contexts(
+    events: &[SessionTranscriptEvent],
+    turn_id: Uuid,
+) -> Vec<nenjo_models::RuntimeContextMessage> {
+    let mut snapshot = RuntimeContextSnapshot::new(RuntimeContextScope::Turn);
+    for event in events {
+        if event.turn_id != Some(turn_id) {
+            continue;
+        }
+        if let SessionTranscriptEventPayload::ConversationMessage {
+            message: ConversationMessage::RuntimeContext(context),
+        } = &event.payload
+        {
+            snapshot.insert(context.clone());
+        }
+    }
+    snapshot.contexts().collect()
+}
+
 pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<ConversationMessage> {
-    events
-        .iter()
-        .filter_map(|event| match &event.payload {
+    let mut session_contexts = RuntimeContextSnapshot::new(RuntimeContextScope::Session);
+    let mut turn_contexts = HashMap::<Uuid, RuntimeContextSnapshot>::new();
+    for event in events {
+        match (&event.turn_id, &event.payload) {
+            (
+                None,
+                SessionTranscriptEventPayload::ConversationMessage {
+                    message: ConversationMessage::RuntimeContext(context),
+                },
+            ) if context.scope() == RuntimeContextScope::Session => {
+                session_contexts.insert(context.clone());
+            }
+            (
+                Some(turn_id),
+                SessionTranscriptEventPayload::ConversationMessage {
+                    message: ConversationMessage::RuntimeContext(context),
+                },
+            ) if context.scope() == RuntimeContextScope::Turn => {
+                turn_contexts
+                    .entry(*turn_id)
+                    .or_insert_with(|| RuntimeContextSnapshot::new(RuntimeContextScope::Turn))
+                    .insert(context.clone());
+            }
+            _ => {}
+        }
+    }
+    let mut inserted_turn_contexts = HashSet::new();
+    let mut history = session_contexts.messages().collect::<Vec<_>>();
+
+    for event in events {
+        let message = match &event.payload {
             SessionTranscriptEventPayload::ConversationMessage { message } => Some(message.clone()),
             SessionTranscriptEventPayload::DomainActivated {
                 domain_command,
@@ -515,8 +598,23 @@ pub fn replay_transcript_history(events: &[SessionTranscriptEvent]) -> Vec<Conve
                 ConversationMessage::developer(format!("Previous turn was interrupted: {reason}")),
             ),
             _ => None,
-        })
-        .collect()
+        };
+        let Some(message) = message else {
+            continue;
+        };
+        if matches!(message, ConversationMessage::RuntimeContext(_)) {
+            continue;
+        }
+        if let Some(turn_id) = event.turn_id
+            && inserted_turn_contexts.insert(turn_id)
+            && let Some(contexts) = turn_contexts.get(&turn_id)
+        {
+            history.extend(contexts.messages());
+        }
+        history.push(message);
+    }
+
+    history
 }
 
 #[derive(Debug, Clone)]
@@ -549,9 +647,25 @@ pub fn session_runtime_events_from_turn_event(
         transcript_payloads_from_turn_event(event)
             .into_iter()
             .map(|payload| {
+                let turn_id = match &payload {
+                    SessionTranscriptEventPayload::ConversationMessage {
+                        message: ConversationMessage::RuntimeContext(runtime_context),
+                    } if runtime_context.scope() == RuntimeContextScope::Session => None,
+                    SessionTranscriptEventPayload::ConversationMessage { .. }
+                    | SessionTranscriptEventPayload::DomainActivated { .. }
+                    | SessionTranscriptEventPayload::DomainDeactivated { .. }
+                    | SessionTranscriptEventPayload::ToolCalls { .. }
+                    | SessionTranscriptEventPayload::ToolResult { .. }
+                    | SessionTranscriptEventPayload::AbilityStarted { .. }
+                    | SessionTranscriptEventPayload::AbilityCompleted { .. }
+                    | SessionTranscriptEventPayload::DelegationStarted { .. }
+                    | SessionTranscriptEventPayload::DelegationCompleted { .. }
+                    | SessionTranscriptEventPayload::TurnCompleted { .. }
+                    | SessionTranscriptEventPayload::TurnInterrupted { .. } => context.turn_id,
+                };
                 SessionRuntimeEvent::Transcript(SessionTranscriptRecord {
                     session_id: context.session_id,
-                    turn_id: context.turn_id,
+                    turn_id,
                     payload,
                 })
             }),
@@ -969,6 +1083,7 @@ fn conversation_message_kind(message: &ConversationMessage) -> &'static str {
         ConversationMessage::AssistantToolCalls { .. } => "assistant_tool_calls",
         ConversationMessage::ToolResults(_) => "tool_results",
         ConversationMessage::ArtifactAnalysis(_) => "artifact_analysis",
+        ConversationMessage::RuntimeContext(_) => "runtime_context",
     }
 }
 
@@ -985,6 +1100,7 @@ fn conversation_message_preview(message: &ConversationMessage) -> Option<String>
             .collect::<Vec<_>>()
             .join("\n"),
         ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.clone(),
+        ConversationMessage::RuntimeContext(_) => return None,
     };
     (!text.is_empty()).then(|| preview(&text))
 }
@@ -1020,6 +1136,78 @@ mod tests {
             restored.content,
             "Previous turn was interrupted: cancelled by user"
         );
+    }
+
+    #[test]
+    fn replay_orders_runtime_context_before_the_turn_user_message() {
+        let session_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let recorded_at = Utc::now();
+        let event = |seq, turn_id, message| SessionTranscriptEvent {
+            session_id,
+            seq,
+            recorded_at,
+            turn_id,
+            payload: SessionTranscriptEventPayload::ConversationMessage { message },
+        };
+        let events = vec![
+            event(
+                1,
+                None,
+                ConversationMessage::runtime_context(
+                    nenjo_models::RuntimeContextMessage::session_control("session control bytes"),
+                ),
+            ),
+            event(
+                2,
+                None,
+                ConversationMessage::runtime_context(
+                    nenjo_models::RuntimeContextMessage::session_data("session data bytes"),
+                ),
+            ),
+            event(3, Some(turn_id), ConversationMessage::user("hello")),
+            event(
+                4,
+                Some(turn_id),
+                ConversationMessage::runtime_context(
+                    nenjo_models::RuntimeContextMessage::turn_control("turn control bytes"),
+                ),
+            ),
+            event(
+                5,
+                Some(turn_id),
+                ConversationMessage::runtime_context(
+                    nenjo_models::RuntimeContextMessage::turn_data("turn data bytes"),
+                ),
+            ),
+            event(
+                6,
+                Some(turn_id),
+                ConversationMessage::runtime_context(
+                    nenjo_models::RuntimeContextMessage::turn_control("latest turn control bytes"),
+                ),
+            ),
+            event(7, Some(turn_id), ConversationMessage::assistant("hi")),
+        ];
+
+        let history = replay_transcript_history(&events);
+
+        assert!(matches!(
+            history.as_slice(),
+            [
+                ConversationMessage::RuntimeContext(session_control),
+                ConversationMessage::RuntimeContext(session_data),
+                ConversationMessage::RuntimeContext(turn_control),
+                ConversationMessage::RuntimeContext(turn_data),
+                ConversationMessage::Chat(user),
+                ConversationMessage::Chat(assistant),
+            ] if session_control.content() == "session control bytes"
+                && session_data.content() == "session data bytes"
+                && turn_control.content() == "latest turn control bytes"
+                && turn_data.content() == "turn data bytes"
+                && user.content == "hello"
+                && assistant.content == "hi"
+        ));
     }
 
     #[test]

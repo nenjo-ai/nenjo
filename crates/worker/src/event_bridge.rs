@@ -601,6 +601,11 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 analysis.source_inputs.len(),
                 analysis.text.len()
             ),
+            nenjo_models::ConversationMessage::RuntimeContext(context) => format!(
+                "transcript_message(kind=runtime_context, scope={}, authority={})",
+                context.scope().as_str(),
+                context.authority().as_str()
+            ),
         },
         nenjo::TurnEvent::Paused => "paused".to_string(),
         nenjo::TurnEvent::Resumed => "resumed".to_string(),
@@ -1481,8 +1486,8 @@ mod tests {
     use super::*;
     use nenjo::Slug;
     use nenjo::manifest::{
-        AgentManifest, Manifest, PromptConfig, PromptTemplates, RoutineManifest,
-        RoutineStepManifest, RoutineStepType,
+        AgentManifest, Manifest, PromptConfig, RoutineManifest, RoutineStepManifest,
+        RoutineStepType,
     };
 
     fn expect_workflow_step(
@@ -1840,14 +1845,7 @@ mod tests {
                 name: "Code Implementer".to_string(),
                 slug: agent_slug,
                 description: None,
-                prompt_config: PromptConfig {
-                    templates: PromptTemplates {
-                        task_execution: String::new(),
-                        chat_task: String::new(),
-                        gate_eval: String::new(),
-                    },
-                    ..Default::default()
-                },
+                prompt_config: PromptConfig::default(),
                 color: None,
                 model: None,
                 domains: Vec::new(),

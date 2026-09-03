@@ -29,8 +29,8 @@ use nenjo::{LocalManifestStore, ManifestReader, ManifestWriter};
 use nenjo_events::{
     Capability, EncryptedPayload, ManifestResourcePayload, ModelAssignmentBinding,
     ModelAssignmentsManifestUpdate, ModelCapabilityDefaultBinding,
-    ModelCapabilityDefaultsManifestUpdate, PackageArgumentBindingUpdate, ResourceAction,
-    ResourceType, TaskScheduleAssignment,
+    ModelCapabilityDefaultsManifestUpdate, OrganizationSettings, PackageArgumentBindingUpdate,
+    ResourceAction, ResourceType, TaskScheduleAssignment,
 };
 #[cfg(test)]
 use nenjo_models::{ModelCapabilityId, ModelExecutionMode, ModelModality};
@@ -72,6 +72,8 @@ impl BootstrapCredentialBinding {
 struct BootstrapManifestResponse {
     auth: BootstrapAuth,
     #[serde(default)]
+    organization_settings: OrganizationSettings,
+    #[serde(default)]
     routines: Vec<BootstrapRoutineManifest>,
     #[serde(default)]
     models: Vec<BootstrapModelManifest>,
@@ -109,6 +111,7 @@ struct BootstrapManifestResponse {
 
 struct HydratedBootstrap {
     auth: BootstrapAuth,
+    organization_settings: OrganizationSettings,
     manifest: Manifest,
     resource_ids: PlatformResourceIdSnapshot,
     media_providers: Vec<MediaProviderConfig>,
@@ -651,6 +654,11 @@ async fn sync_bootstrap_manifest(
 
     // Write auth info used for org-scoped transport setup and ACK routing.
     atomic_write_json(manifests_dir, "auth.json", &data.auth)?;
+    atomic_write_json(
+        manifests_dir,
+        "organization_settings.json",
+        &data.organization_settings,
+    )?;
     atomic_write_json(manifests_dir, "nats.json", &data.nats)?;
     atomic_write_json(manifests_dir, "media_providers.json", &data.media_providers)?;
     atomic_write_json(
@@ -838,6 +846,7 @@ async fn hydrate_bootstrap_manifest(
 
     Ok(HydratedBootstrap {
         auth: bootstrap.auth.clone(),
+        organization_settings: bootstrap.organization_settings,
         manifest: Manifest {
             routines,
             models,
@@ -1071,6 +1080,19 @@ pub fn load_cached_agent_model_assignments(manifests_dir: &Path) -> Vec<AgentMod
 /// Load bootstrap org capability defaults.
 pub fn load_cached_capability_defaults(manifests_dir: &Path) -> Vec<ModelCapabilityDefaultBinding> {
     load_cached_json_vec(manifests_dir, "capability_defaults.json")
+}
+
+/// Load the organization-wide runtime settings cached during worker bootstrap.
+pub fn load_cached_organization_settings(manifests_dir: &Path) -> OrganizationSettings {
+    let path = manifests_dir.join("organization_settings.json");
+    let content = match std::fs::read_to_string(&path) {
+        Ok(content) => content,
+        Err(_) => return OrganizationSettings::default(),
+    };
+    serde_json::from_str(&content).unwrap_or_else(|error| {
+        warn!(file = %path.display(), %error, "Failed to parse cached organization settings; using UTC");
+        OrganizationSettings::default()
+    })
 }
 
 /// Load the complete task schedule list cached during worker bootstrap/sync.
@@ -1313,6 +1335,14 @@ impl WorkerManifestStore {
 }
 
 impl WorkerManifestCache {
+    /// Persist a full replacement organization settings snapshot.
+    pub(crate) fn persist_organization_settings(
+        &self,
+        settings: &OrganizationSettings,
+    ) -> Result<()> {
+        atomic_write_json(&self.manifests_dir, "organization_settings.json", settings)
+    }
+
     /// Upsert one configured model in the canonical `models.json` cache.
     pub fn upsert_model(&self, model: &CachedModelManifest) -> Result<()> {
         let mut models = load_cached_models(&self.manifests_dir);
@@ -2416,6 +2446,34 @@ mod tests {
             panic!("expected one capability default")
         };
         assert_eq!(default.model_id, model_id);
+        assert_eq!(bootstrap.organization_settings.timezone, chrono_tz::UTC);
+    }
+
+    #[test]
+    fn organization_settings_cache_defaults_and_replaces_atomically() {
+        let root = tempfile::tempdir().unwrap();
+        let cache = WorkerManifestCache {
+            manifests_dir: root.path().join("manifests"),
+            workspace_dir: root.path().join("workspace"),
+            state_dir: root.path().join("state"),
+            config_dir: root.path().join("config"),
+        };
+
+        assert_eq!(
+            load_cached_organization_settings(&cache.manifests_dir).timezone,
+            chrono_tz::UTC
+        );
+
+        cache
+            .persist_organization_settings(&OrganizationSettings {
+                timezone: chrono_tz::America::Chicago,
+            })
+            .unwrap();
+
+        assert_eq!(
+            load_cached_organization_settings(&cache.manifests_dir).timezone,
+            chrono_tz::America::Chicago
+        );
     }
 
     #[tokio::test]

@@ -11,7 +11,9 @@ use anyhow::Result;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
-use nenjo_models::{ArtifactInput, ArtifactInputSource, ChatMessage, ConversationMessage};
+use nenjo_models::{
+    ArtifactInput, ArtifactInputSource, ChatMessage, ConversationMessage, RuntimeContextScope,
+};
 use tracing::{debug, info, trace};
 use uuid::Uuid;
 
@@ -131,11 +133,15 @@ pub(crate) fn build_instruction_messages(
     developer_prompt: &str,
     supports_developer_role: bool,
 ) -> Vec<ConversationMessage> {
-    let combined = [system_prompt, developer_prompt]
-        .into_iter()
-        .filter(|part| !part.trim().is_empty())
-        .collect::<Vec<_>>()
-        .join("\n\n");
+    let combined = [
+        system_prompt,
+        developer_prompt,
+        crate::context::runtime::RUNTIME_CONTEXT_PROTOCOL,
+    ]
+    .into_iter()
+    .filter(|part| !part.trim().is_empty())
+    .collect::<Vec<_>>()
+    .join("\n\n");
 
     if combined.is_empty() {
         Vec::new()
@@ -469,10 +475,11 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         parent_handle: Option<ParentHandle<P>>,
         response_delivery: ProviderResponseDelivery,
     ) -> Result<ExecutionHandle> {
-        let memory_vars = if let (Some(mem), Some(scope)) = (&self.memory, &self.memory_scope)
-            && self.instance.prompt.memory_vars.is_empty()
+        let memory_context = if let (Some(mem), Some(scope)) = (&self.memory, &self.memory_scope)
+            && self.instance.prompt.memory_context.is_empty()
+            && !run_has_session_context(&run)
         {
-            Some(memory::build_memory_vars(mem.as_ref(), scope).await?)
+            Some(memory::build_memory_context(mem.as_ref(), scope).await?)
         } else {
             None
         };
@@ -551,23 +558,16 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         // 3. Build prompts.
         let prompts = inst
-            .build_prompts_with_vars(&run, memory_vars.as_ref())
+            .build_prompts_with_memory_context(&run, memory_context.as_deref())
             .context("failed to build prompts")?;
 
-        let system_prompt = prompts.system;
-        let developer_prompt = prompts.developer;
-        let templated_user_message = prompts.user_message;
-        let user_message = if !templated_user_message.is_empty() {
-            templated_user_message
-        } else {
-            raw_user_message(&run)
-        };
+        let user_message = raw_user_message(&run);
         trace!(
             agent = inst.name(),
-            system_prompt_len = system_prompt.len(),
-            developer_prompt_len = developer_prompt.len(),
+            system_prompt_len = prompts.system.len(),
+            developer_prompt_len = prompts.developer.len(),
             user_message_len = user_message.len(),
-            "Rendered agent prompts"
+            "Built agent prompt plan"
         );
 
         // 4. Build initial messages.
@@ -575,14 +575,46 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             .model
             .model_provider
             .supports_developer_role(&inst.model.model_name);
-        let mut messages: Vec<ConversationMessage> =
-            build_instruction_messages(&system_prompt, &developer_prompt, supports_developer_role);
+        let mut messages: Vec<ConversationMessage> = build_instruction_messages(
+            &prompts.system,
+            &prompts.developer,
+            supports_developer_role,
+        );
+
+        messages.extend(
+            prompts
+                .session_context
+                .messages()
+                .iter()
+                .cloned()
+                .map(ConversationMessage::runtime_context),
+        );
 
         match &run.kind {
-            AgentRunKind::Chat(chat) => messages.extend(chat.history.iter().cloned()),
-            AgentRunKind::FollowUp(follow_up) => messages.extend(follow_up.history.iter().cloned()),
+            AgentRunKind::Chat(chat) => messages.extend(
+                chat.history
+                    .iter()
+                    .filter(|message| !is_session_context(message))
+                    .cloned(),
+            ),
+            AgentRunKind::FollowUp(follow_up) => messages.extend(
+                follow_up
+                    .history
+                    .iter()
+                    .filter(|message| !is_session_context(message))
+                    .cloned(),
+            ),
             _ => {}
         }
+
+        messages.extend(
+            prompts
+                .turn_context
+                .messages()
+                .iter()
+                .cloned()
+                .map(ConversationMessage::runtime_context),
+        );
 
         let artifact_inputs = match &run.kind {
             AgentRunKind::Chat(chat) => chat
@@ -611,6 +643,21 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             ChatMessage::user(&user_message).with_artifacts(artifact_inputs),
         ));
 
+        if let Some(session_contexts) = prompts.session_context.created_messages() {
+            for context in session_contexts {
+                let _ = events_tx.send(TurnEvent::TranscriptMessage {
+                    message: ConversationMessage::runtime_context(context.clone()),
+                });
+            }
+        }
+        if let Some(turn_contexts) = prompts.turn_context.created_messages() {
+            for context in turn_contexts {
+                let _ = events_tx.send(TurnEvent::TranscriptMessage {
+                    message: ConversationMessage::runtime_context(context.clone()),
+                });
+            }
+        }
+
         let task_id = match &run.kind {
             AgentRunKind::Task(task) => Some(task.task_id),
             AgentRunKind::Gate(crate::input::GateInput {
@@ -620,16 +667,20 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         };
 
         let cancel = inst.runtime.execution_cancel.clone();
+        let timezone = run.execution.timezone;
         let join = tokio::spawn(async move {
             let completion = turn_loop::TurnCompletion::Natural;
-            let mut output = turn_loop::run(
-                &inst,
-                messages,
-                Some(events_tx),
-                Some(loop_pause),
-                Some(turn_input_rx),
-                completion,
-                response_delivery,
+            let mut output = turn_loop::scope_current_execution_timezone(
+                timezone,
+                turn_loop::run(
+                    &inst,
+                    messages,
+                    Some(events_tx),
+                    Some(loop_pause),
+                    Some(turn_input_rx),
+                    completion,
+                    response_delivery,
+                ),
             )
             .await?;
             output.task_id = task_id;
@@ -659,6 +710,22 @@ fn raw_user_message(run: &AgentRun) -> String {
         }
         AgentRunKind::Gate(gate) => gate.previous_result.output.clone(),
     }
+}
+
+fn run_has_session_context(run: &AgentRun) -> bool {
+    match &run.kind {
+        AgentRunKind::Chat(chat) => chat.history.iter().any(is_session_context),
+        AgentRunKind::FollowUp(follow_up) => follow_up.history.iter().any(is_session_context),
+        AgentRunKind::Task(_) | AgentRunKind::Gate(_) => false,
+    }
+}
+
+fn is_session_context(message: &ConversationMessage) -> bool {
+    matches!(
+        message,
+        ConversationMessage::RuntimeContext(context)
+            if context.scope() == RuntimeContextScope::Session
+    )
 }
 
 fn domain_is_assigned(assigned_domains: &[Slug], domain: &DomainManifest) -> bool {
@@ -737,7 +804,13 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let message = messages[0].as_chat().unwrap();
         assert_eq!(message.role, nenjo_models::ChatRole::Developer);
-        assert_eq!(message.content, "root\n\napp rules");
+        assert_eq!(
+            message.content,
+            format!(
+                "root\n\napp rules\n\n{}",
+                crate::context::runtime::RUNTIME_CONTEXT_PROTOCOL
+            )
+        );
     }
 
     #[test]
@@ -746,6 +819,12 @@ mod tests {
         assert_eq!(messages.len(), 1);
         let message = messages[0].as_chat().unwrap();
         assert_eq!(message.role, nenjo_models::ChatRole::System);
-        assert_eq!(message.content, "root\n\napp rules");
+        assert_eq!(
+            message.content,
+            format!(
+                "root\n\napp rules\n\n{}",
+                crate::context::runtime::RUNTIME_CONTEXT_PROTOCOL
+            )
+        );
     }
 }

@@ -4,8 +4,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use nenjo::manifest::{
-    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
-    model_manifest_slug,
+    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, model_manifest_slug,
 };
 use nenjo::memory::{MarkdownMemory, MemoryScope};
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
@@ -90,12 +89,7 @@ fn test_manifest() -> Manifest {
         slug: Slug::derive("memory-agent"),
         description: Some("An agent with memory".into()),
         prompt_config: PromptConfig {
-            system_prompt: "You are a helpful assistant.\n{{ memories }}".into(),
-            templates: PromptTemplates {
-                task_execution: String::new(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval: String::new(),
-            },
+            system_prompt: "You are a helpful assistant.".into(),
             ..Default::default()
         },
         color: None,
@@ -274,7 +268,7 @@ async fn memory_forget() {
 }
 
 #[tokio::test]
-async fn memory_vars_injected_into_prompts() {
+async fn memory_context_contains_all_tiers() {
     let dir = tempfile::tempdir().unwrap();
     let memory = Arc::new(MarkdownMemory::new(dir.path()));
     let scope = MemoryScope::new("memory-agent", Some("test-project"));
@@ -295,55 +289,45 @@ async fn memory_vars_injected_into_prompts() {
         .await
         .unwrap();
 
-    // Build memory vars
-    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
+    let context = nenjo::memory::build_memory_context(memory.as_ref(), &scope)
         .await
         .unwrap();
 
-    let full = vars.get("memories").expect("should have memories key");
-    assert!(full.contains("<memories>"), "should have memories root tag");
-    assert!(full.contains("<memories-core>"), "should have core tier");
     assert!(
-        full.contains("<memories-project>"),
+        context.contains("<memories>"),
+        "should have memories root tag"
+    );
+    assert!(context.contains("<memories-core>"), "should have core tier");
+    assert!(
+        context.contains("<memories-project>"),
         "should have project tier"
     );
     assert!(
-        full.contains("<memories-shared>"),
+        context.contains("<memories-shared>"),
         "should have shared tier"
     );
     assert!(
-        full.contains("User prefers Rust"),
+        context.contains("User prefers Rust"),
         "should contain project fact"
     );
     assert!(
-        full.contains("Distributed systems"),
+        context.contains("Distributed systems"),
         "should contain core fact"
     );
-    assert!(full.contains("PostgreSQL"), "should contain shared fact");
-
-    // Individual tiers
-    assert!(vars.contains_key("memories.core"), "should have core key");
-    assert!(
-        vars.contains_key("memories.project"),
-        "should have project key"
-    );
-    assert!(
-        vars.contains_key("memories.shared"),
-        "should have shared key"
-    );
+    assert!(context.contains("PostgreSQL"), "should contain shared fact");
 }
 
 #[tokio::test]
-async fn memory_vars_empty_when_no_facts() {
+async fn memory_context_empty_when_no_facts() {
     let dir = tempfile::tempdir().unwrap();
     let memory = Arc::new(MarkdownMemory::new(dir.path()));
     let scope = MemoryScope::new("empty-agent", Some("empty-project"));
 
-    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
+    let context = nenjo::memory::build_memory_context(memory.as_ref(), &scope)
         .await
         .unwrap();
 
-    assert!(vars.is_empty(), "should be empty when no facts exist");
+    assert!(context.is_empty(), "should be empty when no facts exist");
 }
 
 // ---------------------------------------------------------------------------
@@ -373,25 +357,28 @@ async fn scope_project_agent_three_tiers_isolated() {
         .await
         .unwrap();
 
-    // Build memory vars — all three tiers present
-    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
+    let context = nenjo::memory::build_memory_context(memory.as_ref(), &scope)
         .await
         .unwrap();
-    let full = &vars["memories"];
 
-    assert!(full.contains("project-only"));
-    assert!(full.contains("core-only"));
-    assert!(full.contains("shared-only"));
+    assert!(context.contains("project-only"));
+    assert!(context.contains("core-only"));
+    assert!(context.contains("shared-only"));
 
-    // Each tier is separate in vars
-    assert!(vars["memories.project"].contains("project-only"));
-    assert!(!vars["memories.project"].contains("core-only"));
+    let project = nenjo_xml::xml::parse::extract_tag_content(&context, "memories-project")
+        .expect("project memory tier");
+    assert!(project.contains("project-only"));
+    assert!(!project.contains("core-only"));
 
-    assert!(vars["memories.core"].contains("core-only"));
-    assert!(!vars["memories.core"].contains("project-only"));
+    let core = nenjo_xml::xml::parse::extract_tag_content(&context, "memories-core")
+        .expect("core memory tier");
+    assert!(core.contains("core-only"));
+    assert!(!core.contains("project-only"));
 
-    assert!(vars["memories.shared"].contains("shared-only"));
-    assert!(!vars["memories.shared"].contains("project-only"));
+    let shared = nenjo_xml::xml::parse::extract_tag_content(&context, "memories-shared")
+        .expect("shared memory tier");
+    assert!(shared.contains("shared-only"));
+    assert!(!shared.contains("project-only"));
 }
 
 #[tokio::test]
@@ -410,15 +397,16 @@ async fn scope_system_agent_collapses_to_core() {
         .unwrap();
     memory.append(&scope.core, "prefs", "fact-b").await.unwrap();
 
-    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope)
+    let context = nenjo::memory::build_memory_context(memory.as_ref(), &scope)
         .await
         .unwrap();
 
     // Project tier is skipped when it resolves to the same namespace as core
     // (system agents with no project), so only core should appear.
-    assert!(!vars.contains_key("memories.project"));
+    assert!(!context.contains("<memories-project>"));
 
-    let core_xml = &vars["memories.core"];
+    let core_xml = nenjo_xml::xml::parse::extract_tag_content(&context, "memories-core")
+        .expect("core memory tier");
     assert!(core_xml.contains("fact-a"));
     assert!(core_xml.contains("fact-b"));
 }
@@ -440,10 +428,12 @@ async fn scope_shared_visible_across_agents() {
         .unwrap();
 
     // Reviewer can see it via their shared scope (same project)
-    let vars = nenjo::memory::build_memory_vars(memory.as_ref(), &scope_reviewer)
+    let context = nenjo::memory::build_memory_context(memory.as_ref(), &scope_reviewer)
         .await
         .unwrap();
-    assert!(vars["memories.shared"].contains("Always write tests"));
+    let shared = nenjo_xml::xml::parse::extract_tag_content(&context, "memories-shared")
+        .expect("shared memory tier");
+    assert!(shared.contains("Always write tests"));
 
     // But reviewer can't see coder's project-scoped memories
     let reviewer_project = memory
@@ -458,7 +448,7 @@ async fn scope_shared_visible_across_agents() {
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn ability_inherits_memory_vars() {
+async fn ability_inherits_memory_context() {
     use nenjo::manifest::AbilityManifest;
 
     let dir = tempfile::tempdir().unwrap();
@@ -466,7 +456,7 @@ async fn ability_inherits_memory_vars() {
 
     use nenjo::memory::Memory;
 
-    // Pre-populate memory so it shows up in vars
+    // Pre-populate memory so it shows up in session context.
     let scope = MemoryScope::new("ability-agent", Some("test-project"));
     memory
         .append(&scope.core, "expertise", "Knows Rust deeply")
@@ -512,12 +502,7 @@ async fn ability_inherits_memory_vars() {
         slug: Slug::derive("ability-agent"),
         description: Some("Agent with abilities".into()),
         prompt_config: PromptConfig {
-            system_prompt: "You are helpful.\n{{ memories }}".into(),
-            templates: PromptTemplates {
-                task_execution: String::new(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval: String::new(),
-            },
+            system_prompt: "You are helpful.".into(),
             ..Default::default()
         },
         color: None,
@@ -581,8 +566,8 @@ async fn ability_inherits_memory_vars() {
     );
     assert!(names.contains(&"save_memory"), "should have save_memory");
 
-    // Memory vars should be empty on the instance (loaded at execution time)
-    // but the memory backend is configured on the runner
+    // Memory is loaded into session context at execution time while the backend
+    // remains configured on the runner.
     assert!(
         runner.memory().is_some(),
         "runner should have memory backend"
@@ -641,12 +626,7 @@ async fn domain_expansion_preserves_memory() {
         slug: Slug::derive("domain-agent"),
         description: Some("Agent with domains".into()),
         prompt_config: PromptConfig {
-            system_prompt: "You are helpful.\n{{ memories }}".into(),
-            templates: PromptTemplates {
-                task_execution: String::new(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval: String::new(),
-            },
+            system_prompt: "You are helpful.".into(),
             ..Default::default()
         },
         color: None,

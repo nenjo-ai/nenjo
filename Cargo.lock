@@ -618,6 +618,7 @@ checksum = "a6139a8597ed92cf816dfb33f5dd6cf0bb93a6adc938f11039f371bc5bcd26c3"
 dependencies = [
  "chrono",
  "phf 0.12.1",
+ "serde",
 ]
 
 [[package]]
@@ -2614,6 +2615,7 @@ dependencies = [
  "async-trait",
  "bon",
  "chrono",
+ "chrono-tz",
  "dashmap",
  "derive_builder",
  "futures-util",
@@ -2727,6 +2729,7 @@ dependencies = [
  "arc-swap",
  "async-trait",
  "chrono",
+ "chrono-tz",
  "dashmap",
  "nenjo",
  "nenjo-events",
@@ -2826,6 +2829,7 @@ dependencies = [
  "nenjo",
  "nenjo-models",
  "nenjo-xml",
+ "regex",
  "reqwest",
  "semver",
  "serde",

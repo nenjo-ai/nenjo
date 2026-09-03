@@ -1173,8 +1173,7 @@ mod tests {
     use nenjo::manifest::{
         AbilityManifest, AgentManifest, ContextBlockManifest, CouncilManifest,
         CouncilMemberManifest, DomainManifest, Manifest, ModelManifest, ProjectManifest,
-        PromptConfig, PromptTemplates, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest,
-        RoutineStepType,
+        PromptConfig, RoutineEdgeManifest, RoutineManifest, RoutineStepManifest, RoutineStepType,
     };
     use nenjo::manifest::{AbilityPromptConfig, DomainPromptConfig};
 
@@ -1248,11 +1247,6 @@ mod tests {
             prompt_config: PromptConfig {
                 system_prompt: "You are a coding agent.".into(),
                 developer_prompt: "Follow repo conventions.".into(),
-                templates: PromptTemplates {
-                    chat_task: "Respond to chat".into(),
-                    task_execution: "Execute task".into(),
-                    ..Default::default()
-                },
                 ..Default::default()
             },
             color: Some("#123456".into()),
@@ -1569,7 +1563,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn configure_agent_prompt_merges_nested_patch() {
+    async fn configure_agent_prompt_merges_nested_patch_and_ignores_removed_templates() {
         let TestContext { backend, agent, .. } = backend().await;
 
         let result = backend
@@ -1577,10 +1571,7 @@ mod tests {
                 data: serde_json::from_value(serde_json::json!({
                     "slug": agent.slug,
                     "prompt_config": {
-                        "developer_prompt": "Prefer minimal diffs.",
-                        "templates": {
-                            "chat": "New chat template"
-                        }
+                        "developer_prompt": "Prefer minimal diffs."
                     }
                 }))
                 .unwrap(),
@@ -1591,8 +1582,6 @@ mod tests {
         let prompt_config = result.agent.prompt_config;
         assert_eq!(prompt_config.system_prompt, "You are a coding agent.");
         assert_eq!(prompt_config.developer_prompt, "Prefer minimal diffs.");
-        assert_eq!(prompt_config.templates.chat_task, "New chat template");
-        assert_eq!(prompt_config.templates.task_execution, "Execute task");
     }
 
     #[tokio::test]
@@ -1636,9 +1625,7 @@ mod tests {
                 "slug": agent.slug.clone(),
                 "name": "planner",
                 "prompt_config": {
-                    "templates": {
-                        "chat": "Planner chat"
-                    }
+                    "developer_prompt": "Plan before editing."
                 }
             }),
         )
@@ -1647,8 +1634,8 @@ mod tests {
 
         assert_eq!(result["agent"]["name"], serde_json::json!("planner"));
         assert_eq!(
-            result["agent"]["prompt_config"]["templates"]["chat"],
-            serde_json::json!("Planner chat")
+            result["agent"]["prompt_config"]["developer_prompt"],
+            serde_json::json!("Plan before editing.")
         );
     }
 

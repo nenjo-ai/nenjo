@@ -38,6 +38,7 @@ where
 }
 
 fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {
+    run.execution.timezone = state.input.timezone;
     if let Some(git) = state.input.git.clone() {
         run.execution.project_location = Some(ProjectLocation::from_git(git));
     }
@@ -71,13 +72,19 @@ where
 
 /// Execute a council directly from a chat turn, reusing the same strategy
 /// implementation used by routine council steps.
+#[derive(Debug, Clone)]
+pub struct CouncilChatInput {
+    pub council: Slug,
+    pub project: Option<Slug>,
+    pub message: String,
+    pub artifacts: Vec<nenjo_models::ArtifactRef>,
+    pub session_id: Uuid,
+    pub timezone: chrono_tz::Tz,
+}
+
 pub async fn execute_council_chat<P>(
     provider: &P,
-    council: Slug,
-    project: Option<Slug>,
-    message: String,
-    artifacts: Vec<nenjo_models::ArtifactRef>,
-    session_id: Uuid,
+    input: CouncilChatInput,
     events_tx: &mpsc::UnboundedSender<RoutineEvent>,
 ) -> Result<StepResult>
 where
@@ -88,18 +95,19 @@ where
         .with_routine(Slug::derive("council_chat"))
         .with_name("Council Chat")
         .with_step_type(crate::manifest::RoutineStepType::Council)
-        .with_council(council)
+        .with_council(input.council)
         .build()?;
-    let mut input = RoutineInput::new("Council chat", message)
-        .with_artifacts(artifacts)
+    let mut routine_input = RoutineInput::new("Council chat", input.message)
+        .with_artifacts(input.artifacts)
         .with_session_binding(SessionBinding {
-            session_id,
+            session_id: input.session_id,
             memory_namespace: None,
         });
-    if let Some(project_manifest) = project_manifest_for_slug(provider, project.as_ref()) {
-        input = input.with_project_context(&project_manifest);
+    routine_input.timezone = input.timezone;
+    if let Some(project_manifest) = project_manifest_for_slug(provider, input.project.as_ref()) {
+        routine_input = routine_input.with_project_context(&project_manifest);
     }
-    let state = RoutineState::new(input);
+    let state = RoutineState::new(routine_input);
     let invocation = CouncilInvocation::Chat {
         history: Vec::new(),
     };
@@ -247,8 +255,9 @@ impl CouncilInvocation {
                 message: instruction.into(),
                 history: history.clone(),
                 project: state.input.project.clone(),
-                template_override: None,
+                replayed_turn_contexts: Vec::new(),
                 artifacts: state.input.artifacts.clone(),
+                timezone: state.input.timezone,
             }),
             CouncilInvocation::Task => {
                 AgentRun::task(task_input_for_instruction(state, instruction.into()))

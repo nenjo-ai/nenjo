@@ -419,7 +419,7 @@ impl SecurityPolicy {
     /// Create a SecurityPolicy with a specific workspace directory.
     ///
     /// Use this instead of `Default` when a custom nenjo directory is configured
-    /// so that tool scoping and template variables resolve to the correct paths.
+    /// so tool scoping and runtime context resolve to the correct paths.
     pub fn with_workspace_dir(workspace_dir: PathBuf) -> Self {
         Self {
             allowed_runtime_roots: default_runtime_roots(&workspace_dir),

@@ -285,8 +285,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         session_id,
                         domain_session_id,
                         domain_activation,
-                        template_override: None,
                         hook_scopes: Vec::new(),
+                        timezone: ctx.organization_settings.timezone,
                     },
                 )
                 .await
@@ -325,6 +325,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         session_id,
                         domain_session_id,
                         domain_activation,
+                        timezone: ctx.organization_settings.timezone,
                     },
                 )
                 .await
@@ -416,6 +417,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         priority: payload.priority.as_deref(),
                         artifacts: &payload.artifacts,
                         cancellation: tokio_util::sync::CancellationToken::new(),
+                        timezone: ctx.organization_settings.timezone,
                     },
                 )
                 .await?;
@@ -426,6 +428,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         }
 
         Command::TaskSchedulesSync { .. } => Ok(()),
+
+        Command::OrganizationSettingsSync { .. } => Ok(()),
 
         Command::ExecutionCancel { execution_run_id } => {
             ctx.harness

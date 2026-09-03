@@ -665,6 +665,7 @@ where
     let mut total_tool_calls = 0u32;
 
     loop {
+        let execution = pending_task.execution.clone();
         let output = stream_turn_output(
             runner,
             pending_task,
@@ -759,7 +760,7 @@ where
                 history: chat_history(&output.messages),
                 project: project.clone(),
             }),
-            execution: Default::default(),
+            execution,
         };
     }
 }

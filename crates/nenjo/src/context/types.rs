@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 // ---------------------------------------------------------------------------
-// Agent Specific Context
+// Agent identity context
 // ---------------------------------------------------------------------------
 
 #[derive(Debug, Clone, Serialize, Default)]
@@ -16,9 +16,7 @@ pub struct AgentContext {
     pub slug: String,
     #[serde(rename = "@name")]
     pub name: String,
-    #[serde(rename = "@llm_model_name")]
-    pub model_name: String,
-    #[serde(rename = "@description", skip_serializing_if = "Option::is_none")]
+    #[serde(rename = "@description", skip_serializing_if = "str_is_empty")]
     pub description: Option<String>,
 }
 
@@ -253,7 +251,7 @@ pub struct ProjectContext {
     pub context: String,
     /// Custom key-value metadata from project settings, serialized as XML.
     /// Skipped from XML serialization because it contains raw XML that would
-    /// be double-escaped. Accessed via `{{ project.metadata }}` as a flat var.
+    /// be double-escaped. Runtime serializers may expose it separately.
     #[serde(skip)]
     pub metadata: String,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -351,7 +349,6 @@ mod tests {
         let agent = AgentContext {
             slug: "coder".into(),
             name: "Cody".into(),
-            model_name: "gpt-4".into(),
             description: Some("Writes code".into()),
         };
         let xml = nenjo_xml::to_xml(&agent);

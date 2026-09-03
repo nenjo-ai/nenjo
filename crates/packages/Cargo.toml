@@ -15,6 +15,7 @@ nenjo = { workspace = true }
 nenjo-models = { workspace = true }
 nenjo-xml = { workspace = true }
 reqwest = { workspace = true, features = ["json"] }
+regex = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
 serde_yaml = { workspace = true }

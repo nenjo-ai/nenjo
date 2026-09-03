@@ -416,6 +416,18 @@ fn validate_prompt_selectors(
     package_selectors: &BTreeSet<String>,
     dependency_selectors: &BTreeSet<String>,
 ) -> anyhow::Result<()> {
+    if module.kind == PackageKind::Agent
+        && module
+            .manifest
+            .manifest
+            .pointer("/prompt_config/templates")
+            .is_some()
+    {
+        anyhow::bail!(
+            "{} uses removed prompt_config.templates; chat, task, and gate input are runtime-owned",
+            module.path
+        );
+    }
     let mut strings = Vec::new();
     collect_strings(&module.manifest.manifest, &mut strings);
     let imported_context = module
@@ -613,26 +625,6 @@ fn rendered_fields(module: &ResolvedModule) -> Vec<(String, &str)> {
                     "manifest.prompt_config.developer_prompt",
                     &mut fields,
                 );
-                if let Some(templates) = prompt_config.get("templates") {
-                    push_string_field(
-                        templates,
-                        "chat",
-                        "manifest.prompt_config.templates.chat",
-                        &mut fields,
-                    );
-                    push_string_field(
-                        templates,
-                        "task",
-                        "manifest.prompt_config.templates.task",
-                        &mut fields,
-                    );
-                    push_string_field(
-                        templates,
-                        "gate",
-                        "manifest.prompt_config.templates.gate",
-                        &mut fields,
-                    );
-                }
             }
         }
         PackageKind::Ability => {
@@ -1066,6 +1058,50 @@ mod tests {
 
         assert!(error.contains("failed to render"));
         assert!(error.contains("undefined"));
+    }
+
+    #[test]
+    fn rejects_runtime_owned_selectors_in_static_prompts() {
+        for selector in [
+            "self",
+            "agent.name",
+            "task.title",
+            "heartbeat.last_run_at",
+            "artifacts.project",
+        ] {
+            let ability = module(
+                "abilities/build.yaml",
+                PackageKind::Ability,
+                serde_json::json!({
+                    "name": "build",
+                    "prompt_config": {
+                        "developer_prompt": format!("Live: {{{{ {selector} }}}}")
+                    }
+                }),
+            );
+
+            let error = validate_single(package("pkg", vec![ability]));
+            assert!(error.contains(&format!("runtime-owned selector {selector}")));
+        }
+    }
+
+    #[test]
+    fn rejects_removed_agent_prompt_templates() {
+        let agent = module(
+            "agents/coder.yaml",
+            PackageKind::Agent,
+            serde_json::json!({
+                "name": "coder",
+                "prompt_config": {
+                    "system_prompt": "Code carefully.",
+                    "templates": { "chat": "{{ chat.message }}" }
+                }
+            }),
+        );
+
+        let error = validate_single(package("pkg", vec![agent]));
+
+        assert!(error.contains("uses removed prompt_config.templates"));
     }
 
     #[test]

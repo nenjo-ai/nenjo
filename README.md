@@ -444,7 +444,6 @@ let agent_manifest = AgentManifest::builder()
     .with_name("reviewer")
     .with_system_prompt("Act as a focused review worker.")
     .with_developer_prompt("Be concise and evidence-driven.")
-    .with_task_template("Task: {{ task.title }}\n\n{{ task.description }}")
     .build()?;
 
 let runner = Provider::builder()
@@ -457,6 +456,11 @@ let runner = Provider::builder()
     .build()
     .await?;
 ```
+
+Agent system/developer prompts are compiled as a static instruction prefix.
+Project, memory, clock, task, routine, git, and gate data are supplied by the
+runtime in typed session/turn context messages; they are not prompt template
+variables. See [Runtime Prompt Context](docs/runtime-prompt-context.md).
 
 ## Architecture
 

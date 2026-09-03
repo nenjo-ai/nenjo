@@ -126,7 +126,7 @@ impl OllamaProvider {
                     .collect(),
                 ConversationMessage::Chat(message) => vec![Message {
                     role: if message.role == ChatRole::Developer {
-                        "system".to_string()
+                        "user".to_string()
                     } else {
                         message.role.to_string()
                     },
@@ -137,6 +137,12 @@ impl OllamaProvider {
                 ConversationMessage::ArtifactAnalysis(analysis) => vec![Message {
                     role: "user".to_string(),
                     content: Some(analysis.model_context()),
+                    tool_calls: None,
+                    tool_call_id: None,
+                }],
+                ConversationMessage::RuntimeContext(context) => vec![Message {
+                    role: "user".to_string(),
+                    content: Some(context.content().to_string()),
                     tool_calls: None,
                     tool_call_id: None,
                 }],
@@ -303,11 +309,21 @@ mod tests {
     }
 
     #[test]
-    fn developer_role_mapped_to_system() {
+    fn developer_role_mapped_to_user() {
         let messages = vec![ConversationMessage::developer("Be helpful")];
         let converted = OllamaProvider::convert_messages(&messages);
-        assert_eq!(converted[0].role, "system");
+        assert_eq!(converted[0].role, "user");
         assert_eq!(converted[0].content.as_deref(), Some("Be helpful"));
+    }
+
+    #[test]
+    fn runtime_control_context_is_mapped_to_user() {
+        let messages = vec![ConversationMessage::runtime_context(
+            crate::RuntimeContextMessage::turn_control("clock"),
+        )];
+        let converted = OllamaProvider::convert_messages(&messages);
+        assert_eq!(converted[0].role, "user");
+        assert_eq!(converted[0].content.as_deref(), Some("clock"));
     }
 
     #[test]

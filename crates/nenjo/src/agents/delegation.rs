@@ -711,7 +711,8 @@ async fn bridge_delegation_transcript(
                 }
                 nenjo_models::ConversationMessage::AssistantToolCalls { .. }
                 | nenjo_models::ConversationMessage::ToolResults(_)
-                | nenjo_models::ConversationMessage::ArtifactAnalysis(_) => return,
+                | nenjo_models::ConversationMessage::ArtifactAnalysis(_)
+                | nenjo_models::ConversationMessage::RuntimeContext(_) => return,
             };
             handle.transcript(transcript, events_tx).await;
         }

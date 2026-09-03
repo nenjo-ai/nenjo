@@ -24,13 +24,6 @@ use super::error::SubAgentError;
 use super::events::{SubAgentSignal, SubAgentStatus, SubAgentTranscriptEvent};
 use super::format::ResultFormat;
 
-const SUB_AGENT_TASK_TEMPLATE: &str = r#"Task:
-{{ task.title }}
-
-Instructions:
-{{ task.description }}
-"#;
-
 #[derive(Debug, Clone)]
 pub(crate) struct SubAgentLimits {
     pub(crate) max_depth: u32,
@@ -560,7 +553,6 @@ fn ephemeral_agent_manifest(
         .with_developer_prompt(
             "You are an isolated sub-agent worker. Work only on the assigned task, report progress to the parent when useful, and return a focused final result. You inherit the parent agent's host tools and scoped workspace access for this run. You also have update_parent_agent and ask_parent_agent. You do not inherit sub-agent management tools, installed-agent abilities, or unrelated domains. Use inherited tools only within the assigned task and report any mutations or evidence clearly to the parent.",
         )
-        .with_task_template(SUB_AGENT_TASK_TEMPLATE)
         .build()
         .map_err(|err| SubAgentError::ManifestBuild {
             agent: request.agent_name.clone(),
@@ -615,7 +607,8 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
                 }
                 nenjo_models::ConversationMessage::AssistantToolCalls { .. }
                 | nenjo_models::ConversationMessage::ToolResults(_)
-                | nenjo_models::ConversationMessage::ArtifactAnalysis(_) => return,
+                | nenjo_models::ConversationMessage::ArtifactAnalysis(_)
+                | nenjo_models::ConversationMessage::RuntimeContext(_) => return,
             };
             child.transcript(event).await;
         }

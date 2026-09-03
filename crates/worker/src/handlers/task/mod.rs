@@ -70,6 +70,7 @@ pub struct TaskExecuteRequest<'a> {
     pub priority: Option<&'a str>,
     pub artifacts: &'a [ArtifactRef],
     pub cancellation: CancellationToken,
+    pub timezone: chrono_tz::Tz,
 }
 
 /// Provider-specific terminal data held until the harness has durably
@@ -213,6 +214,7 @@ where
         priority,
         artifacts,
         cancellation,
+        timezone,
     } = request;
     let (routine, agent) = match target {
         nenjo_harness::TaskExecutionTarget::Agent { slug } => (None, Some(slug.as_str())),
@@ -517,7 +519,9 @@ where
         slug: Some(task_slug.to_string()),
         artifacts: artifacts.to_vec(),
     };
-    let mut request = TaskRequest::from_task_input(&task).with_execution_run(execution_run_id);
+    let mut request = TaskRequest::from_task_input(&task)
+        .with_execution_run(execution_run_id)
+        .with_timezone(timezone);
     if let Some(location) = git_ctx.clone().map(ProjectLocation::from_git) {
         request = request.with_project_location(location);
     }
@@ -1083,6 +1087,7 @@ where
         priority: input.priority.clone(),
         project_location: input.git.clone().map(ProjectLocation::from_git),
         artifacts: input.artifacts.clone(),
+        timezone: input.timezone,
     };
     let outcome = execute_resumable_human_routine(ResumableRoutineTaskExecution {
         harness,
@@ -1450,7 +1455,9 @@ where
         slug: request.slug.clone(),
         artifacts: request.artifacts.clone(),
     };
-    let mut run = nenjo::RoutineRun::task(task_input).execution_run(execution_run_id);
+    let mut run = nenjo::RoutineRun::task(task_input)
+        .execution_run(execution_run_id)
+        .timezone(request.timezone);
     if let Some(location) = request.project_location.clone() {
         run = run.project_location(location);
     }

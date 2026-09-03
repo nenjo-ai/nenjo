@@ -26,7 +26,7 @@ fn routine_step_config_schema() -> serde_json::Value {
             },
             "metadata": {
                 "type": ["object", "array", "string"],
-                "description": "Optional JSON context rendered through {{ routine.step.metadata }}. Use this for data the step prompt explicitly references; it does not control execution."
+                "description": "Optional JSON metadata included in the runtime-owned routine step context. It does not control execution."
             },
             "request": {
                 "type": "object",

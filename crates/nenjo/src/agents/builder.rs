@@ -1,6 +1,5 @@
 //! Builder for creating an [`AgentRunner`] from manifest data.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
@@ -43,7 +42,7 @@ pub struct AgentBuilder<P: ProviderRuntime = ErasedProvider> {
     prompt_context: Option<PromptContext>,
     agent_config: AgentConfig,
     context_renderer: ContextRenderer,
-    memory_vars: HashMap<String, String>,
+    memory_context: String,
     memory: Option<Arc<P::Memory<'static>>>,
     memory_scope_override: Option<MemoryScope>,
     pending_project_context: Option<ProjectManifest>,
@@ -70,7 +69,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             prompt_context: Some(params.prompt_context),
             agent_config: params.agent_config,
             context_renderer: params.context_renderer,
-            memory_vars: HashMap::new(),
+            memory_context: String::new(),
             memory: None,
             memory_scope_override: None,
             pending_project_context: None,
@@ -98,7 +97,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             prompt_context: None,
             agent_config,
             context_renderer,
-            memory_vars: HashMap::new(),
+            memory_context: String::new(),
             memory: None,
             memory_scope_override: None,
             pending_project_context: None,
@@ -132,7 +131,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
     /// Set memory backend for this agent.
     ///
     /// When set, the runner will:
-    /// 1. Load memory facts and inject them into prompts
+    /// 1. Load memory facts into the session context snapshot
     /// 2. Include memory tools automatically
     ///
     /// The memory scope is derived from the agent name and project context
@@ -152,12 +151,12 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         self
     }
 
-    /// Set pre-computed memory template vars for prompt injection.
+    /// Set a pre-computed memory snapshot for session context injection.
     ///
     /// Use this instead of `with_memory()` if you want to manage memory
-    /// retrieval yourself. Keys should be `memories`, `memories.core`, etc.
-    pub fn with_memory_vars(mut self, vars: HashMap<String, String>) -> Self {
-        self.memory_vars = vars;
+    /// retrieval and XML serialization yourself.
+    pub fn with_memory_context(mut self, context: impl Into<String>) -> Self {
+        self.memory_context = context.into();
         self
     }
 
@@ -184,8 +183,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         self
     }
 
-    /// Inject project context so the agent's prompts can reference
-    /// `{{ project.name }}`, `{{ project.description }}`, etc.
+    /// Attach project data to the runtime-owned session context.
     ///
     /// Resolves git context from project settings if the repo is synced.
     /// `working_dir` uses an explicit tool scope when one is configured, otherwise
@@ -195,16 +193,13 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         self
     }
 
-    /// Inject routine context so the agent's prompts can reference
-    /// `{{ routine.name }}`, `{{ routine.slug }}`, `{{ routine.execution_id }}`.
+    /// Attach routine data to the runtime-owned turn context.
     pub fn with_routine_context(mut self, ctx: RoutineContext) -> Self {
         self.pending_routine_context = Some(ctx);
         self
     }
 
-    /// Inject step context so the agent's prompts can reference
-    /// `{{ routine.step.name }}`, `{{ routine.step.type }}`,
-    /// `{{ routine.step.instructions }}`, and `{{ routine.step.metadata }}`.
+    /// Attach the active step to the runtime-owned turn context.
     pub fn with_step_context(mut self, ctx: RoutineStepContext) -> Self {
         self.pending_step_context = Some(ctx);
         self
@@ -385,7 +380,7 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
             prompt: AgentPromptState {
                 context: prompt_context,
                 renderer: self.context_renderer,
-                memory_vars: self.memory_vars,
+                memory_context: self.memory_context,
             },
             runtime: AgentRuntime {
                 tools: self.tools,

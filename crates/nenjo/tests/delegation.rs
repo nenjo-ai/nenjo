@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::Result;
 use nenjo::manifest::{
     AbilityManifest, AbilityPromptConfig, AgentManifest, Manifest, ModelManifest, ProjectManifest,
-    PromptConfig, PromptTemplates, model_manifest_slug,
+    PromptConfig, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::{Buffered, ChatInput, Slug, Streaming};
@@ -29,6 +29,7 @@ fn message_text(message: &nenjo_models::ConversationMessage) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.clone(),
+        nenjo_models::ConversationMessage::RuntimeContext(context) => context.content().to_string(),
     }
 }
 
@@ -73,11 +74,6 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
-            templates: PromptTemplates {
-                task_execution: "Execute: {{ task.title }}".into(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval: String::new(),
-            },
             ..Default::default()
         },
         color: None,

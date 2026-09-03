@@ -372,7 +372,8 @@ pub fn collect_artifact_inputs(
             nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => Some(analysis),
             nenjo_models::ConversationMessage::Chat(_)
             | nenjo_models::ConversationMessage::AssistantToolCalls { .. }
-            | nenjo_models::ConversationMessage::ToolResults(_) => None,
+            | nenjo_models::ConversationMessage::ToolResults(_)
+            | nenjo_models::ConversationMessage::RuntimeContext(_) => None,
         })
         .collect::<Vec<_>>();
     let mut inputs = Vec::new();
@@ -418,6 +419,7 @@ pub fn collect_artifact_inputs(
                 tool_calls: _,
             } => {}
             nenjo_models::ConversationMessage::ArtifactAnalysis(_) => {}
+            nenjo_models::ConversationMessage::RuntimeContext(_) => {}
         }
     }
     inputs

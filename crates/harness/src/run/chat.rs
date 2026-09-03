@@ -9,6 +9,7 @@ use nenjo::memory::MemoryScope;
 use nenjo::provider::ToolFactory as _;
 use nenjo_models::{
     ArtifactInput, ArtifactInputSource, ArtifactRef, ChatMessage, ConversationMessage,
+    RuntimeContextMessage,
 };
 use nenjo_sessions::{
     ChatSessionUpsert, DomainSessionUpsert, DomainState, ExecutionPhase, SessionKind,
@@ -54,10 +55,12 @@ where
     if let Some(project) = prepared.project.clone() {
         input = input.project(project);
     }
-    if let Some(template_override) = prepared.template_override.take() {
-        input = input.template_override(template_override);
+    if !prepared.replayed_turn_contexts.is_empty() {
+        input = input.replayed_turn_contexts(std::mem::take(&mut prepared.replayed_turn_contexts));
     }
-    let handle = runner.chat(input, delivery).await?;
+    let handle = runner
+        .chat(input.timezone(prepared.timezone), delivery)
+        .await?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let registry_token = Uuid::new_v4();
 
@@ -143,7 +146,7 @@ struct PreparedChatExecution {
     project: Option<nenjo::Slug>,
     project_slug: String,
     effective_content: String,
-    template_override: Option<String>,
+    replayed_turn_contexts: Vec<RuntimeContextMessage>,
     effective_domain_session_id: Option<Uuid>,
     hook_scopes: Vec<ActiveHookScope>,
     hook_transcript_dir: Option<std::path::PathBuf>,
@@ -151,6 +154,7 @@ struct PreparedChatExecution {
     artifacts: Vec<ArtifactRef>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
+    timezone: chrono_tz::Tz,
     lease: SessionLeaseGrant,
 }
 
@@ -172,10 +176,10 @@ where
         project,
         domain_session_id,
         domain_activation,
-        template_override,
         hook_scopes,
         hook_transcript_dir,
         artifacts,
+        timezone,
     } = request;
 
     let sessions = harness.sessions();
@@ -349,7 +353,6 @@ where
                 project,
                 project_slug: slug,
                 effective_content,
-                template_override,
                 effective_domain_session_id,
                 hook_scopes,
                 hook_transcript_dir,
@@ -358,6 +361,7 @@ where
                 is_retry: retry_of_run_id.is_some(),
                 events_tx,
                 worker_id,
+                timezone,
             },
         )
         .await;
@@ -374,7 +378,6 @@ where
             project,
             project_slug: slug,
             effective_content,
-            template_override,
             effective_domain_session_id,
             hook_scopes,
             hook_transcript_dir,
@@ -383,6 +386,7 @@ where
             is_retry: retry_of_run_id.is_some(),
             events_tx,
             worker_id,
+            timezone,
         },
     )
     .await
@@ -397,7 +401,6 @@ struct PreparedChatInput {
     project: Option<nenjo::Slug>,
     project_slug: String,
     effective_content: String,
-    template_override: Option<String>,
     effective_domain_session_id: Option<Uuid>,
     hook_scopes: Vec<ActiveHookScope>,
     hook_transcript_dir: Option<std::path::PathBuf>,
@@ -406,6 +409,7 @@ struct PreparedChatInput {
     artifacts: Vec<ArtifactRef>,
     events_tx: mpsc::UnboundedSender<HarnessEvent>,
     worker_id: String,
+    timezone: chrono_tz::Tz,
 }
 
 async fn finish_prepare_chat_execution<SessionRt>(
@@ -425,7 +429,6 @@ where
         project,
         project_slug,
         effective_content,
-        template_override,
         effective_domain_session_id,
         hook_scopes,
         hook_transcript_dir,
@@ -434,8 +437,11 @@ where
         artifacts,
         events_tx,
         worker_id,
+        timezone,
     } = input;
     let history = replay_history_for_chat_attempt(&transcript_events, turn_id, is_retry);
+    let replayed_turn_contexts =
+        replayed_turn_contexts_for_retry(&transcript_events, turn_id, is_retry);
     if !is_retry {
         sessions.record_events(
             lease.clone(),
@@ -476,7 +482,7 @@ where
         project,
         project_slug,
         effective_content,
-        template_override,
+        replayed_turn_contexts,
         effective_domain_session_id,
         hook_scopes,
         hook_transcript_dir,
@@ -484,6 +490,7 @@ where
         artifacts,
         events_tx,
         worker_id,
+        timezone,
         lease,
     })
 }
@@ -505,6 +512,17 @@ fn replay_history_for_chat_attempt(
         .cloned()
         .collect::<Vec<_>>();
     replay_transcript_history(&prior_turns)
+}
+
+fn replayed_turn_contexts_for_retry(
+    transcript_events: &[nenjo_sessions::SessionTranscriptEvent],
+    turn_id: Uuid,
+    is_retry: bool,
+) -> Vec<RuntimeContextMessage> {
+    if !is_retry {
+        return Vec::new();
+    }
+    crate::session::canonical_turn_runtime_contexts(transcript_events, turn_id)
 }
 
 fn user_artifact_inputs(artifacts: &[ArtifactRef]) -> Vec<ArtifactInput> {
@@ -1156,5 +1174,37 @@ mod tests {
             ConversationMessage::Chat(message)
                 if message.content == "prior question"
         ));
+    }
+
+    #[test]
+    fn retry_reuses_all_original_turn_context_bytes() {
+        let session_id = Uuid::new_v4();
+        let turn_id = Uuid::new_v4();
+        let contexts = vec![
+            RuntimeContextMessage::turn_control("original clock and control bytes"),
+            RuntimeContextMessage::turn_data("original turn data bytes"),
+            RuntimeContextMessage::turn_control("latest clock and control bytes"),
+        ];
+        let events = contexts
+            .iter()
+            .enumerate()
+            .map(|(index, context)| SessionTranscriptEvent {
+                session_id,
+                seq: index as u64 + 1,
+                recorded_at: Utc::now(),
+                turn_id: Some(turn_id),
+                payload: SessionTranscriptEventPayload::ConversationMessage {
+                    message: ConversationMessage::runtime_context(context.clone()),
+                },
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            replayed_turn_contexts_for_retry(&events, turn_id, true),
+            vec![
+                RuntimeContextMessage::turn_control("latest clock and control bytes"),
+                RuntimeContextMessage::turn_data("original turn data bytes"),
+            ]
+        );
     }
 }

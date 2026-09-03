@@ -11,7 +11,7 @@ use crate::openai_multimodal::{
 };
 use crate::openai_tools::{ProviderToolSpec, convert_tools};
 use crate::traits::{
-    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
+    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
 };
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
@@ -204,7 +204,10 @@ impl OpenRouterProvider {
         convert_tools(tools, crate::sanitize_tool_name).filter(|items| !items.is_empty())
     }
 
-    fn convert_messages(request: &ChatRequest<'_>) -> anyhow::Result<Vec<NativeMessage>> {
+    fn convert_messages(
+        request: &ChatRequest<'_>,
+        supports_developer_role: bool,
+    ) -> anyhow::Result<Vec<NativeMessage>> {
         let mut native = Vec::new();
         for message in request.messages {
             match message {
@@ -261,7 +264,12 @@ impl OpenRouterProvider {
                     }
                 }
                 ConversationMessage::Chat(message) => native.push(NativeMessage {
-                    role: message.role.to_string(),
+                    role: if message.role == ChatRole::Developer && !supports_developer_role {
+                        ChatRole::User
+                    } else {
+                        message.role
+                    }
+                    .to_string(),
                     content: Some(artifact_content(
                         &message.content,
                         message.artifacts.iter().map(|input| {
@@ -279,6 +287,17 @@ impl OpenRouterProvider {
                 ConversationMessage::ArtifactAnalysis(analysis) => native.push(NativeMessage {
                     role: "user".to_string(),
                     content: Some(ChatCompletionsContent::text(analysis.model_context())),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }),
+                ConversationMessage::RuntimeContext(context) => native.push(NativeMessage {
+                    role: if supports_developer_role {
+                        context.preferred_role()
+                    } else {
+                        context.fallback_role()
+                    }
+                    .to_string(),
+                    content: Some(ChatCompletionsContent::text(context.content())),
                     tool_call_id: None,
                     tool_calls: None,
                 }),
@@ -546,7 +565,7 @@ impl ModelProvider for OpenRouterProvider {
                 allow_fallbacks: true,
             });
 
-        let messages = Self::convert_messages(&request)?;
+        let messages = Self::convert_messages(&request, self.supports_developer_role(model))?;
 
         // Log estimated request size so context-too-large issues are visible
         let estimated_chars: usize = messages
@@ -919,6 +938,30 @@ mod tests {
         assert!(!provider.supports_developer_role("openai/gpt-4o"));
         assert!(!provider.supports_developer_role("anthropic/claude-sonnet-4"));
         assert!(!provider.supports_developer_role("minimax/minimax-m2.5"));
+    }
+
+    #[test]
+    fn runtime_control_role_follows_routed_model_capability() {
+        let messages = vec![
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "clock",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data("memory")),
+        ];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+
+        let supported = OpenRouterProvider::convert_messages(&request, true).unwrap();
+        assert_eq!(supported[0].role, "developer");
+        assert_eq!(supported[1].role, "user");
+
+        let fallback = OpenRouterProvider::convert_messages(&request, false).unwrap();
+        assert_eq!(fallback[0].role, "user");
+        assert_eq!(fallback[1].role, "user");
     }
 
     #[test]

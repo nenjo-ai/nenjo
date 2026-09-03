@@ -302,6 +302,11 @@ where
                     next_run_at,
                     assignment_revision: schedule.revision.clone(),
                 },
+                timezone: schedule
+                    .definition
+                    .timezone
+                    .parse()
+                    .context("task schedule has an invalid organization timezone")?,
             };
             let item = TaskInboxItem::queued(submission, now);
             let rejection = (!schedule.runnable).then(|| "task is not runnable".to_string());

@@ -1,4 +1,4 @@
-//! Context block renderer — renders context block templates with template vars.
+//! Context block renderer — compiles static context block templates.
 //!
 //! Context blocks are manifest resources, so the provider keeps their template
 //! bodies in memory and renders them directly.
@@ -18,7 +18,7 @@ use crate::package_resolve::{
     version_label_from_path,
 };
 
-/// Renders context blocks from templates with template variables.
+/// Renders context blocks from templates with static prompt variables.
 ///
 /// Each block is a Jinja template rendered with the same `HashMap<String, String>`
 /// vars used for system/developer prompts.
@@ -277,6 +277,32 @@ impl ContextRenderer {
         selectors.dedup();
         selectors
     }
+
+    /// Return runtime-owned selectors that cannot appear in static context fragments.
+    pub fn runtime_selectors(&self) -> Vec<String> {
+        let mut selectors = self
+            .blocks
+            .iter()
+            .flat_map(|block| scan_runtime_selectors(&block.template))
+            .collect::<Vec<_>>();
+        selectors.sort();
+        selectors.dedup();
+        selectors
+    }
+}
+
+pub(crate) fn scan_runtime_selectors(value: &str) -> Vec<String> {
+    static RUNTIME_SELECTOR: OnceLock<Regex> = OnceLock::new();
+    let regex = RUNTIME_SELECTOR.get_or_init(|| {
+        Regex::new(
+            r"\{[%{](?:[^}%]*?[^A-Za-z0-9_.])?((?:self|agent|global|chat|task|project|routine|gate|git|memories|memory_profile|heartbeat|artifacts)(?:\.[A-Za-z_][A-Za-z0-9_]*)*)",
+        )
+        .expect("runtime selector regex is valid")
+    });
+    regex
+        .captures_iter(value)
+        .filter_map(|captures| captures.get(1).map(|matched| matched.as_str().to_string()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -293,6 +319,16 @@ mod tests {
             package_name: None,
             package_version: None,
         }
+    }
+
+    #[test]
+    fn runtime_selector_scan_ignores_static_selector_path_segments() {
+        assert_eq!(
+            scan_runtime_selectors(
+                "{{ pkg.nenjo_ai.packages.knowledge.core.resources.routine }} {{ task.title }} {{ self }} {{ agent.name }}"
+            ),
+            vec!["task.title", "self", "agent.name"]
+        );
     }
 
     fn versioned_block(
@@ -316,9 +352,9 @@ mod tests {
         let renderer = ContextRenderer::from_blocks(&[block(
             "pkg/nenjo/core",
             "methodology",
-            "<methodology>{{ self.role }}</methodology>",
+            "<methodology>{{ args.role }}</methodology>",
         )]);
-        let vars = HashMap::from([("self.role".into(), "system".into())]);
+        let vars = HashMap::from([("args.role".into(), "system".into())]);
 
         let rendered_blocks = renderer.render_all(&vars);
         let mut prompt_vars = vars.clone();
@@ -446,12 +482,12 @@ mod tests {
     }
 
     #[test]
-    fn render_template_mixes_agent_vars_and_context_includes() {
+    fn render_template_mixes_static_vars_and_context_includes() {
         let renderer =
             ContextRenderer::from_blocks(&[block("pkg/nenjo/core", "methodology", "METHOD")]);
-        let vars = HashMap::from([("agent.name".into(), "Nenji".into())]);
+        let vars = HashMap::from([("args.label".into(), "Nenji".into())]);
         let rendered = renderer.render_template(
-            "System: {{ agent.name }}\n{{ pkg.nenjo.core.methodology }}",
+            "System: {{ args.label }}\n{{ pkg.nenjo.core.methodology }}",
             &vars,
         );
         assert!(rendered.contains("Nenji"));

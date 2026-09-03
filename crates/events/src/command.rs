@@ -270,6 +270,13 @@ pub enum Command {
         schedules: Vec<TaskScheduleAssignment>,
     },
 
+    /// Replace the worker's cached organization-wide runtime settings.
+    #[serde(rename = "organization_settings.sync")]
+    OrganizationSettingsSync {
+        #[serde(default)]
+        settings: crate::OrganizationSettings,
+    },
+
     // -----------------------------------------------------------------
     // Repository
     // -----------------------------------------------------------------
@@ -394,6 +401,13 @@ impl std::fmt::Display for Command {
             Self::TaskSchedulesSync { schedules } => {
                 write!(f, "task_schedules.sync(count={})", schedules.len())
             }
+            Self::OrganizationSettingsSync { settings } => {
+                write!(
+                    f,
+                    "organization_settings.sync(timezone={})",
+                    settings.timezone
+                )
+            }
             Self::RepoSync { project, .. } => write!(f, "repo.sync(project={project})"),
             Self::RepoUnsync { project } => write!(f, "repo.unsync(project={project})"),
             Self::WorkerPing => write!(f, "worker.ping"),
@@ -428,7 +442,7 @@ impl Command {
             | Command::ExecutionResume { .. }
             | Command::ExecutionContinue { .. } => Capability::Task,
 
-            Command::WorkerPing => Capability::Ping,
+            Command::WorkerPing | Command::OrganizationSettingsSync { .. } => Capability::Ping,
             Command::TaskSchedulesSync { .. } => Capability::Manifest,
             Command::WorkerAccountKeyUpdated { .. } => Capability::Manifest,
 
@@ -445,6 +459,7 @@ impl Command {
             Command::ChatCancel { .. }
             | Command::ExecutionCancel { .. }
             | Command::TaskSchedulesSync { .. }
+            | Command::OrganizationSettingsSync { .. }
             | Command::ManifestChanged { .. }
             | Command::PackageGraphChanged { .. }
             | Command::RepoSync { .. }
@@ -606,6 +621,20 @@ mod tests {
             CommandDelivery::Queue
         );
         assert_eq!(
+            Command::OrganizationSettingsSync {
+                settings: crate::OrganizationSettings::default(),
+            }
+            .delivery(),
+            CommandDelivery::Broadcast
+        );
+        assert_eq!(
+            Command::OrganizationSettingsSync {
+                settings: crate::OrganizationSettings::default(),
+            }
+            .capability(),
+            Capability::Ping
+        );
+        assert_eq!(
             Command::ExecutionCancel {
                 execution_run_id: id,
             }
@@ -670,5 +699,20 @@ mod tests {
             .delivery(),
             CommandDelivery::Targeted
         );
+    }
+
+    #[test]
+    fn organization_settings_sync_decodes_the_platform_snapshot() {
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "type": "organization_settings.sync",
+            "settings": { "timezone": "America/Chicago" }
+        }))
+        .expect("decode organization settings sync");
+
+        assert!(matches!(
+            command,
+            Command::OrganizationSettingsSync { settings }
+                if settings.timezone == chrono_tz::America::Chicago
+        ));
     }
 }

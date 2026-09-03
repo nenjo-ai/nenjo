@@ -7,8 +7,7 @@ use std::sync::Arc;
 
 use anyhow::Result;
 use nenjo::manifest::{
-    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, PromptTemplates,
-    model_manifest_slug,
+    AgentManifest, Manifest, ModelManifest, ProjectManifest, PromptConfig, model_manifest_slug,
 };
 use nenjo::memory::MarkdownMemory;
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider};
@@ -62,11 +61,6 @@ fn make_agent(name: &str, model: &ModelManifest, system_prompt: &str) -> AgentMa
         description: Some(format!("Test agent: {name}")),
         prompt_config: PromptConfig {
             system_prompt: system_prompt.into(),
-            templates: PromptTemplates {
-                chat_task: "{{ chat.message }}".into(),
-                task_execution: String::new(),
-                gate_eval: String::new(),
-            },
             ..Default::default()
         },
         color: None,

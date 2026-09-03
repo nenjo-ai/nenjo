@@ -474,6 +474,10 @@ tokio::task_local! {
 }
 
 tokio::task_local! {
+    static CURRENT_EXECUTION_TIMEZONE: chrono_tz::Tz;
+}
+
+tokio::task_local! {
     static CURRENT_HOOK_RUNTIME: Option<Arc<HookRuntime>>;
 }
 
@@ -506,6 +510,17 @@ fn cancelled_tool_result() -> ToolResult {
 
 pub(crate) fn current_chat_history() -> Option<Vec<ConversationMessage>> {
     CURRENT_CHAT_HISTORY.try_with(Clone::clone).ok()
+}
+
+pub(crate) fn current_execution_timezone() -> Option<chrono_tz::Tz> {
+    CURRENT_EXECUTION_TIMEZONE.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn scope_current_execution_timezone<F, T>(timezone: chrono_tz::Tz, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CURRENT_EXECUTION_TIMEZONE.scope(timezone, future).await
 }
 
 pub(crate) fn activate_current_hook_scope(scope: ActiveHookScope) -> bool {

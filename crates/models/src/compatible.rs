@@ -830,6 +830,17 @@ impl OpenAiCompatibleProvider {
                     tool_call_id: None,
                     tool_calls: None,
                 }),
+                ConversationMessage::RuntimeContext(context) => native.push(Message {
+                    role: if supports_developer_role {
+                        context.preferred_role()
+                    } else {
+                        context.fallback_role()
+                    }
+                    .to_string(),
+                    content: Some(ChatCompletionsContent::text(context.content())),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }),
             }
         }
         Ok(native)
@@ -1214,7 +1225,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
     fn supports_developer_role(&self, _model: &str) -> bool {
         // A generic compatible endpoint does not identify the server-side chat
-        // template. Use `system`, which is the portable role across these APIs.
+        // template. Interleaved developer messages therefore fall back to user.
         false
     }
 
@@ -1597,6 +1608,30 @@ mod tests {
         let converted = OpenAiCompatibleProvider::convert_messages(&request, true).unwrap();
 
         assert_eq!(converted[0].role, "developer");
+    }
+
+    #[test]
+    fn runtime_control_uses_developer_with_user_fallback_while_data_stays_user() {
+        let messages = vec![
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "clock",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data("memory")),
+        ];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+
+        let supported = OpenAiCompatibleProvider::convert_messages(&request, true).unwrap();
+        assert_eq!(supported[0].role, "developer");
+        assert_eq!(supported[1].role, "user");
+
+        let fallback = OpenAiCompatibleProvider::convert_messages(&request, false).unwrap();
+        assert_eq!(fallback[0].role, "user");
+        assert_eq!(fallback[1].role, "user");
     }
 
     #[test]

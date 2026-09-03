@@ -75,6 +75,8 @@ pub struct RoutineInput {
     pub project_description: Option<String>,
     pub project_metadata: Option<String>,
     pub session_binding: Option<SessionBinding>,
+    #[serde(default = "default_timezone")]
+    pub timezone: chrono_tz::Tz,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub artifacts: Vec<ArtifactRef>,
 }
@@ -102,6 +104,7 @@ impl RoutineInput {
             project_description: None,
             project_metadata: None,
             session_binding: None,
+            timezone: chrono_tz::UTC,
             artifacts: Vec::new(),
         }
     }
@@ -169,6 +172,7 @@ impl RoutineInput {
                 let mut input = RoutineInput::from_task_input(task)
                     .with_git(location.and_then(|location| location.git))
                     .with_execution_run_id_opt(run.execution.execution_run_id);
+                input.timezone = run.execution.timezone;
                 if let Some(binding) = run.execution.session_binding {
                     input = input.with_session_binding(binding);
                 }
@@ -198,6 +202,10 @@ impl RoutineInput {
         self.execution_run_id = id;
         self
     }
+}
+
+fn default_timezone() -> chrono_tz::Tz {
+    chrono_tz::UTC
 }
 
 // ---------------------------------------------------------------------------

@@ -13,7 +13,7 @@ use crate::openai_multimodal::{
 };
 use crate::openai_tools::{ProviderToolSpec, convert_tools};
 use crate::traits::{
-    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
+    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
 };
 use anyhow::Context;
 use async_trait::async_trait;
@@ -370,7 +370,10 @@ impl OpenAiProvider {
         convert_tools(tools, crate::sanitize_tool_name)
     }
 
-    fn convert_messages(request: &ChatRequest<'_>) -> anyhow::Result<Vec<NativeMessage>> {
+    fn convert_messages(
+        request: &ChatRequest<'_>,
+        supports_developer_role: bool,
+    ) -> anyhow::Result<Vec<NativeMessage>> {
         let mut native = Vec::new();
         for message in request.messages {
             match message {
@@ -427,7 +430,12 @@ impl OpenAiProvider {
                     }
                 }
                 ConversationMessage::Chat(message) => native.push(NativeMessage {
-                    role: message.role.to_string(),
+                    role: if message.role == ChatRole::Developer && !supports_developer_role {
+                        ChatRole::User
+                    } else {
+                        message.role
+                    }
+                    .to_string(),
                     content: Some(artifact_content(
                         &message.content,
                         message.artifacts.iter().map(|input| {
@@ -445,6 +453,17 @@ impl OpenAiProvider {
                 ConversationMessage::ArtifactAnalysis(analysis) => native.push(NativeMessage {
                     role: "user".to_string(),
                     content: Some(ChatCompletionsContent::text(analysis.model_context())),
+                    tool_call_id: None,
+                    tool_calls: None,
+                }),
+                ConversationMessage::RuntimeContext(context) => native.push(NativeMessage {
+                    role: if supports_developer_role {
+                        context.preferred_role()
+                    } else {
+                        context.fallback_role()
+                    }
+                    .to_string(),
+                    content: Some(ChatCompletionsContent::text(context.content())),
                     tool_call_id: None,
                     tool_calls: None,
                 }),
@@ -640,7 +659,7 @@ impl ModelProvider for OpenAiProvider {
         let tools = Self::convert_tools(request.tools);
         let native_request = NativeChatRequest {
             model: model.to_string(),
-            messages: Self::convert_messages(&request)?,
+            messages: Self::convert_messages(&request, Self::is_developer_role_model(model))?,
             // Reasoning models (o1/o3/o4) require temperature=1; omit it to use the default.
             temperature: if is_reasoning {
                 None
@@ -821,6 +840,30 @@ mod tests {
         assert!(p.supports_developer_role("gpt-4.1"));
         assert!(p.supports_developer_role("o3"));
         assert!(!p.supports_developer_role("gpt-4o"));
+    }
+
+    #[test]
+    fn runtime_control_role_follows_model_capability() {
+        let messages = vec![
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "clock",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data("memory")),
+        ];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+
+        let supported = OpenAiProvider::convert_messages(&request, true).unwrap();
+        assert_eq!(supported[0].role, "developer");
+        assert_eq!(supported[1].role, "user");
+
+        let fallback = OpenAiProvider::convert_messages(&request, false).unwrap();
+        assert_eq!(fallback[0].role, "user");
+        assert_eq!(fallback[1].role, "user");
     }
 
     #[test]

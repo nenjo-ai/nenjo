@@ -82,7 +82,9 @@ where
     let task_slug = request.slug.clone().unwrap_or_else(|| "task".to_string());
     let execution_run_id = request.execution_run_id.unwrap_or_else(Uuid::new_v4);
     let task = task_input_from_request(&request, task_slug.clone());
-    let mut run = RoutineRun::task(task).execution_run(execution_run_id);
+    let mut run = RoutineRun::task(task)
+        .execution_run(execution_run_id)
+        .timezone(request.timezone);
     if let Some(location) = request.project_location.clone() {
         run = run.project_location(location);
     }
@@ -319,7 +321,9 @@ where
     let task_slug = request.slug.clone().unwrap_or_else(|| "task".to_string());
     let execution_run_id = request.execution_run_id.unwrap_or_else(Uuid::new_v4);
     let task = task_input_from_request(&request, task_slug.clone());
-    let mut run = AgentRun::task(task).execution_run(execution_run_id);
+    let mut run = AgentRun::task(task)
+        .execution_run(execution_run_id)
+        .timezone(request.timezone);
     if let Some(location) = request.project_location {
         run = run.project_location(location);
     }

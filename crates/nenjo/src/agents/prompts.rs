@@ -7,10 +7,6 @@ use crate::types::{ActiveDomain, RenderContextVars};
 
 #[derive(Clone)]
 pub struct PromptContext {
-    /// Agent name (e.g. "manager", "architect").
-    pub agent_name: String,
-    /// Agent description for template variable rendering.
-    pub agent_description: String,
     /// All available projects (used to resolve project slugs for paths).
     pub current_project: ProjectManifest,
     /// Active domain session (if the user is in a domain like /prd).

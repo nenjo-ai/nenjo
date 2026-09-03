@@ -264,11 +264,11 @@ async fn manifest_index_finds_abilities_and_domains_without_scanning() {
 }
 
 #[tokio::test]
-async fn project_context_renders_template_and_knowledge_vars() {
+async fn project_context_is_runtime_owned_while_knowledge_vars_compile_statically() {
     let mut manifest = test_manifest();
-    manifest.agents[0].prompt_config.system_prompt = "{{ project.context }}".into();
+    manifest.agents[0].prompt_config.system_prompt = "{{ lib.product }}".into();
     manifest.projects[0].settings = serde_json::json!({
-        "context": "Project {{ project.name }}: {{ lib.product }}"
+        "context": "Project p context"
     });
     let project = manifest.projects[0].clone();
 
@@ -306,18 +306,55 @@ async fn project_context_renders_template_and_knowledge_vars() {
         )))
         .unwrap();
 
-    assert!(prompts.system.contains("Project p:"));
     assert!(prompts.system.contains("<knowledge_pack"));
     assert!(prompts.system.contains("first_doc summary"));
+    assert!(
+        prompts
+            .session_context
+            .messages()
+            .iter()
+            .any(|context| context.content().contains("Project p context"))
+    );
+}
+
+#[tokio::test]
+async fn static_prompts_reject_runtime_owned_selectors() {
+    for selector in ["global.timestamp", "self", "agent.name"] {
+        let mut manifest = test_manifest();
+        manifest.agents[0].prompt_config.system_prompt =
+            format!("Runtime value: {{{{ {selector} }}}}");
+
+        let provider = Provider::builder()
+            .with_manifest(manifest)
+            .with_model_factory(MockFactory)
+            .with_tool_factory(NoopToolFactory)
+            .build()
+            .await
+            .unwrap();
+        let runner = provider
+            .agent("agent")
+            .await
+            .unwrap()
+            .build()
+            .await
+            .unwrap();
+
+        let error = runner
+            .instance()
+            .build_prompts(&crate::input::AgentRun::chat(crate::input::ChatInput::new(
+                "hello",
+            )))
+            .unwrap_err();
+
+        assert!(error.to_string().contains(selector));
+    }
 }
 
 #[tokio::test]
 async fn task_prompt_project_context_renders_into_project_xml() {
     let mut manifest = test_manifest();
-    manifest.agents[0].prompt_config.templates.task_execution =
-        "{{ project.context }}\n{{ project }}".into();
     manifest.projects[0].settings = serde_json::json!({
-        "context": "Project {{ project.name }} context"
+        "context": "Project p context"
     });
     let project = manifest.projects[0].clone();
 
@@ -345,20 +382,20 @@ async fn task_prompt_project_context_renders_into_project_xml() {
         ))
         .unwrap();
 
-    assert!(prompts.user_message.contains("Project p context"));
-    assert!(
-        prompts
-            .user_message
-            .contains("<context>Project p context</context>")
-    );
-    assert!(!prompts.user_message.contains("{{ project.name }}"));
+    let session_context = prompts
+        .session_context
+        .messages()
+        .iter()
+        .find(|context| context.authority() == nenjo_models::RuntimeContextAuthority::Data)
+        .unwrap()
+        .content();
+    assert!(session_context.contains("Project p context"));
+    assert!(session_context.contains("<context>Project p context</context>"));
 }
 
 #[tokio::test]
 async fn task_prompt_does_not_append_routine_handoffs_twice() {
-    let mut manifest = test_manifest();
-    manifest.agents[0].prompt_config.templates.task_execution =
-        "{{ routine }}\n{{ task.description }}".into();
+    let manifest = test_manifest();
 
     let provider = Provider::builder()
         .with_manifest(manifest)
@@ -406,8 +443,15 @@ async fn task_prompt_does_not_append_routine_handoffs_twice() {
         )))
         .unwrap();
 
-    assert_eq!(prompts.user_message.matches("<handoffs>").count(), 1);
-    assert!(!prompts.user_message.contains("# Routine Handoffs"));
+    let turn_context = prompts
+        .turn_context
+        .messages()
+        .iter()
+        .find(|context| context.authority() == nenjo_models::RuntimeContextAuthority::Data)
+        .unwrap()
+        .content();
+    assert_eq!(turn_context.matches("<handoffs>").count(), 1);
+    assert!(!turn_context.contains("# Routine Handoffs"));
 }
 
 #[tokio::test]
@@ -457,13 +501,13 @@ async fn provider_registers_multiple_knowledge_packs() {
         .collect::<Vec<_>>();
     assert!(tool_names.iter().any(|name| name == "list_knowledge_packs"));
 
-    let vars = runner
+    let knowledge_vars = &runner
         .instance()
         .prompt_context()
         .render_ctx_extra
-        .to_vars();
-    assert!(vars.contains_key("local.first"));
-    assert!(vars.contains_key("local.second"));
+        .knowledge_vars;
+    assert!(knowledge_vars.contains_key("local.first"));
+    assert!(knowledge_vars.contains_key("local.second"));
 
     assert!(tool_names.iter().any(|name| name == "search_knowledge"));
     assert!(tool_names.iter().any(|name| name == "read_knowledge_doc"));
