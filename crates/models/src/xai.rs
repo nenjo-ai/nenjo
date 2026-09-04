@@ -22,9 +22,13 @@ use crate::native::{
     NativeModelToolId, ProviderMediaCapabilities, ProviderNativeModelToolSpec,
     ReferenceToVideoRequest, TranscribeAudioRequest, TranscriptSegment, media_input_schema,
 };
+use crate::openai_chat::InstructionRolePolicy;
+use crate::openai_responses::{
+    ResponsesInputItem, ResponsesOutput, ResponsesResponse, ResponsesTool, convert_input,
+    convert_local_tools, response_text, response_tool_calls, response_usage,
+};
 use crate::traits::{
-    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, ProviderStreamEvent,
-    ProviderToolTrace, TokenUsage, ToolCall,
+    ChatRequest, ChatResponse, ModelProvider, ProviderStreamEvent, ProviderToolTrace,
 };
 
 pub const XAI_DEFAULT_BASE_URL: &str = "https://api.x.ai/v1";
@@ -189,92 +193,10 @@ struct XaiSttChannel {
 #[derive(Debug, Serialize)]
 struct ResponsesRequest {
     model: String,
-    input: Vec<ResponsesInput>,
+    input: Vec<ResponsesInputItem>,
     tools: Vec<ResponsesTool>,
     temperature: f64,
     stream: bool,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(untagged)]
-enum ResponsesInput {
-    Message {
-        role: String,
-        content: String,
-    },
-    FunctionCall {
-        #[serde(rename = "type")]
-        kind: &'static str,
-        call_id: String,
-        name: String,
-        arguments: String,
-    },
-    FunctionCallOutput {
-        #[serde(rename = "type")]
-        kind: &'static str,
-        call_id: String,
-        output: String,
-    },
-}
-
-#[derive(Debug, Serialize, PartialEq)]
-struct ResponsesTool {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    description: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    parameters: Option<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ResponsesResponse {
-    #[serde(default)]
-    output: Vec<ResponsesOutput>,
-    #[serde(default)]
-    output_text: Option<String>,
-    #[serde(default)]
-    usage: Option<ResponsesUsage>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ResponsesOutput {
-    #[serde(default)]
-    id: Option<String>,
-    #[serde(default)]
-    call_id: Option<String>,
-    #[serde(rename = "type", default)]
-    kind: Option<String>,
-    #[serde(default)]
-    name: Option<String>,
-    #[serde(default)]
-    arguments: Option<Value>,
-    #[serde(default)]
-    content: Vec<ResponsesContent>,
-    #[serde(default)]
-    status: Option<String>,
-    #[serde(flatten)]
-    extra: serde_json::Map<String, Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-struct ResponsesContent {
-    #[serde(rename = "type", default)]
-    kind: Option<String>,
-    #[serde(default)]
-    text: Option<String>,
-    #[serde(default)]
-    annotations: Vec<Value>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-struct ResponsesUsage {
-    #[serde(default, alias = "prompt_tokens")]
-    input_tokens: u64,
-    #[serde(default, alias = "completion_tokens")]
-    output_tokens: u64,
 }
 
 fn xai_media_input(asset: MediaInputAsset, image_edit_input: bool) -> XaiMediaInput {
@@ -447,17 +369,6 @@ fn xai_video_status(status: &str) -> anyhow::Result<NativeMediaJobStatus> {
         "failed" => Ok(NativeMediaJobStatus::Failed),
         other => anyhow::bail!("unknown xAI video job status '{other}'"),
     }
-}
-
-fn first_nonempty(text: Option<&str>) -> Option<String> {
-    text.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
 }
 
 fn provider_option_str<'a>(options: &'a Value, key: &str) -> Option<&'a str> {
@@ -688,118 +599,12 @@ fn native_responses_tools(
     for tool_id in native_tools {
         let tool = xai_native_model_tool_spec(tool_id)
             .ok_or_else(|| anyhow::anyhow!("xAI does not support native model tool '{tool_id}'"))?;
-        tools.push(ResponsesTool {
-            kind: tool.provider_type,
-            name: None,
-            description: None,
-            parameters: None,
-        });
+        tools.push(ResponsesTool::native(tool.provider_type));
     }
 
-    if let Some(local_tools) = local_tools {
-        tools.extend(local_tools.iter().map(|tool| ResponsesTool {
-            kind: "function".to_string(),
-            name: Some(crate::sanitize_tool_name(&tool.name)),
-            description: Some(tool.description.clone()),
-            parameters: Some(tool.parameters.clone()),
-        }));
-    }
+    tools.extend(convert_local_tools(local_tools)?);
 
     Ok(tools)
-}
-
-fn responses_input(messages: &[ConversationMessage]) -> Vec<ResponsesInput> {
-    let mut input = Vec::with_capacity(messages.len());
-
-    for message in messages {
-        match message {
-            ConversationMessage::AssistantToolCalls { text, tool_calls } => {
-                if let Some(content) = text.as_deref().and_then(|text| first_nonempty(Some(text))) {
-                    input.push(ResponsesInput::Message {
-                        role: "assistant".to_string(),
-                        content,
-                    });
-                }
-
-                input.extend(tool_calls.iter().map(|call| ResponsesInput::FunctionCall {
-                    kind: "function_call",
-                    call_id: call.id.clone(),
-                    name: call.name.clone(),
-                    arguments: call.arguments.clone(),
-                }));
-            }
-            ConversationMessage::ToolResults(results) => input.extend(results.iter().map(
-                |result| ResponsesInput::FunctionCallOutput {
-                    kind: "function_call_output",
-                    call_id: result.tool_call_id.clone(),
-                    output: result.output.text_content(),
-                },
-            )),
-            ConversationMessage::Chat(message) => input.push(ResponsesInput::Message {
-                role: message.role.to_string(),
-                content: message.content.clone(),
-            }),
-            ConversationMessage::ArtifactAnalysis(analysis) => {
-                input.push(ResponsesInput::Message {
-                    role: "user".to_string(),
-                    content: analysis.model_context(),
-                });
-            }
-        }
-    }
-
-    input
-}
-
-fn responses_text(response: &ResponsesResponse) -> Option<String> {
-    if let Some(text) = first_nonempty(response.output_text.as_deref()) {
-        return Some(text);
-    }
-
-    for item in &response.output {
-        for content in &item.content {
-            if content.kind.as_deref() == Some("output_text")
-                && let Some(text) = first_nonempty(content.text.as_deref())
-            {
-                return Some(text);
-            }
-        }
-    }
-
-    for item in &response.output {
-        for content in &item.content {
-            if let Some(text) = first_nonempty(content.text.as_deref()) {
-                return Some(text);
-            }
-        }
-    }
-
-    None
-}
-
-fn responses_tool_calls(response: &ResponsesResponse) -> Vec<ToolCall> {
-    response
-        .output
-        .iter()
-        .filter(|item| item.kind.as_deref() == Some("function_call"))
-        .filter_map(|item| {
-            let name = item.name.clone()?;
-            let arguments = match item.arguments.as_ref() {
-                Some(Value::String(value)) => value.clone(),
-                Some(value) => value.to_string(),
-                None => "{}".to_string(),
-            };
-            Some(ToolCall {
-                id: item
-                    .call_id
-                    .clone()
-                    .or_else(|| item.id.clone())
-                    .unwrap_or_else(|| uuid::Uuid::new_v4().to_string()),
-                name,
-                arguments,
-            })
-        })
-        .collect()
 }
 
 fn xai_native_tool_name(output_kind: &str) -> Option<&'static str> {
@@ -1151,6 +956,28 @@ impl XAiProvider {
         })
     }
 
+    fn build_responses_request(
+        &self,
+        request: &ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        native_tools: &[NativeModelToolId],
+        stream: bool,
+    ) -> anyhow::Result<ResponsesRequest> {
+        Ok(ResponsesRequest {
+            model: model.to_string(),
+            input: convert_input(
+                request,
+                InstructionRolePolicy::from_supports_developer_role(
+                    self.supports_developer_role(model),
+                ),
+            )?,
+            tools: native_responses_tools(native_tools, request.tools)?,
+            temperature,
+            stream,
+        })
+    }
+
     async fn chat_with_native_model_tools(
         &self,
         request: ChatRequest<'_>,
@@ -1159,13 +986,10 @@ impl XAiProvider {
         native_tools: &[NativeModelToolId],
     ) -> anyhow::Result<ChatResponse> {
         let api_key = self.api_key()?;
-        let body = ResponsesRequest {
-            model: model.to_string(),
-            input: responses_input(request.messages),
-            tools: native_responses_tools(native_tools, request.tools)?,
-            temperature,
-            stream: false,
-        };
+        let body =
+            self.build_responses_request(&request, model, temperature, native_tools, false)?;
+
+        crate::request_logging::debug_provider_request("xai", model, 1, request.messages, &body);
 
         let response = self
             .client
@@ -1187,16 +1011,9 @@ impl XAiProvider {
             )
         })?;
 
-        let usage = response
-            .usage
-            .as_ref()
-            .map(|usage| TokenUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-            })
-            .unwrap_or_default();
-        let text = responses_text(&response);
-        let tool_calls = responses_tool_calls(&response);
+        let usage = response_usage(&response);
+        let text = response_text(&response);
+        let tool_calls = response_tool_calls(&response);
         let provider_tool_calls = responses_provider_tool_traces(&response);
         let finish_reason = crate::FinishReason::from_provider(None, !tool_calls.is_empty());
 
@@ -1218,13 +1035,9 @@ impl XAiProvider {
         events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
     ) -> anyhow::Result<ChatResponse> {
         let api_key = self.api_key()?;
-        let body = ResponsesRequest {
-            model: model.to_string(),
-            input: responses_input(request.messages),
-            tools: native_responses_tools(native_tools, request.tools)?,
-            temperature,
-            stream: true,
-        };
+        let body =
+            self.build_responses_request(&request, model, temperature, native_tools, true)?;
+        crate::request_logging::debug_provider_request("xai", model, 1, request.messages, &body);
         let response = self
             .client
             .post(self.endpoint("/responses"))
@@ -1283,16 +1096,9 @@ impl XAiProvider {
         }
 
         let response = state.into_response();
-        let usage = response
-            .usage
-            .as_ref()
-            .map(|usage| TokenUsage {
-                input_tokens: usage.input_tokens,
-                output_tokens: usage.output_tokens,
-            })
-            .unwrap_or_default();
-        let text = responses_text(&response);
-        let tool_calls = responses_tool_calls(&response);
+        let usage = response_usage(&response);
+        let text = response_text(&response);
+        let tool_calls = response_tool_calls(&response);
         let provider_tool_calls = responses_provider_tool_traces(&response);
         let finish_reason = crate::FinishReason::from_provider(None, !tool_calls.is_empty());
 
@@ -1859,11 +1665,105 @@ impl MediaCapabilitiesProvider for XAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{assert_serialized_equal, assert_serialized_prefix};
+    use crate::{ConversationMessage, ToolCall, ToolOutput, ToolResultMessage, ToolSpec};
+
+    #[test]
+    fn xai_native_responses_prefix_tools_and_streaming_projection_are_byte_stable() {
+        let provider = XAiProvider::new(Some("key"));
+        let native_tools = vec![NativeModelToolId::from("web_search")];
+        let local_tools = vec![ToolSpec {
+            name: "app.example/lookup".into(),
+            description: "Lookup".into(),
+            parameters: serde_json::json!({"type":"object"}),
+            category: Default::default(),
+        }];
+        let first_messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::session_data(
+                "session-context",
+            )),
+            ConversationMessage::user("first"),
+            ConversationMessage::assistant_tool_calls(
+                None,
+                vec![ToolCall {
+                    id: "call-1".into(),
+                    name: "app_example_lookup".into(),
+                    arguments: "{}".into(),
+                }],
+            ),
+            ConversationMessage::tool_result(ToolResultMessage {
+                tool_call_id: "call-1".into(),
+                output: ToolOutput::text("result"),
+            }),
+        ];
+        let mut later_messages = first_messages.clone();
+        later_messages.push(ConversationMessage::user("later"));
+        let first_request = ChatRequest {
+            messages: &first_messages,
+            tools: Some(&local_tools),
+            native_tools: Some(&native_tools),
+            prepared_artifacts: None,
+        };
+        let later_request = ChatRequest {
+            messages: &later_messages,
+            tools: Some(&local_tools),
+            native_tools: Some(&native_tools),
+            prepared_artifacts: None,
+        };
+        let buffered = provider
+            .build_responses_request(&first_request, "grok", 0.1, &native_tools, false)
+            .unwrap();
+        let streaming = provider
+            .build_responses_request(&first_request, "grok", 0.1, &native_tools, true)
+            .unwrap();
+        let later = provider
+            .build_responses_request(&later_request, "grok", 0.1, &native_tools, false)
+            .unwrap();
+
+        assert_serialized_prefix(&buffered.input, &later.input);
+        assert_serialized_equal(&buffered.input, &streaming.input);
+        assert_serialized_equal(&buffered.tools, &streaming.tools);
+        assert_serialized_equal(&buffered.tools, &later.tools);
+    }
 
     #[test]
     fn creates_with_default_base_url() {
         let provider = XAiProvider::new(Some("xai-key"));
         assert_eq!(provider.base_url, XAI_DEFAULT_BASE_URL);
+    }
+
+    #[test]
+    fn responses_input_runtime_control_role_follows_model_capability() {
+        let messages = vec![
+            ConversationMessage::developer("instructions"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "clock",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data("memory")),
+        ];
+
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let supported = serde_json::to_value(
+            convert_input(&request, InstructionRolePolicy::NativeDeveloper).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(supported[0]["role"], "developer");
+        assert_eq!(supported[1]["role"], "developer");
+        assert_eq!(supported[2]["role"], "user");
+
+        let fallback = serde_json::to_value(
+            convert_input(&request, InstructionRolePolicy::PortableUserFallback).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(fallback[0]["role"], "user");
+        assert_eq!(fallback.as_array().unwrap().len(), 1);
+        assert_eq!(fallback[0]["content"], "instructions\n\nclock\n\nmemory");
     }
 
     #[test]
@@ -2075,7 +1975,7 @@ mod tests {
         }))
         .expect("responses payload should parse");
 
-        let calls = responses_tool_calls(&response);
+        let calls = response_tool_calls(&response);
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].id, "call_123");
         assert_eq!(calls[0].name, "shell");

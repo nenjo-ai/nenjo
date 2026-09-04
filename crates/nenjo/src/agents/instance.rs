@@ -1,7 +1,10 @@
 //! Fully configured agent instance ready for task execution.
 
 use crate::context::{ContextRenderer, ProjectContext};
-use nenjo_models::NativeModelToolId;
+use nenjo_models::{
+    ConversationMessage, NativeModelToolId, RuntimeContextAuthority, RuntimeContextMessage,
+    RuntimeContextScope,
+};
 use std::collections::HashMap;
 use std::fmt::Display;
 use std::path::Path;
@@ -21,15 +24,37 @@ use crate::slug::Slug;
 use crate::tools::{Tool, ToolSecurity, ToolSpec};
 use crate::types::DelegationContext;
 
-/// The system and developer prompts ready for the turn loop.
+/// Whether a prompt plan created runtime context or reused its persisted snapshot.
+#[derive(Debug)]
+pub enum RuntimeContextPlan {
+    Created(Vec<RuntimeContextMessage>),
+    Reused(Vec<RuntimeContextMessage>),
+}
+
+impl RuntimeContextPlan {
+    pub fn messages(&self) -> &[RuntimeContextMessage] {
+        match self {
+            Self::Created(messages) | Self::Reused(messages) => messages,
+        }
+    }
+
+    pub fn created_messages(&self) -> Option<&[RuntimeContextMessage]> {
+        match self {
+            Self::Created(messages) => Some(messages),
+            Self::Reused(_) => None,
+        }
+    }
+}
+
+/// Static instructions and runtime-owned context ready for the turn loop.
 #[derive(Debug)]
 pub struct BuiltPrompts {
-    /// Rendered system prompt.
+    /// Compiled system prompt.
     pub system: String,
-    /// Rendered developer prompt.
+    /// Compiled developer prompt.
     pub developer: String,
-    /// Rendered user message for the current run.
-    pub user_message: String,
+    pub session_context: RuntimeContextPlan,
+    pub turn_context: RuntimeContextPlan,
 }
 
 impl Display for BuiltPrompts {
@@ -39,10 +64,7 @@ impl Display for BuiltPrompts {
         writeln!(f, "{}", self.system)?;
         writeln!(f)?;
         writeln!(f, "=== Developer Prompt ===")?;
-        writeln!(f, "{}", self.developer)?;
-        writeln!(f)?;
-        writeln!(f, "=== User Message ===")?;
-        write!(f, "{}", self.user_message)
+        write!(f, "{}", self.developer)
     }
 }
 
@@ -68,7 +90,7 @@ pub(crate) struct AgentModel<P: ProviderRuntime = ErasedProvider> {
 pub(crate) struct AgentPromptState {
     pub(crate) context: PromptContext,
     pub(crate) renderer: ContextRenderer,
-    pub(crate) memory_vars: HashMap<String, String>,
+    pub(crate) memory_context: String,
 }
 
 /// Runtime resources attached to an agent instance.
@@ -259,13 +281,25 @@ impl<P: ProviderRuntime> AgentInstance<P> {
     pub fn tool_specs(&self) -> Vec<ToolSpec> {
         let mut specs = self.local_tool_specs();
         specs.extend(native_model_tool_specs(&self.model_manifest.native_tools));
+        sort_tool_specs(&mut specs);
         specs
     }
 
-    /// Get the tool specs currently visible to the model, including native tools.
-    pub(crate) async fn visible_tool_specs(&self) -> Vec<ToolSpec> {
-        let mut specs = self.visible_local_tool_specs().await;
+    /// Resolve the provider-visible local catalog once for one execution.
+    /// Canonical names are sorted and checked before any model request.
+    pub(crate) async fn execution_local_tool_specs(&self) -> anyhow::Result<Vec<ToolSpec>> {
+        let specs = self.visible_local_tool_specs().await;
+        validate_unique_tool_specs(&specs)?;
+        Ok(specs)
+    }
+
+    pub(crate) fn tool_specs_from_execution_snapshot(
+        &self,
+        local_specs: &[ToolSpec],
+    ) -> Vec<ToolSpec> {
+        let mut specs = local_specs.to_vec();
         specs.extend(native_model_tool_specs(&self.model_manifest.native_tools));
+        sort_tool_specs(&mut specs);
         specs
     }
 
@@ -275,7 +309,8 @@ impl<P: ProviderRuntime> AgentInstance<P> {
     /// through `ChatRequest::native_tools` and executed by the provider, not by
     /// the local tool runtime.
     pub(crate) fn local_tool_specs(&self) -> Vec<ToolSpec> {
-        self.runtime
+        let mut specs = self
+            .runtime
             .tools
             .iter()
             .filter(|tool| {
@@ -285,7 +320,9 @@ impl<P: ProviderRuntime> AgentInstance<P> {
                 )
             })
             .map(|t| t.spec())
-            .collect()
+            .collect::<Vec<_>>();
+        sort_tool_specs(&mut specs);
+        specs
     }
 
     /// Get executable local tool specs currently visible to the model.
@@ -299,17 +336,13 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             }
             specs.push(tool.spec());
         }
+        sort_tool_specs(&mut specs);
         specs
     }
 
-    /// Build the system, developer, and user prompts for an execution.
-    ///
-    /// All three prompts are Jinja templates rendered with the same
-    /// `HashMap<String, String>` of template variables. Context blocks
-    /// (from the DB) are rendered first, then merged into the vars so
-    /// `{{ context.* }}` references resolve in the final prompts.
+    /// Compile static instructions and build runtime-owned context for an execution.
     pub fn build_prompts(&self, run: &AgentRun) -> anyhow::Result<BuiltPrompts> {
-        self.build_prompts_with_vars(run, None)
+        self.build_prompts_with_memory_context(run, None)
     }
 
     /// Fallible prompt builder used by the execution path so missing/conflicting
@@ -318,12 +351,12 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         self.build_prompts(run)
     }
 
-    pub(crate) fn build_prompts_with_vars(
+    pub(crate) fn build_prompts_with_memory_context(
         &self,
         run: &AgentRun,
-        memory_vars: Option<&HashMap<String, String>>,
+        memory_context: Option<&str>,
     ) -> anyhow::Result<BuiltPrompts> {
-        // 1. Build the render context from the run input + extras
+        // Build runtime context inputs from the run and executor-owned extras.
         let mut ctx = render_context_from_agent_run(run);
         let ex = &self.prompt.context.render_ctx_extra;
 
@@ -346,91 +379,37 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             ctx.routine.step = ex.routine.step.clone();
         }
 
-        // Agent (self)
-        ctx._self.slug = self.manifest.slug().to_string();
-        ctx._self.name = self.name().to_string();
-        ctx._self.model_name = self.model.model_name.clone();
-        ctx._self.description = Some(self.description().to_string());
-
-        // Global
-        ctx.timestamp = chrono::Utc::now().to_rfc3339();
-
-        // Memory profile
-        let prompt_config = self.prompt_config();
-        ctx.memory_profile = crate::context::MemoryProfileContext {
-            core_focus: if prompt_config.memory_profile.core_focus.is_empty() {
-                None
-            } else {
-                Some(crate::context::FocusListContext {
-                    items: prompt_config.memory_profile.core_focus.clone(),
-                })
-            },
-            project_focus: if prompt_config.memory_profile.project_focus.is_empty() {
-                None
-            } else {
-                Some(crate::context::FocusListContext {
-                    items: prompt_config.memory_profile.project_focus.clone(),
-                })
-            },
-            shared_focus: if prompt_config.memory_profile.shared_focus.is_empty() {
-                None
-            } else {
-                Some(crate::context::FocusListContext {
-                    items: prompt_config.memory_profile.shared_focus.clone(),
-                })
-            },
+        let agent_context = crate::context::AgentContext {
+            slug: self.manifest.slug().to_string(),
+            name: self.name().to_string(),
+            description: (!self.description().is_empty()).then(|| self.description().to_string()),
         };
-
-        // Memories
-        ctx.memory_vars = memory_vars
-            .cloned()
-            .unwrap_or_else(|| self.prompt.memory_vars.clone());
-        ctx.knowledge_vars = ex.knowledge_vars.clone();
-
-        // 3. Build the vars HashMap once
-        let mut vars = ctx.to_vars();
-        let argument_vars = merge_argument_bindings(
+        let prompt_config = self.prompt_config();
+        let mut static_vars = merge_argument_bindings(
             &self.prompt.context.argument_bindings,
             &run.execution.argument_bindings,
         )?;
-        vars.extend(argument_vars);
+        static_vars.extend(ex.knowledge_vars.clone());
 
-        // 4. Render context blocks and merge into vars
+        // Static context fragments and package arguments are compiled without turn data.
         validate_argument_references(
-            &vars,
+            &static_vars,
             [
                 prompt_config.system_prompt.as_str(),
                 prompt_config.developer_prompt.as_str(),
-                prompt_config.templates.chat_task.as_str(),
-                prompt_config.templates.task_execution.as_str(),
-                prompt_config.templates.gate_eval.as_str(),
             ],
             self.prompt.renderer.argument_selectors(),
         )?;
-        let rendered_blocks = self.prompt.renderer.render_all(&vars);
-        vars.extend(rendered_blocks);
-
-        if !ctx.project.context.is_empty() {
-            let mut project_context_vars = vars.clone();
-            project_context_vars.remove("project");
-            project_context_vars.remove("project.context");
-            let rendered_context = self
-                .prompt
+        let renderer =
+            self.prompt
                 .renderer
-                .render_template(&ctx.project.context, &project_context_vars);
-            ctx.project.context = rendered_context.clone();
-            if rendered_context.is_empty() {
-                vars.remove("project.context");
-            } else {
-                vars.insert("project.context".into(), rendered_context);
-            }
-            if !ctx.project.is_empty() {
-                vars.insert("project".into(), nenjo_xml::to_xml_pretty(&ctx.project, 2));
-            }
-        }
+                .with_policy(crate::package_resolve::policy_from_agent_metadata(
+                    self.manifest.source_type.as_deref(),
+                    Some(&self.manifest.metadata),
+                ));
+        static_vars.extend(renderer.render_all(&static_vars));
 
-        // 5. Assemble developer prompt
-        // Domain developer prompt addon is appended when a domain session is active.
+        // Domain and delegation overlays are static for this instruction epoch.
         let mut developer = prompt_config.developer_prompt.clone();
         if self.prompt.context.append_active_domain_addon
             && let Some(ref domain) = self.prompt.context.active_domain
@@ -449,44 +428,74 @@ impl<P: ProviderRuntime> AgentInstance<P> {
             developer.push_str(guard);
         }
 
-        // 6. Select the user message template based on task type
-        let (task_type_name, task_template) = match &run.kind {
-            AgentRunKind::Task { .. } => ("Task", prompt_config.templates.task_execution.as_str()),
-            AgentRunKind::Chat(chat) => (
-                "Chat",
-                chat.template_override
-                    .as_deref()
-                    .unwrap_or(prompt_config.templates.chat_task.as_str()),
-            ),
-            AgentRunKind::FollowUp { .. } => ("FollowUp", ""),
-            AgentRunKind::Gate { .. } => ("Gate", prompt_config.templates.gate_eval.as_str()),
-        };
-        tracing::debug!(
-            agent = %self.name(),
-            task_type = task_type_name,
-            template_len = task_template.len(),
-            "Selected task template"
-        );
+        validate_static_prompt_sources(
+            [prompt_config.system_prompt.as_str(), developer.as_str()],
+            self.prompt.renderer.runtime_selectors(),
+        )?;
 
-        // 7. Render all three prompts with the same vars.
-        // Multi-version package content resolves under this agent's policy.
-        let renderer =
-            self.prompt
-                .renderer
-                .with_policy(crate::package_resolve::policy_from_agent_metadata(
-                    self.manifest.source_type.as_deref(),
-                    Some(&self.manifest.metadata),
-                ));
-        let system = renderer.render_template(&prompt_config.system_prompt, &vars);
-        let developer = renderer.render_template(&developer, &vars);
-        let user_message = renderer.render_template(task_template, &vars);
+        let system = renderer.render_template(&prompt_config.system_prompt, &static_vars);
+        let developer = renderer.render_template(&developer, &static_vars);
+        let resolved_memory = memory_context.unwrap_or(&self.prompt.memory_context);
+        let session_context = match existing_session_contexts(run) {
+            Some(messages) => RuntimeContextPlan::Reused(messages),
+            None => RuntimeContextPlan::Created(crate::context::runtime::session_contexts(
+                &agent_context,
+                &ctx,
+                resolved_memory,
+            )),
+        };
+        let turn_context = match replayed_turn_contexts(run) {
+            Some(messages) => RuntimeContextPlan::Reused(messages),
+            None => RuntimeContextPlan::Created(crate::context::runtime::turn_contexts(&ctx, run)),
+        };
 
         Ok(BuiltPrompts {
             system,
             developer,
-            user_message,
+            session_context,
+            turn_context,
         })
     }
+}
+
+fn replayed_turn_contexts(run: &AgentRun) -> Option<Vec<RuntimeContextMessage>> {
+    match &run.kind {
+        AgentRunKind::Chat(chat) if !chat.replayed_turn_contexts.is_empty() => {
+            Some(chat.replayed_turn_contexts.clone())
+        }
+        AgentRunKind::Chat(_) => None,
+        AgentRunKind::Task(_) | AgentRunKind::FollowUp(_) | AgentRunKind::Gate(_) => None,
+    }
+}
+
+fn existing_session_contexts(run: &AgentRun) -> Option<Vec<RuntimeContextMessage>> {
+    let history = match &run.kind {
+        AgentRunKind::Chat(chat) => &chat.history,
+        AgentRunKind::FollowUp(follow_up) => &follow_up.history,
+        AgentRunKind::Task(_) | AgentRunKind::Gate(_) => return None,
+    };
+    let mut control = None;
+    let mut data = None;
+    for message in history.iter().rev() {
+        let ConversationMessage::RuntimeContext(context) = message else {
+            continue;
+        };
+        if context.scope() != RuntimeContextScope::Session {
+            continue;
+        }
+        match context.authority() {
+            RuntimeContextAuthority::Control if control.is_none() => {
+                control = Some(context.clone());
+            }
+            RuntimeContextAuthority::Data if data.is_none() => data = Some(context.clone()),
+            RuntimeContextAuthority::Control | RuntimeContextAuthority::Data => {}
+        }
+        if control.is_some() && data.is_some() {
+            break;
+        }
+    }
+    let messages = control.into_iter().chain(data).collect::<Vec<_>>();
+    (!messages.is_empty()).then_some(messages)
 }
 
 fn validate_argument_references<'a>(
@@ -511,6 +520,26 @@ fn validate_argument_references<'a>(
     }
 }
 
+fn validate_static_prompt_sources<'a>(
+    prompt_sources: impl IntoIterator<Item = &'a str>,
+    context_selectors: Vec<String>,
+) -> anyhow::Result<()> {
+    let mut selectors = prompt_sources
+        .into_iter()
+        .flat_map(crate::context::renderer::scan_runtime_selectors)
+        .chain(context_selectors)
+        .collect::<Vec<_>>();
+    selectors.sort();
+    selectors.dedup();
+    if selectors.is_empty() {
+        return Ok(());
+    }
+    anyhow::bail!(
+        "static prompts cannot reference runtime-owned selectors: {}",
+        selectors.join(", ")
+    )
+}
+
 fn native_model_tool_shadows_local_tool(
     native_tools: &[NativeModelToolId],
     local_tool_name: &str,
@@ -519,6 +548,21 @@ fn native_model_tool_shadows_local_tool(
         .iter()
         .any(|tool| tool.as_str() == "web_search")
         && local_tool_name == "search_web"
+}
+
+fn sort_tool_specs(specs: &mut [ToolSpec]) {
+    specs.sort_by(|left, right| left.name.cmp(&right.name));
+}
+
+fn validate_unique_tool_specs(specs: &[ToolSpec]) -> anyhow::Result<()> {
+    if let Some(duplicate) = specs
+        .windows(2)
+        .find(|pair| pair[0].name == pair[1].name)
+        .map(|pair| pair[0].name.as_str())
+    {
+        anyhow::bail!("duplicate canonical tool name '{duplicate}' in execution snapshot");
+    }
+    Ok(())
 }
 
 fn populate_project_working_directory(project: &mut ProjectContext, workspace_dir: &Path) {
@@ -585,6 +629,36 @@ mod tests {
             specs
                 .iter()
                 .all(|spec| spec.category == crate::tools::ToolCategory::Read)
+        );
+    }
+
+    #[test]
+    fn execution_tool_snapshot_names_are_sorted_and_unique() {
+        let tool = |name: &str| ToolSpec {
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            parameters: serde_json::json!({"type": "object"}),
+            category: crate::tools::ToolCategory::Read,
+        };
+        let mut specs = vec![tool("wait"), tool("inspect"), tool("send_input")];
+
+        sort_tool_specs(&mut specs);
+        validate_unique_tool_specs(&specs).unwrap();
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect::<Vec<_>>(),
+            ["inspect", "send_input", "wait"]
+        );
+
+        specs.push(tool("inspect"));
+        sort_tool_specs(&mut specs);
+        let error = validate_unique_tool_specs(&specs).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate canonical tool name 'inspect'")
         );
     }
 

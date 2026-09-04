@@ -24,8 +24,8 @@ pub enum ScopeResource {
     Tasks,
     /// Immutable organization artifacts.
     Artifacts,
-    /// Org-level library knowledge documents.
-    Library,
+    /// Org-level knowledge packs and documents.
+    Knowledge,
     /// Routine manifests.
     Routines,
     /// Model manifests.
@@ -86,7 +86,8 @@ impl PlatformScope {
             "tasks:write" => Self::write(ScopeResource::Tasks),
             "artifacts:read" => Self::read(ScopeResource::Artifacts),
             "artifacts:write" => Self::write(ScopeResource::Artifacts),
-            "library:write" => Self::write(ScopeResource::Library),
+            "knowledge:read" => Self::read(ScopeResource::Knowledge),
+            "knowledge:write" => Self::write(ScopeResource::Knowledge),
             "routines:read" => Self::read(ScopeResource::Routines),
             "routines:write" => Self::write(ScopeResource::Routines),
             "models:read" => Self::read(ScopeResource::Models),
@@ -150,7 +151,7 @@ impl fmt::Display for PlatformScope {
                     ScopeResource::Projects => "projects",
                     ScopeResource::Tasks => "tasks",
                     ScopeResource::Artifacts => "artifacts",
-                    ScopeResource::Library => "library",
+                    ScopeResource::Knowledge => "knowledge",
                     ScopeResource::Routines => "routines",
                     ScopeResource::Models => "models",
                     ScopeResource::Councils => "councils",
@@ -174,7 +175,7 @@ mod tests {
 
     #[test]
     fn write_scope_implies_read_within_its_resource_family() {
-        for resource in ["tasks", "artifacts"] {
+        for resource in ["tasks", "artifacts", "knowledge"] {
             let write = PlatformScope::parse(&format!("{resource}:write"));
             let read = PlatformScope::parse(&format!("{resource}:read"));
             assert!(write.allows(&read));
@@ -189,6 +190,18 @@ mod tests {
         );
         assert!(
             !PlatformScope::parse("artifacts:write").allows(&PlatformScope::parse("tasks:read"))
+        );
+    }
+
+    #[test]
+    fn legacy_library_scopes_are_unknown() {
+        assert_eq!(
+            PlatformScope::parse("library:read"),
+            PlatformScope::Unknown("library:read".to_string())
+        );
+        assert_eq!(
+            PlatformScope::parse("library:write"),
+            PlatformScope::Unknown("library:write".to_string())
         );
     }
 }

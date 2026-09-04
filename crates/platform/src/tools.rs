@@ -29,7 +29,7 @@ const DOMAIN_WRITE_TOOLS: &[&str] = &["configure_domain"];
 const PROJECT_MANIFEST_READ_TOOLS: &[&str] = &["list_projects", "get_project"];
 const PROJECT_MANIFEST_WRITE_TOOLS: &[&str] =
     &["create_project", "update_project", "delete_project"];
-const LIBRARY_MANIFEST_WRITE_TOOLS: &[&str] = &[
+const KNOWLEDGE_MANIFEST_WRITE_TOOLS: &[&str] = &[
     "create_knowledge_pack",
     "update_knowledge_pack",
     "create_knowledge_doc",
@@ -101,7 +101,11 @@ const MANIFEST_TOOL_GROUPS: &[(ScopeResource, &[&str], &[&str])] = &[
         PROJECT_MANIFEST_READ_TOOLS,
         PROJECT_MANIFEST_WRITE_TOOLS,
     ),
-    (ScopeResource::Library, &[], LIBRARY_MANIFEST_WRITE_TOOLS),
+    (
+        ScopeResource::Knowledge,
+        &[],
+        KNOWLEDGE_MANIFEST_WRITE_TOOLS,
+    ),
     (
         ScopeResource::Routines,
         ROUTINE_READ_TOOLS,

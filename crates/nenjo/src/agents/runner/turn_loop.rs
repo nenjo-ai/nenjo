@@ -206,6 +206,19 @@ where
                         started_provider_tools.insert(trace.id.clone());
                         completed_provider_tools.insert(trace.id);
                     }
+                    ProviderStreamEvent::CapacityWaiting { limit } => emit_event(
+                        events_tx,
+                        TurnEvent::ModelCapacityWaiting {
+                            request_id: request_id.to_string(),
+                            limit,
+                        },
+                    ),
+                    ProviderStreamEvent::CapacityAcquired => emit_event(
+                        events_tx,
+                        TurnEvent::ModelCapacityAcquired {
+                            request_id: request_id.to_string(),
+                        },
+                    ),
                     ProviderStreamEvent::RetryScheduled {
                         provider,
                         model,
@@ -280,6 +293,19 @@ where
                             started_provider_tools.insert(trace.id.clone());
                             completed_provider_tools.insert(trace.id);
                         }
+                        ProviderStreamEvent::CapacityWaiting { limit } => emit_event(
+                            events_tx,
+                            TurnEvent::ModelCapacityWaiting {
+                                request_id: request_id.to_string(),
+                                limit,
+                            },
+                        ),
+                        ProviderStreamEvent::CapacityAcquired => emit_event(
+                            events_tx,
+                            TurnEvent::ModelCapacityAcquired {
+                                request_id: request_id.to_string(),
+                            },
+                        ),
                         ProviderStreamEvent::RetryScheduled {
                             provider,
                             model,
@@ -448,6 +474,10 @@ tokio::task_local! {
 }
 
 tokio::task_local! {
+    static CURRENT_EXECUTION_TIMEZONE: chrono_tz::Tz;
+}
+
+tokio::task_local! {
     static CURRENT_HOOK_RUNTIME: Option<Arc<HookRuntime>>;
 }
 
@@ -480,6 +510,17 @@ fn cancelled_tool_result() -> ToolResult {
 
 pub(crate) fn current_chat_history() -> Option<Vec<ConversationMessage>> {
     CURRENT_CHAT_HISTORY.try_with(Clone::clone).ok()
+}
+
+pub(crate) fn current_execution_timezone() -> Option<chrono_tz::Tz> {
+    CURRENT_EXECUTION_TIMEZONE.try_with(Clone::clone).ok()
+}
+
+pub(crate) async fn scope_current_execution_timezone<F, T>(timezone: chrono_tz::Tz, future: F) -> T
+where
+    F: std::future::Future<Output = T>,
+{
+    CURRENT_EXECUTION_TIMEZONE.scope(timezone, future).await
 }
 
 pub(crate) fn activate_current_hook_scope(scope: ActiveHookScope) -> bool {
@@ -582,10 +623,12 @@ where
         .into());
     }
     let cancel = agent.runtime.execution_cancel.clone();
-    let visible_tool_specs = agent.visible_tool_specs().await;
-    let initial_local_tool_specs = agent.visible_local_tool_specs().await;
+    let local_tool_specs = agent.execution_local_tool_specs().await?;
+    let visible_tool_specs = agent.tool_specs_from_execution_snapshot(&local_tool_specs);
     let visible_tool_specs = visible_tool_specs.as_slice();
-    let initial_local_tool_specs = initial_local_tool_specs.as_slice();
+    let local_tool_specs = local_tool_specs.as_slice();
+    let tools_ref = (!local_tool_specs.is_empty()).then_some(local_tool_specs);
+    let tool_payload_bytes = tools_ref.map(estimate_serialized_bytes).unwrap_or(0);
     let hook_runtime = agent.runtime.hook_runtime.clone();
     let config = TurnLoopConfig {
         max_turns: agent.runtime.config.max_turns,
@@ -625,7 +668,7 @@ where
                     agent = agent_name,
                     model,
                     tool_count = visible_tool_specs.len(),
-                    local_tool_count = initial_local_tool_specs.len(),
+                    local_tool_count = local_tool_specs.len(),
                     native_tool_count = agent.model_manifest.native_tools.len(),
                     tools = ?tool_names,
                     "Turn loop starting with tools"
@@ -640,9 +683,7 @@ where
             let mut loop_exit = TurnLoopExit::MaxTurnsReached;
             for iteration in 0..max_turns {
                 if cancel.is_cancelled() {
-                    agent.runtime.async_ops.stop(
-                        Vec::new(),
-                        None,
+                    agent.runtime.async_ops.stop_all_internal(
                         Some("execution cancelled".into()),
                         events_tx.clone(),
                     ).await;
@@ -695,9 +736,7 @@ where
                     emit_event(events_tx.as_ref(), TurnEvent::Paused);
                     tokio::select! {
                         _ = cancel.cancelled() => {
-                            agent.runtime.async_ops.stop(
-                                Vec::new(),
-                                None,
+                            agent.runtime.async_ops.stop_all_internal(
                                 Some("execution cancelled".into()),
                                 events_tx.clone(),
                             ).await;
@@ -737,15 +776,6 @@ where
                 }
 
                 // Call LLM
-                let local_tool_specs = agent
-                    .visible_local_tool_specs()
-                    .await;
-                let tools_ref = if local_tool_specs.is_empty() {
-                    None
-                } else {
-                    Some(local_tool_specs.as_slice())
-                };
-                let tool_payload_bytes = tools_ref.map(estimate_serialized_bytes).unwrap_or(0);
                 let message_payload_budget = agent
                     .runtime
                     .config

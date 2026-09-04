@@ -2,12 +2,12 @@
 //!
 //! Supports Jinja2 syntax: `{{ variable }}`, `{% if %}`, `{% for %}`, filters.
 //! Template variables are provided as a flat `HashMap<String, String>` with
-//! dotted keys (e.g. `"task.id"`, `"agent.name"`). The tree builder groups
-//! these into nested MiniJinja access: `{{ task.id }}`, `{{ agent.name }}`.
+//! dotted keys (e.g. `"document.id"`, `"profile.name"`). The tree builder groups
+//! these into nested MiniJinja access: `{{ document.id }}`, `{{ profile.name }}`.
 //!
 //! When a node has its own value AND children, the node's value is used for
-//! direct rendering (`{{ agent }}`), while children are still accessible
-//! (`{{ agent.id }}`). This enables the pattern where singular keys render
+//! direct rendering (`{{ profile }}`), while children are still accessible
+//! (`{{ profile.id }}`). This enables the pattern where singular keys render
 //! full XML and dotted keys render individual fields.
 
 use std::collections::{BTreeMap, HashMap};
@@ -36,10 +36,10 @@ pub struct TemplateError {
 /// use nenjo_xml::template::render_template;
 ///
 /// let mut vars = HashMap::new();
-/// vars.insert("agent.name".into(), "coder".into());
-/// vars.insert("task.title".into(), "Fix bug".into());
+/// vars.insert("profile.name".into(), "coder".into());
+/// vars.insert("document.title".into(), "Fix bug".into());
 ///
-/// let result = render_template("{{ agent.name }}: {{ task.title }}", &vars);
+/// let result = render_template("{{ profile.name }}: {{ document.title }}", &vars);
 /// assert_eq!(result, "coder: Fix bug");
 /// ```
 pub fn render_template(template: &str, vars: &HashMap<String, String>) -> String {
@@ -244,24 +244,24 @@ fn escape_backslash_braces(template: &str) -> String {
 /// with dotted keys.
 ///
 /// When a node has its own leaf value AND children, the leaf value is used
-/// for direct rendering (e.g. `{{ agent }}`), while children remain accessible
-/// (e.g. `{{ agent.id }}`). Nodes without their own value render as the
+/// for direct rendering (e.g. `{{ profile }}`), while children remain accessible
+/// (e.g. `{{ profile.id }}`). Nodes without their own value render as the
 /// concatenation of all descendant leaf values.
 ///
 /// # Examples
 ///
 /// ```text
 /// Input:
-///   "agent"      → "<agent id='1' name='coder'/>"
-///   "agent.id"   → "1"
-///   "agent.name" → "coder"
-///   "agents"     → "<agent .../><agent .../>"
+///   "profile"      → "<profile id='1' name='coder'/>"
+///   "profile.id"   → "1"
+///   "profile.name" → "coder"
+///   "profiles"     → "<profile .../><profile .../>"
 ///
 /// Template access:
-///   {{ agent }}       → "<agent id='1' name='coder'/>"
-///   {{ agent.id }}    → "1"
-///   {{ agent.name }}  → "coder"
-///   {{ agents }}      → "<agent .../><agent .../>"
+///   {{ profile }}       → "<profile id='1' name='coder'/>"
+///   {{ profile.id }}    → "1"
+///   {{ profile.name }}  → "coder"
+///   {{ profiles }}      → "<profile .../><profile .../>"
 /// ```
 pub fn vars_to_value(vars: &HashMap<String, String>) -> Value {
     if vars.is_empty() {
@@ -388,9 +388,9 @@ mod tests {
 
     #[test]
     fn render_basic_variables() {
-        let v = vars(&[("agent.name", "dev"), ("project.name", "MyProject")]);
-        let result = render_template("Agent {{ agent.name }} in {{ project.name }}", &v);
-        assert_eq!(result, "Agent dev in MyProject");
+        let v = vars(&[("profile.name", "dev"), ("project.name", "MyProject")]);
+        let result = render_template("Profile {{ profile.name }} in {{ project.name }}", &v);
+        assert_eq!(result, "Profile dev in MyProject");
     }
 
     #[test]
@@ -398,28 +398,27 @@ mod tests {
         let v = vars(&[
             ("task.id", "TASK-42"),
             ("task.title", "Fix bug"),
-            ("agent.name", "coder"),
+            ("profile.name", "coder"),
         ]);
         assert_eq!(render_template("{{ task.id }}", &v), "TASK-42");
         assert_eq!(render_template("{{ task.title }}", &v), "Fix bug");
-        assert_eq!(render_template("{{ agent.name }}", &v), "coder");
+        assert_eq!(render_template("{{ profile.name }}", &v), "coder");
     }
 
     #[test]
     fn render_singular_with_own_value_and_children() {
         let v = vars(&[
-            ("agent", "<agent id=\"1\" name=\"coder\"/>"),
-            ("agent.id", "1"),
-            ("agent.name", "coder"),
+            ("profile", "<profile id=\"1\" name=\"coder\"/>"),
+            ("profile.id", "1"),
+            ("profile.name", "coder"),
         ]);
-        // {{ agent }} renders the full XML (own value), not concatenation of children
+        // The root renders its own value rather than concatenating its children.
         assert_eq!(
-            render_template("{{ agent }}", &v),
-            "<agent id=\"1\" name=\"coder\"/>"
+            render_template("{{ profile }}", &v),
+            "<profile id=\"1\" name=\"coder\"/>"
         );
-        // {{ agent.id }} still renders the field
-        assert_eq!(render_template("{{ agent.id }}", &v), "1");
-        assert_eq!(render_template("{{ agent.name }}", &v), "coder");
+        assert_eq!(render_template("{{ profile.id }}", &v), "1");
+        assert_eq!(render_template("{{ profile.name }}", &v), "coder");
     }
 
     #[test]
@@ -505,8 +504,11 @@ Task: {{ task.title }}"#;
 
     #[test]
     fn try_render_success() {
-        let v = vars(&[("agent.name", "dev")]);
-        assert_eq!(try_render_template("{{ agent.name }}", &v).unwrap(), "dev");
+        let v = vars(&[("profile.name", "dev")]);
+        assert_eq!(
+            try_render_template("{{ profile.name }}", &v).unwrap(),
+            "dev"
+        );
     }
 
     #[test]
@@ -531,10 +533,10 @@ Task: {{ task.title }}"#;
 
     #[test]
     fn render_with_named_template_include() {
-        let v = vars(&[("agent.name", "Nenji")]);
+        let v = vars(&[("profile.name", "Nenji")]);
         let templates = HashMap::from([(
             "pkg/nenjo/core/methodology".to_string(),
-            "<methodology>{{ agent.name }}</methodology>".to_string(),
+            "<methodology>{{ profile.name }}</methodology>".to_string(),
         )]);
 
         let rendered = render_template_with_named_templates(
@@ -548,11 +550,11 @@ Task: {{ task.title }}"#;
 
     #[test]
     fn render_with_named_templates_supports_nested_includes() {
-        let v = vars(&[("agent.name", "Nenji")]);
+        let v = vars(&[("profile.name", "Nenji")]);
         let templates = HashMap::from([
             (
                 "base".to_string(),
-                "<base>{{ agent.name }}</base>".to_string(),
+                "<base>{{ profile.name }}</base>".to_string(),
             ),
             (
                 "wrapper".to_string(),
@@ -1066,8 +1068,8 @@ Task: {{ task.title }}"#;
     fn render_preserves_em_dash() {
         let v = vars(&[("name", "dev")]);
         assert_eq!(
-            render_template(r"\{{ self }} — Full XML {{ name }}", &v),
-            "{{ self }} — Full XML dev"
+            render_template(r"\{{ token }} — Literal {{ name }}", &v),
+            "{{ token }} — Literal dev"
         );
     }
 
@@ -1082,8 +1084,8 @@ Task: {{ task.title }}"#;
     #[test]
     fn esc_preserves_mixed_unicode_and_escapes() {
         assert_eq!(
-            escape_backslash_braces(r"\{{ agent.id }} — UUID • \{{ agent.name }} — Name"),
-            "{% raw %}{{{% endraw %} agent.id }} — UUID • {% raw %}{{{% endraw %} agent.name }} — Name"
+            escape_backslash_braces(r"\{{ profile.id }} — UUID • \{{ profile.name }} — Name"),
+            "{% raw %}{{{% endraw %} profile.id }} — UUID • {% raw %}{{{% endraw %} profile.name }} — Name"
         );
     }
 }

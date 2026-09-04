@@ -90,7 +90,7 @@ same durable inbox submission used by manual tasks. An agent-assigned schedule
 is therefore just a scheduled task with `TaskExecutionTarget::Agent`.
 
 The canonical `TaskScheduleDefinition` supports interval, daily, weekly,
-monthly, yearly, and advanced cron recurrence in an IANA timezone, plus end
+monthly, yearly, and advanced cron recurrence in the organization's IANA timezone, plus end
 date and occurrence-count boundaries. Calendar recurrences preserve their
 local wall-clock time across daylight-saving changes. The runtime stores the
 materialized occurrence count with its inbox state so finite schedules remain

@@ -23,7 +23,7 @@ pub mod tools;
 pub mod types;
 
 pub use markdown::MarkdownMemory;
-pub use prompt::build_memory_vars;
+pub use prompt::build_memory_context;
 pub use types::{MemoryCategory, MemoryFact, MemoryScope};
 
 use anyhow::Result;

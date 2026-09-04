@@ -36,25 +36,6 @@ fn prompt_config_schema() -> serde_json::Value {
                 "type": "string",
                 "description": "Secondary guidance for the agent. Used for implementation detail, workflow rules, and contextual guidance beneath the system prompt. Omit to leave unchanged."
             },
-            "templates": {
-                "type": "object",
-                "description": "Agent template slot patch. Only provided keys are updated.",
-                "properties": {
-                    "task": {
-                        "type": "string",
-                        "description": "Template used when the agent executes a normal task. Omit to leave unchanged."
-                    },
-                    "chat": {
-                        "type": "string",
-                        "description": "Template used when the agent responds in chat. Omit to leave unchanged."
-                    },
-                    "gate": {
-                        "type": "string",
-                        "description": "Template used when the agent evaluates a gate. Omit to leave unchanged."
-                    }
-                },
-                "additionalProperties": true
-            },
             "memory_profile": {
                 "type": "object",
                 "description": "Partial memory extraction and retrieval preference patch for the target agent.",

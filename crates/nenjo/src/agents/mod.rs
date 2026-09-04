@@ -11,7 +11,7 @@ pub mod runner;
 pub(crate) mod sub_agents;
 
 pub use async_ops::{
-    AsyncOperationHandle, AsyncOperationRuntime, StartAsyncOperation,
+    AsyncOpStartError, AsyncOperationHandle, AsyncOperationRuntime, StartAsyncOperation,
     current_async_operation_runtime,
 };
 pub use builder::AgentBuilder;

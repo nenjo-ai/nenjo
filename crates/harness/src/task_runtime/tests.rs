@@ -158,6 +158,7 @@ async fn manual_and_scheduled_tasks_share_one_concurrency_gate() {
             execution_run_id: Uuid::new_v4(),
             project: None,
             target: TaskExecutionTarget::agent("coder"),
+            timezone: chrono_tz::UTC,
             content: TaskContent {
                 title: "manual".to_string(),
                 instructions: "work".to_string(),
@@ -204,6 +205,7 @@ async fn handled_executor_failure_is_persisted_as_failed() {
             execution_run_id: Uuid::new_v4(),
             project: None,
             target: TaskExecutionTarget::agent("coder"),
+            timezone: chrono_tz::UTC,
             content: TaskContent {
                 title: "failing task".to_string(),
                 instructions: "fail".to_string(),
@@ -264,6 +266,7 @@ async fn human_continuation_uses_monotonic_inbox_revisions() {
             execution_run_id: run_id,
             project: None,
             target: TaskExecutionTarget::agent("coder"),
+            timezone: chrono_tz::UTC,
             content: TaskContent {
                 title: "review me".to_string(),
                 instructions: "wait for approval".to_string(),
@@ -343,6 +346,7 @@ async fn cancelling_running_work_flows_through_the_host_executor() {
             execution_run_id: run_id,
             project: None,
             target: TaskExecutionTarget::agent("coder"),
+            timezone: chrono_tz::UTC,
             content: TaskContent {
                 title: "cancel me".to_string(),
                 instructions: "wait".to_string(),

@@ -4,7 +4,9 @@ use anyhow::Result;
 use serde::Serialize;
 use tokio::sync::mpsc;
 
-use nenjo_models::{ChatRequest, ChatRole, ConversationMessage, ModelProvider, ToolOutputPart};
+use nenjo_models::{
+    ChatRequest, ChatRole, ConversationMessage, ModelProvider, RuntimeContextScope, ToolOutputPart,
+};
 
 use super::types::TurnEvent;
 
@@ -30,6 +32,7 @@ fn estimate_message_tokens(message: &ConversationMessage) -> usize {
         }
         ConversationMessage::ToolResults(results) => estimate_serialized_bytes(results) / 4,
         ConversationMessage::ArtifactAnalysis(analysis) => estimate_serialized_bytes(analysis) / 4,
+        ConversationMessage::RuntimeContext(context) => context.content().len() / 4,
     }
 }
 
@@ -172,7 +175,10 @@ fn compact_messages_without_drop(messages: &mut [ConversationMessage], max_token
 fn drop_oldest_messages(messages: &mut Vec<ConversationMessage>, max_tokens: usize) {
     let min_keep = 5;
     while messages.len() > min_keep && estimate_tokens(messages) > max_tokens {
-        let group = message_group_range(messages, 1, messages.len());
+        let Some(start) = first_compactable_index(messages) else {
+            break;
+        };
+        let group = message_group_range(messages, start, messages.len());
         if messages[group.clone()]
             .iter()
             .any(ConversationMessage::has_artifact_references)
@@ -182,16 +188,7 @@ fn drop_oldest_messages(messages: &mut Vec<ConversationMessage>, max_tokens: usi
             // silently dropping a reference would change the conversation.
             break;
         }
-        let removed = messages.remove(1);
-        if matches!(removed, ConversationMessage::AssistantToolCalls { .. }) {
-            while messages.len() > min_keep
-                && messages
-                    .get(1)
-                    .is_some_and(|message| matches!(message, ConversationMessage::ToolResults(_)))
-            {
-                messages.remove(1);
-            }
-        }
+        messages.drain(group);
     }
 }
 
@@ -293,6 +290,7 @@ fn compact_payload_message(message: &mut ConversationMessage, max_content_chars:
         ConversationMessage::ArtifactAnalysis(analysis) => {
             compact_text(&mut analysis.text, max_content_chars, "payload compacted");
         }
+        ConversationMessage::RuntimeContext(_) => {}
     }
 }
 
@@ -344,8 +342,10 @@ fn find_phase3_candidate(
         return None;
     }
 
-    let max_candidate_end = (1 + (len.saturating_sub(1) * 3 / 5)).min(compactable_end);
-    let mut start = 1;
+    let start_index = first_compactable_index(messages)?;
+    let max_candidate_end =
+        (start_index + (len.saturating_sub(start_index) * 3 / 5)).min(compactable_end);
+    let mut start = start_index;
     while start < compactable_end && is_summary_message(&messages[start]) {
         start += 1;
     }
@@ -407,7 +407,39 @@ fn message_group_range(
         return start..end;
     }
 
+    if matches!(
+        message,
+        ConversationMessage::RuntimeContext(context)
+            if context.scope() == RuntimeContextScope::Turn
+    ) {
+        let mut end = start;
+        while end < compactable_end
+            && messages.get(end).is_some_and(|message| {
+                matches!(
+                    message,
+                    ConversationMessage::RuntimeContext(context)
+                        if context.scope() == RuntimeContextScope::Turn
+                )
+            })
+        {
+            end += 1;
+        }
+        return start..(end + 1).min(compactable_end);
+    }
+
     start..(start + 1).min(compactable_end)
+}
+
+fn first_compactable_index(messages: &[ConversationMessage]) -> Option<usize> {
+    messages.iter().position(|message| {
+        !message.is_role(ChatRole::System)
+            && !message.is_role(ChatRole::Developer)
+            && !matches!(
+                message,
+                ConversationMessage::RuntimeContext(context)
+                    if context.scope() == RuntimeContextScope::Session
+            )
+    })
 }
 
 fn is_summary_message(message: &ConversationMessage) -> bool {
@@ -542,6 +574,13 @@ fn render_messages_for_summary(messages: &[ConversationMessage]) -> String {
                 rendered.push_str("artifact_analysis: ");
                 rendered.push_str(&truncate(&analysis.model_context(), 700));
                 rendered.push('\n');
+            }
+            ConversationMessage::RuntimeContext(context) => {
+                if context.scope() == RuntimeContextScope::Turn {
+                    rendered.push_str("turn_context: ");
+                    rendered.push_str(&truncate(context.content(), 700));
+                    rendered.push('\n');
+                }
             }
         }
     }
@@ -981,7 +1020,7 @@ mod tests {
         compact_messages(&mut msgs, 50);
 
         assert!(msgs[0].is_role(ChatRole::System));
-        assert!(msgs.len() >= 5);
+        assert!(msgs.len() >= 2);
         assert_eq!(chat_content(msgs.last().unwrap()), "you're welcome");
     }
 
@@ -1048,6 +1087,7 @@ mod tests {
                 ConversationMessage::ArtifactAnalysis(analysis) => {
                     analysis.text.contains("payload compacted")
                 }
+                ConversationMessage::RuntimeContext(_) => false,
             }
         }));
     }
@@ -1084,6 +1124,37 @@ mod tests {
         let range = find_phase3_candidate(&msgs, estimate_tokens(&msgs) / 4).unwrap();
         assert!(range.contains(&2));
         assert!(range.contains(&3));
+    }
+
+    #[test]
+    fn turn_control_and_data_context_compact_with_their_user_message() {
+        let messages = vec![
+            ConversationMessage::runtime_context(
+                nenjo_models::RuntimeContextMessage::turn_control("clock"),
+            ),
+            ConversationMessage::runtime_context(nenjo_models::RuntimeContextMessage::turn_data(
+                "memory",
+            )),
+            ConversationMessage::user("continue"),
+            ConversationMessage::assistant("done"),
+        ];
+
+        assert_eq!(message_group_range(&messages, 0, messages.len()), 0..3);
+    }
+
+    #[test]
+    fn both_session_context_authorities_are_protected_from_compaction() {
+        let messages = vec![
+            ConversationMessage::runtime_context(
+                nenjo_models::RuntimeContextMessage::session_control("project"),
+            ),
+            ConversationMessage::runtime_context(
+                nenjo_models::RuntimeContextMessage::session_data("memory"),
+            ),
+            ConversationMessage::user("continue"),
+        ];
+
+        assert_eq!(first_compactable_index(&messages), Some(2));
     }
 
     struct SummaryProvider;

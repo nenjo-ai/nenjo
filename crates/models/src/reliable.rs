@@ -76,6 +76,16 @@ fn parse_retry_after_ms(err: &anyhow::Error) -> Option<u64> {
     None
 }
 
+fn stream_event_prevents_retry(event: &super::ProviderStreamEvent) -> bool {
+    matches!(
+        event,
+        super::ProviderStreamEvent::TextDelta(_)
+            | super::ProviderStreamEvent::ReasoningDelta(_)
+            | super::ProviderStreamEvent::ProviderToolStarted(_)
+            | super::ProviderStreamEvent::ProviderToolCompleted(_)
+    )
+}
+
 /// Provider wrapper with retry, fallback, auth rotation, and model failover.
 pub struct ReliableProvider {
     providers: Vec<(String, Box<dyn ModelProvider>)>,
@@ -277,7 +287,7 @@ impl ModelProvider for ReliableProvider {
                                 break result;
                             }
                             Either::Right((Some(event), pending_provider_call)) => {
-                                emitted_event = true;
+                                emitted_event |= stream_event_prevents_retry(&event);
                                 events.send(event).await.map_err(|_| {
                                     anyhow::anyhow!("provider stream consumer closed")
                                 })?;
@@ -289,7 +299,7 @@ impl ModelProvider for ReliableProvider {
                         }
                     };
                     while let Ok(event) = attempt_events_rx.try_recv() {
-                        emitted_event = true;
+                        emitted_event |= stream_event_prevents_retry(&event);
                         events
                             .send(event)
                             .await
@@ -479,8 +489,117 @@ impl ModelProvider for ReliableProvider {
 mod tests {
     use super::*;
     use crate::traits::{ChatRequest, ChatResponse, ConversationMessage, TokenUsage, one_shot};
-    use crate::{ProviderStreamEvent, ProviderToolTrace};
+    use crate::{
+        AuthStyle, OpenAiCompatibleProvider, ProviderStreamEvent, ProviderToolTrace, ToolSpec,
+    };
     use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn capture_two_retry_bodies() -> (String, tokio::sync::oneshot::Receiver<Vec<Vec<u8>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind retry fixture");
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0_u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() - header_end < content_length {
+                    let mut chunk = [0_u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                bodies.push(request[header_end..header_end + content_length].to_vec());
+                let (status, body) = if attempt == 0 {
+                    ("500 Internal Server Error", r#"{"error":"temporary"}"#)
+                } else {
+                    ("200 OK", r#"{"choices":[{"message":{"content":"ok"}}]}"#)
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            tx.send(bodies).unwrap();
+        });
+        (format!("http://{address}/v1"), rx)
+    }
+
+    #[tokio::test]
+    async fn reliable_provider_retries_with_identical_native_message_and_tool_bytes() {
+        let (base_url, captured) = capture_two_retry_bodies().await;
+        let provider = ReliableProvider::new(
+            vec![(
+                "compatible".into(),
+                Box::new(OpenAiCompatibleProvider::new(
+                    "compatible",
+                    &base_url,
+                    Some("key"),
+                    AuthStyle::Bearer,
+                )) as Box<dyn ModelProvider>,
+            )],
+            1,
+            1,
+        );
+        let messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data(
+                "runtime-context",
+            )),
+            ConversationMessage::user("hello"),
+        ];
+        let tools = vec![ToolSpec {
+            name: "app.example/lookup".into(),
+            description: "Lookup".into(),
+            parameters: serde_json::json!({"type":"object"}),
+            category: Default::default(),
+        }];
+
+        let response = provider
+            .chat(
+                ChatRequest {
+                    messages: &messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "model",
+                0.0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.text.as_deref(), Some("ok"));
+        let bodies = captured.await.unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
+    }
 
     struct MockProvider {
         calls: Arc<AtomicUsize>,
@@ -518,6 +637,50 @@ mod tests {
 
     struct PartialStreamingFailure {
         calls: Arc<AtomicUsize>,
+    }
+
+    struct CapacityThenRecovery {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ModelProvider for CapacityThenRecovery {
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            unreachable!("the streaming path must not fall back to chat")
+        }
+
+        async fn chat_stream(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+            events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
+        ) -> anyhow::Result<ChatResponse> {
+            let call = self.calls.fetch_add(1, Ordering::SeqCst);
+            events
+                .send(ProviderStreamEvent::CapacityWaiting { limit: 1 })
+                .await
+                .ok();
+            events
+                .send(ProviderStreamEvent::CapacityAcquired)
+                .await
+                .ok();
+            if call == 0 {
+                anyhow::bail!("temporary provider failure");
+            }
+            Ok(ChatResponse {
+                text: Some("recovered".into()),
+                tool_calls: Vec::new(),
+                provider_tool_calls: Vec::new(),
+                usage: TokenUsage::default(),
+                finish_reason: crate::FinishReason::Stop,
+            })
+        }
     }
 
     #[async_trait]
@@ -915,6 +1078,37 @@ mod tests {
             Ok(ProviderStreamEvent::TextDelta(delta)) if delta == "partial"
         ));
         assert!(rx.try_recv().is_err());
+    }
+
+    #[tokio::test]
+    async fn capacity_events_do_not_suppress_a_safe_provider_retry() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = ReliableProvider::new(
+            vec![(
+                "vllm".into(),
+                Box::new(CapacityThenRecovery {
+                    calls: Arc::clone(&calls),
+                }) as Box<dyn ModelProvider>,
+            )],
+            1,
+            1,
+        );
+        let messages = vec![ConversationMessage::user("hello")];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let (tx, _rx) = tokio::sync::mpsc::channel(64);
+
+        let result = provider
+            .chat_stream(request, "test-model", 0.0, tx)
+            .await
+            .unwrap();
+
+        assert_eq!(result.text_or_empty(), "recovered");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]

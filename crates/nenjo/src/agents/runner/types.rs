@@ -110,6 +110,10 @@ pub enum TurnEvent<Delta = String> {
     AssistantTextDelta { request_id: String, delta: Delta },
     /// Provider reasoning was produced and policy permits displaying it.
     AssistantReasoningDelta { request_id: String, delta: Delta },
+    /// The request is queued behind the worker-wide physical provider limit.
+    ModelCapacityWaiting { request_id: String, limit: usize },
+    /// A queued request acquired provider capacity and is starting.
+    ModelCapacityAcquired { request_id: String },
     /// A retryable provider failure is waiting before its next attempt.
     ProviderRetryScheduled {
         request_id: String,
@@ -265,6 +269,12 @@ impl<Delta> TurnEvent<Delta> {
                     request_id,
                     delta: map_delta(delta)?,
                 }
+            }
+            Self::ModelCapacityWaiting { request_id, limit } => {
+                TurnEvent::ModelCapacityWaiting { request_id, limit }
+            }
+            Self::ModelCapacityAcquired { request_id } => {
+                TurnEvent::ModelCapacityAcquired { request_id }
             }
             Self::ProviderRetryScheduled {
                 request_id,

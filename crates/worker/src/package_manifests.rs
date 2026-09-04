@@ -1475,11 +1475,6 @@ fn default_agent_prompt_config() -> Value {
     serde_json::json!({
         "system_prompt": "",
         "developer_prompt": "",
-        "templates": {
-            "task": "",
-            "chat": "",
-            "gate": ""
-        },
         "memory_profile": {
             "core_focus": [],
             "project_focus": [],
@@ -1502,9 +1497,6 @@ fn ensure_agent_prompt_config(object: &mut serde_json::Map<String, Value>) {
     prompt_object
         .entry("developer_prompt")
         .or_insert_with(|| Value::String(String::new()));
-    prompt_object
-        .entry("templates")
-        .or_insert_with(|| serde_json::json!({ "task": "", "chat": "", "gate": "" }));
     let memory_profile = prompt_object.entry("memory_profile").or_insert_with(
         || serde_json::json!({ "core_focus": [], "project_focus": [], "shared_focus": [] }),
     );
@@ -2109,7 +2101,6 @@ mod tests {
                 "prompt_config": {
                     "system_prompt": "",
                     "developer_prompt": "",
-                    "templates": {},
                     "memory_profile": {
                         "core_focus": ["user preferences"],
                         "project_focus": ["project architecture"]

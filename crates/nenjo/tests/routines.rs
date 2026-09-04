@@ -9,9 +9,8 @@ use uuid::Uuid;
 
 use nenjo::manifest::{
     AgentManifest, CouncilDelegationStrategy, CouncilManifest, CouncilMemberManifest, Manifest,
-    ModelManifest, ProjectManifest, PromptConfig, PromptTemplates, RoutineEdgeCondition,
-    RoutineEdgeManifest, RoutineManifest, RoutineStepManifest, RoutineStepType,
-    model_manifest_slug,
+    ModelManifest, ProjectManifest, PromptConfig, RoutineEdgeCondition, RoutineEdgeManifest,
+    RoutineManifest, RoutineStepManifest, RoutineStepType, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::routines::RoutineEvent;
@@ -465,13 +464,6 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
-            templates: PromptTemplates {
-                task_execution: "Execute: {{ task.title }}\n{{ task.description }}".into(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval:
-                    "Evaluate:\n{{ routine.step.instructions }}\n\nIncoming handoffs:\n{{ routine.handoffs }}"
-                        .into(),
-            },
             ..Default::default()
         },
         color: None,
@@ -501,6 +493,7 @@ fn messages_contain(messages: &[Vec<ConversationMessage>], needle: &str) -> bool
             results.iter().any(|result| result.output.contains(needle))
         }
         ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.contains(needle),
+        ConversationMessage::RuntimeContext(context) => context.content().contains(needle),
     })
 }
 
@@ -806,10 +799,7 @@ async fn routine_agent_step_renders_step_instructions_context_var() {
     let _routine_id = Uuid::new_v4();
     let instructions = "Use the migration checklist before editing files.";
 
-    let mut coder = agent(agent_id, "coder", model_id);
-    coder.prompt_config.templates.task_execution =
-        "Step instructions:\n{{ routine.step.instructions }}\n\nTask:\n{{ task.description }}"
-            .into();
+    let coder = agent(agent_id, "coder", model_id);
 
     let routine = RoutineManifest {
         name: "agent-instructions".into(),
@@ -878,9 +868,7 @@ async fn routine_agent_step_renders_project_context() {
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
 
-    let mut coder = agent(agent_id, "coder", model_id);
-    coder.prompt_config.templates.task_execution =
-        "Project context:\n{{ project.context }}\n\nProject XML:\n{{ project }}".into();
+    let coder = agent(agent_id, "coder", model_id);
 
     let routine = RoutineManifest {
         name: "agent-project-context".into(),
@@ -902,7 +890,7 @@ async fn routine_agent_step_renders_project_context() {
 
     let mut project = project();
     project.settings = serde_json::json!({
-        "context": "Use {{ project.name }} conventions."
+        "context": "Use test-project conventions."
     });
     let project_slug = project.slug.clone();
 
@@ -958,14 +946,13 @@ async fn routine_agent_step_renders_project_context() {
 }
 
 #[tokio::test]
-async fn routine_agent_step_uses_task_execution_template() {
+async fn routine_agent_step_receives_task_in_runtime_context() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
     let _routine_id = Uuid::new_v4();
 
-    let mut coder = agent(agent_id, "coder", model_id);
-    coder.prompt_config.templates.task_execution = "TASK TEMPLATE: {{ task.description }}".into();
+    let coder = agent(agent_id, "coder", model_id);
 
     let routine = RoutineManifest {
         name: "cron-agent-template".into(),
@@ -1023,20 +1010,19 @@ async fn routine_agent_step_uses_task_execution_template() {
 
     let seen_messages = seen_messages.lock().unwrap();
     assert!(
-        messages_contain(&seen_messages, "TASK TEMPLATE"),
-        "routine agent steps should use task_execution. Messages: {seen_messages:#?}"
+        messages_contain(&seen_messages, "Implement JWT authentication"),
+        "routine agent steps should receive task data in runtime context. Messages: {seen_messages:#?}"
     );
 }
 
 #[tokio::test]
-async fn routine_agent_step_without_project_uses_task_execution_template() {
+async fn routine_agent_step_without_project_receives_task_in_runtime_context() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
     let _routine_id = Uuid::new_v4();
 
-    let mut coder = agent(agent_id, "coder", model_id);
-    coder.prompt_config.templates.task_execution = "TASK TEMPLATE: {{ task.description }}".into();
+    let coder = agent(agent_id, "coder", model_id);
 
     let routine = RoutineManifest {
         name: "cron-agent-no-project".into(),
@@ -1090,23 +1076,20 @@ async fn routine_agent_step_without_project_uses_task_execution_template() {
 
     let seen_messages = seen_messages.lock().unwrap();
     assert!(
-        messages_contain(&seen_messages, "TASK TEMPLATE"),
-        "routine agent steps without a project should use task_execution. Messages: {seen_messages:#?}"
+        messages_contain(&seen_messages, "Review without a project"),
+        "routine agent steps without a project should receive task data in runtime context. Messages: {seen_messages:#?}"
     );
 }
 
 #[tokio::test]
-async fn routine_gate_step_renders_step_instructions_context_var() {
+async fn routine_gate_step_receives_step_instructions_in_runtime_context() {
     let model_id = Uuid::new_v4();
     let agent_id = Uuid::new_v4();
     let step_id = Uuid::new_v4();
     let _routine_id = Uuid::new_v4();
     let instructions = "Reject unless the output cites the acceptance criteria.";
 
-    let mut reviewer = agent(agent_id, "reviewer", model_id);
-    reviewer.prompt_config.templates.gate_eval =
-        "Gate instructions:\n{{ routine.step.instructions }}\n\nIncoming handoffs:\n{{ routine.handoffs }}"
-            .into();
+    let reviewer = agent(agent_id, "reviewer", model_id);
 
     let routine = RoutineManifest {
         name: "gate-instructions".into(),
@@ -1168,7 +1151,7 @@ async fn routine_gate_step_renders_step_instructions_context_var() {
     let seen_messages = seen_messages.lock().unwrap();
     assert!(
         messages_contain(&seen_messages, instructions),
-        "gate step instructions should render through routine.step.instructions. Messages: {seen_messages:#?}"
+        "gate step instructions should appear in runtime context. Messages: {seen_messages:#?}"
     );
 }
 
@@ -1199,8 +1182,7 @@ async fn single_agent_step_retries_until_route_next_steps() {
         edges: vec![],
     };
 
-    let mut coder = agent(agent_id, "coder", model_id);
-    coder.prompt_config.templates.chat_task = "CHAT TEMPLATE: {{ chat.message }}".into();
+    let coder = agent(agent_id, "coder", model_id);
 
     let manifest = Manifest {
         agents: vec![coder],
@@ -1267,10 +1249,6 @@ async fn single_agent_step_retries_until_route_next_steps() {
             "If work remains, continue executing the step using the available tools"
         ),
         "retry turn should allow unfinished work to continue. Messages: {retry_messages:#?}"
-    );
-    assert!(
-        !messages_contain(std::slice::from_ref(retry_messages), "CHAT TEMPLATE"),
-        "retry turn should not render the chat template. Messages: {retry_messages:#?}"
     );
 }
 
@@ -3494,9 +3472,7 @@ async fn fan_in_agent_receives_all_upstream_handoffs() {
         ],
     };
 
-    let mut synth_agent = agent(synth_agent_id, "synth-agent", model_id);
-    synth_agent.prompt_config.templates.task_execution =
-        "{{ routine }}\n\nExecute: {{ task.title }}\n{{ task.description }}".into();
+    let synth_agent = agent(synth_agent_id, "synth-agent", model_id);
 
     let manifest = Manifest {
         agents: vec![

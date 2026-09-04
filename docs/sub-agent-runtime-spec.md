@@ -141,9 +141,12 @@ let agent = AgentManifest::builder()
     .with_name("security_reviewer")
     .with_system_prompt("Act as a focused security review worker.")
     .with_developer_prompt("Be concise and evidence-driven.")
-    .with_task_template("Task: {{ task.title }}\n\n{{ task.description }}")
     .build()?;
 ```
+
+The runtime supplies the child task, structured metadata, and clock in a typed
+turn-context message. They are not interpolated into the child system or
+developer prompt.
 
 The `result_format` is intentionally not full JSON Schema. It is a compact
 contract the parent can author easily. The runtime turns it into child prompt
@@ -554,8 +557,8 @@ When spawning a child:
 3. enforce max depth
 4. build child runner through `provider.new_agent()` in `Child` execution mode
 5. inject child tools: update_parent_agent, ask_parent_agent
-6. execute the child through its configured task template using structured
-   `task`, `context`, and `result_format` fields
+6. execute the child with runtime-owned turn context followed by its raw task
+   instructions
 7. start child execution as a Tokio task
 8. bridge child TurnEvent values into the child transcript buffer and parent trace stream
 9. store final output and emit Completed or Failed

@@ -49,6 +49,12 @@ pub struct TaskSubmission {
     pub target: TaskExecutionTarget,
     pub content: TaskContent,
     pub trigger: TaskTrigger,
+    #[serde(default = "default_timezone")]
+    pub timezone: chrono_tz::Tz,
+}
+
+fn default_timezone() -> chrono_tz::Tz {
+    chrono_tz::UTC
 }
 
 /// Durable action the task inbox must execute for one receipt.

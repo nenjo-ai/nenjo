@@ -291,14 +291,14 @@ The core LLM loop in `agents/runner/turn_loop.rs` handles:
 
 ### Context Blocks
 
-User-customizable prompt sections. Context blocks are manifest resources with a
-path-like name and MiniJinja template content. They render through the same
-template variable system as prompts.
+Reusable static prompt sections. Context blocks are manifest resources with a
+path-like name and MiniJinja template content. They compile into the stable
+system/developer instruction prefix.
 
-Common variables include `{{ self }}`, `{{ chat.message }}`, `{{ task }}`,
-`{{ project }}`, `{{ available_agents }}`, `{{ available_abilities }}`,
-`{{ available_domains }}`, `{{ memories }}`,
-`{{ routine }}`, `{{ gate.criteria }}`, and `{{ global.timestamp }}`.
+Static prompt references include declared `{{ args.* }}` package arguments,
+context-block selectors, and knowledge-pack selectors. Agent identity, chat,
+task, project, routine, gate, Git, clock, and memory state are runtime-owned
+session or turn context and must not be referenced by blocks.
 
 ### Platform Worker Flow
 
@@ -380,6 +380,6 @@ Common variables include `{{ self }}`, `{{ chat.message }}`, `{{ task }}`,
 ### Adding a Context Block
 
 1. Add or update the `ContextBlockManifest` in the manifest source or platform resource.
-2. Use the block's path-like name, for example `{{ coding.git_worktree }}`, in the relevant prompt/template.
-3. Update `PromptContext` or `RenderContextVars` only when a new runtime variable is required.
+2. Use the block's path-like name, for example `{{ coding.git_worktree }}`, in the relevant static prompt or block.
+3. Declare any required package argument explicitly; do not add live execution data to the template surface.
 4. Update platform DTOs/MCP operations only when the context block resource shape or platform-managed behavior changes.

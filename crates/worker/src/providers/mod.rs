@@ -4,6 +4,7 @@
 //! enum used as a HashMap key for API keys in the worker config) and
 //! `ProviderRegistry` (implements `ModelProviderFactory` for the nenjo SDK).
 
+mod admission;
 pub mod registry;
 
 use std::collections::HashMap;

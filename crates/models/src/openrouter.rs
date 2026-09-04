@@ -1,18 +1,19 @@
 //! OpenRouter aggregator provider. Authenticates via Bearer token, routes to
 //! multiple upstream models with provider-order pinning.
 
-use crate::ToolSpec;
 use crate::native::{
     MediaInputAsset, NativeMediaRequest, NativeMediaResponse, TranscribeAudioRequest,
     TranscriptSegment,
 };
+use crate::openai_chat::{
+    ChatCompletionsMessage as NativeMessage, ChatCompletionsToolCall as NativeToolCall,
+    InstructionRolePolicy, convert_messages,
+};
 use crate::openai_multimodal::{
-    ChatArtifactDialect, ChatCompletionsContent, artifact_content, chat_artifact_transport,
+    ChatArtifactDialect, ChatCompletionsContent, chat_artifact_transport,
 };
-use crate::openai_tools::{ProviderToolSpec, convert_tools};
-use crate::traits::{
-    ChatRequest, ChatResponse, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
-};
+use crate::openai_tools::{ProviderToolSpec, convert_tools_checked};
+use crate::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use async_trait::async_trait;
 use base64::{Engine as _, engine::general_purpose};
 use reqwest::Client;
@@ -50,17 +51,6 @@ struct NativeChatRequest {
 struct NativeProviderRouting {
     order: Vec<String>,
     allow_fallbacks: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct NativeMessage {
-    role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<ChatCompletionsContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<NativeToolCall>>,
 }
 
 #[derive(Debug, Serialize)]
@@ -114,21 +104,6 @@ struct OpenRouterTranscriptionUsage {
     seconds: Option<f64>,
     #[serde(flatten)]
     extra: Map<String, Value>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct NativeToolCall {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
-    function: NativeFunctionCall,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct NativeFunctionCall {
-    name: String,
-    arguments: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -200,91 +175,47 @@ impl OpenRouterProvider {
         }
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<ProviderToolSpec>> {
-        convert_tools(tools, crate::sanitize_tool_name).filter(|items| !items.is_empty())
+    fn supports_native_developer_role(model: &str) -> bool {
+        let model = model.to_lowercase();
+        (model.contains("openai/") || model.contains("azure/"))
+            && (model.contains("/o1")
+                || model.contains("/o3")
+                || model.contains("/o4")
+                || model.contains("/gpt-5")
+                || model.contains("/gpt-4.5")
+                || model.contains("/gpt-4.1"))
     }
 
-    fn convert_messages(request: &ChatRequest<'_>) -> anyhow::Result<Vec<NativeMessage>> {
-        let mut native = Vec::new();
-        for message in request.messages {
-            match message {
-                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
-                    native.push(NativeMessage {
-                        role: "assistant".to_string(),
-                        content: text.clone().map(ChatCompletionsContent::text),
-                        tool_call_id: None,
-                        tool_calls: Some(
-                            tool_calls
-                                .iter()
-                                .map(|tc| NativeToolCall {
-                                    id: Some(tc.id.clone()),
-                                    kind: Some("function".to_string()),
-                                    function: NativeFunctionCall {
-                                        name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                    },
-                                })
-                                .collect(),
-                        ),
-                    });
-                }
-                ConversationMessage::ToolResults(results) => {
-                    for result in results {
-                        native.push(NativeMessage {
-                            role: "tool".to_string(),
-                            content: Some(ChatCompletionsContent::text(
-                                result.output.text_content(),
-                            )),
-                            tool_call_id: Some(result.tool_call_id.clone()),
-                            tool_calls: None,
-                        });
-                    }
-                    let references = results.iter().flat_map(|result| {
-                        result.output.parts().iter().filter_map(|part| match part {
-                            crate::ToolOutputPart::Artifact(reference) => Some((reference, None)),
-                            crate::ToolOutputPart::Text(_) => None,
-                        })
-                    });
-                    let content = artifact_content(
-                        "Inspect the attached artifact.",
-                        references,
-                        request.prepared_artifacts,
-                        ChatArtifactDialect::OpenRouter,
-                    )?;
-                    if content.has_media() {
-                        native.push(NativeMessage {
-                            role: "user".to_string(),
-                            content: Some(content),
-                            tool_call_id: None,
-                            tool_calls: None,
-                        });
-                    }
-                }
-                ConversationMessage::Chat(message) => native.push(NativeMessage {
-                    role: message.role.to_string(),
-                    content: Some(artifact_content(
-                        &message.content,
-                        message.artifacts.iter().map(|input| {
-                            (
-                                input.artifact(),
-                                input.instruction().map(|value| value.as_str()),
-                            )
-                        }),
-                        request.prepared_artifacts,
-                        ChatArtifactDialect::OpenRouter,
-                    )?),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }),
-                ConversationMessage::ArtifactAnalysis(analysis) => native.push(NativeMessage {
-                    role: "user".to_string(),
-                    content: Some(ChatCompletionsContent::text(analysis.model_context())),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }),
-            }
-        }
-        Ok(native)
+    fn convert_messages(
+        request: &ChatRequest<'_>,
+        supports_developer_role: bool,
+    ) -> anyhow::Result<Vec<NativeMessage>> {
+        convert_messages(
+            request,
+            ChatArtifactDialect::OpenRouter,
+            InstructionRolePolicy::from_supports_developer_role(supports_developer_role),
+        )
+    }
+
+    fn build_chat_request(
+        request: &ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        provider_name: Option<String>,
+    ) -> anyhow::Result<NativeChatRequest> {
+        let tools = convert_tools_checked(request.tools, crate::sanitize_tool_name)?
+            .filter(|items| !items.is_empty());
+        Ok(NativeChatRequest {
+            model: model.to_string(),
+            messages: Self::convert_messages(request, Self::supports_native_developer_role(model))?,
+            temperature,
+            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            tools,
+            provider: provider_name.map(|provider| NativeProviderRouting {
+                order: vec![provider],
+                allow_fallbacks: true,
+            }),
+        })
     }
 
     fn parse_native_response(
@@ -532,24 +463,18 @@ impl ModelProvider for OpenRouterProvider {
             anyhow::anyhow!("OpenRouter API key not set. Set OPENROUTER_API_KEY env var.")
         })?;
 
-        let tools = Self::convert_tools(request.tools);
-
         // Pin to the last successful upstream provider to avoid broken
         // fallbacks (e.g. Clarifai failing for minimax models).
-        let provider_routing = self
+        let provider_name = self
             .last_good_provider
             .lock()
             .ok()
-            .and_then(|guard| guard.clone())
-            .map(|p| NativeProviderRouting {
-                order: vec![p],
-                allow_fallbacks: true,
-            });
-
-        let messages = Self::convert_messages(&request)?;
+            .and_then(|guard| guard.clone());
+        let native_request = Self::build_chat_request(&request, model, temperature, provider_name)?;
 
         // Log estimated request size so context-too-large issues are visible
-        let estimated_chars: usize = messages
+        let estimated_chars: usize = native_request
+            .messages
             .iter()
             .map(|message| {
                 message
@@ -561,25 +486,23 @@ impl ModelProvider for OpenRouterProvider {
         let estimated_tokens = estimated_chars / 4;
         tracing::info!(
             model = model,
-            messages = messages.len(),
+            messages = native_request.messages.len(),
             estimated_tokens = estimated_tokens,
             "OpenRouter request"
         );
-
-        let native_request = NativeChatRequest {
-            model: model.to_string(),
-            messages,
-            temperature,
-            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
-            tools,
-            provider: provider_routing,
-        };
 
         let body_text = {
             let mut last_error = None;
             let mut body = None;
 
             for attempt in 1..=OPENROUTER_MAX_TRANSPORT_ATTEMPTS {
+                crate::request_logging::debug_provider_request(
+                    "openrouter",
+                    model,
+                    attempt,
+                    request.messages,
+                    &native_request,
+                );
                 let response = match self
                     .client
                     .post(OPENROUTER_CHAT_COMPLETIONS_URL)
@@ -741,16 +664,7 @@ impl ModelProvider for OpenRouterProvider {
     }
 
     fn supports_developer_role(&self, model: &str) -> bool {
-        let m = model.to_lowercase();
-        // Only OpenAI newer models support the developer role.
-        // Other providers behind OpenRouter (Anthropic, Google, Meta, etc.) do not.
-        (m.contains("openai/") || m.contains("azure/"))
-            && (m.contains("/o1")
-                || m.contains("/o3")
-                || m.contains("/o4")
-                || m.contains("/gpt-5")
-                || m.contains("/gpt-4.5")
-                || m.contains("/gpt-4.1"))
+        Self::supports_native_developer_role(model)
     }
 
     fn artifact_input_transport(
@@ -805,8 +719,60 @@ impl ModelProvider for OpenRouterProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::ToolSpec;
     use crate::native::{MediaInputAsset, TranscribeAudioRequest};
+    use crate::test_support::{assert_serialized_equal, assert_serialized_prefix};
     use crate::traits::{ChatRequest, ConversationMessage, ModelProvider};
+
+    #[test]
+    fn openrouter_prefix_and_tools_are_byte_stable_for_both_role_policies() {
+        let tools = vec![ToolSpec {
+            name: "app.example/lookup".into(),
+            description: "Lookup".into(),
+            parameters: serde_json::json!({"type":"object"}),
+            category: Default::default(),
+        }];
+        let first_messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::developer("developer"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::session_data(
+                "session-context",
+            )),
+            ConversationMessage::user("first"),
+        ];
+        let mut later_messages = first_messages.clone();
+        later_messages.push(ConversationMessage::assistant("answer"));
+        later_messages.push(ConversationMessage::user("later"));
+
+        for model in ["openai/gpt-5.1", "meta-llama/llama-3.3"] {
+            let first = OpenRouterProvider::build_chat_request(
+                &ChatRequest {
+                    messages: &first_messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                model,
+                0.1,
+                Some("ProviderA".into()),
+            )
+            .unwrap();
+            let later = OpenRouterProvider::build_chat_request(
+                &ChatRequest {
+                    messages: &later_messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                model,
+                0.1,
+                Some("ProviderB".into()),
+            )
+            .unwrap();
+            assert_serialized_prefix(&first.messages, &later.messages);
+            assert_serialized_equal(&first.tools, &later.tools);
+        }
+    }
 
     #[test]
     fn creates_with_key() {
@@ -919,6 +885,34 @@ mod tests {
         assert!(!provider.supports_developer_role("openai/gpt-4o"));
         assert!(!provider.supports_developer_role("anthropic/claude-sonnet-4"));
         assert!(!provider.supports_developer_role("minimax/minimax-m2.5"));
+    }
+
+    #[test]
+    fn runtime_control_role_follows_routed_model_capability() {
+        let messages = vec![
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "clock",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data("memory")),
+        ];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+
+        let supported = OpenRouterProvider::convert_messages(&request, true).unwrap();
+        assert_eq!(supported[0].role, "developer");
+        assert_eq!(supported[1].role, "user");
+
+        let fallback = OpenRouterProvider::convert_messages(&request, false).unwrap();
+        assert_eq!(fallback[0].role, "user");
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(
+            serde_json::to_value(fallback[0].content.as_ref().unwrap()).unwrap(),
+            serde_json::json!("clock\n\nmemory")
+        );
     }
 
     #[test]

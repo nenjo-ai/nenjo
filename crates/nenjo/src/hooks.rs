@@ -523,7 +523,9 @@ impl HookRuntime {
         let transcript_path = transcript_dir.join(format!("{}.jsonl", self.session_id));
         let mut lines = Vec::with_capacity(messages.len() + 1);
         for message in messages {
-            lines.push(claude_transcript_line(message));
+            if let Some(line) = claude_transcript_line(message) {
+                lines.push(line);
+            }
         }
         if !final_text.trim().is_empty()
             && !messages.iter().rev().any(|message| {
@@ -534,10 +536,9 @@ impl HookRuntime {
                             && chat.content == final_text
                 )
             })
+            && let Some(line) = claude_transcript_line(&ConversationMessage::assistant(final_text))
         {
-            lines.push(claude_transcript_line(&ConversationMessage::assistant(
-                final_text,
-            )));
+            lines.push(line);
         }
         tokio::fs::write(&transcript_path, lines.join("\n"))
             .await
@@ -818,8 +819,8 @@ fn truncate_output(output: &mut String) {
     output.push_str("\n... [hook output truncated]");
 }
 
-fn claude_transcript_line(message: &ConversationMessage) -> String {
-    match message {
+fn claude_transcript_line(message: &ConversationMessage) -> Option<String> {
+    let value = match message {
         ConversationMessage::Chat(chat) => json!({
             "type": chat.role.as_str(),
             "message": {
@@ -860,8 +861,9 @@ fn claude_transcript_line(message: &ConversationMessage) -> String {
                 "artifact_analysis": analysis,
             }
         }),
-    }
-    .to_string()
+        ConversationMessage::RuntimeContext(_) => return None,
+    };
+    Some(value.to_string())
 }
 
 #[cfg(test)]

@@ -21,7 +21,11 @@ use crate::handlers::task::{TaskExecuteRequest, WorkerTaskHarnessExt};
 use crate::runtime::CommandContext;
 
 /// Adapt a decoded manual command into the transport-independent inbox model.
-pub(crate) fn task_submission(command: Command, requested_by: Uuid) -> Result<TaskSubmission> {
+pub(crate) fn task_submission(
+    command: Command,
+    requested_by: Uuid,
+    organization_timezone: chrono_tz::Tz,
+) -> Result<TaskSubmission> {
     let Command::TaskExecute {
         task_id,
         project,
@@ -47,6 +51,7 @@ pub(crate) fn task_submission(command: Command, requested_by: Uuid) -> Result<Ta
         target,
         content: task_content(payload),
         trigger,
+        timezone: organization_timezone,
     })
 }
 
@@ -243,6 +248,7 @@ impl WorkerTaskExecutor {
                     priority: submission.content.priority.as_deref(),
                     artifacts: &submission.content.artifacts,
                     cancellation,
+                    timezone: submission.timezone,
                 },
             )
             .await?;
@@ -373,6 +379,7 @@ mod tests {
                     execution_run_id: Uuid::new_v4(),
                     project: None,
                     target: TaskExecutionTarget::agent("coder"),
+                    timezone: chrono_tz::UTC,
                     content: TaskContent {
                         title: "task".to_string(),
                         instructions: "work".to_string(),
@@ -396,10 +403,12 @@ mod tests {
 
     #[test]
     fn projectless_command_stays_projectless_in_harness_submission() {
+        let command = task_command(TaskExecutionTrigger::Retry);
         let submission =
-            task_submission(task_command(TaskExecutionTrigger::Retry), Uuid::new_v4()).unwrap();
+            task_submission(command, Uuid::new_v4(), chrono_tz::America::Chicago).unwrap();
         assert!(submission.project.is_none());
         assert_eq!(submission.trigger, nenjo_harness::TaskTrigger::Retry);
+        assert_eq!(submission.timezone, chrono_tz::America::Chicago);
     }
 
     #[test]

@@ -467,8 +467,27 @@ where
                     source = ?source,
                     "Received worker command details"
                 );
+                if matches!(&command, Command::OrganizationSettingsSync { .. }) {
+                    let Command::OrganizationSettingsSync { settings } = command else {
+                        unreachable!("organization settings command matched above")
+                    };
+                    match runtime.replace_organization_settings(settings) {
+                        Ok(()) => {
+                            ack_received_envelope(ack, message_id, "organization_settings_cached");
+                        }
+                        Err(error) => {
+                            seen_message_ids.remove(&message_id);
+                            warn!(%error, %message_id, "Failed to persist organization settings; leaving delivery unacknowledged");
+                        }
+                    }
+                    continue;
+                }
                 if matches!(&command, Command::TaskExecute { .. }) {
-                    let submission = match task_submission(command, actor_user_id) {
+                    let submission = match task_submission(
+                        command,
+                        actor_user_id,
+                        runtime.organization_timezone(),
+                    ) {
                         Ok(submission) => submission,
                         Err(error) => {
                             ack_received_envelope(ack, message_id, "invalid_task_command");

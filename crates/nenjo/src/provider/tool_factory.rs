@@ -38,9 +38,8 @@ pub trait ToolFactory: Send + Sync {
 
     /// The base workspace directory used by this factory's security policy.
     ///
-    /// Used by the agent builder to set the correct `SecurityPolicy.workspace_dir`
-    /// so template variables like `{{ project.working_dir }}` resolve correctly
-    /// even when no git worktree is set.
+    /// Used by the agent builder to set `SecurityPolicy.workspace_dir` and the
+    /// project working directory carried in runtime context when no git worktree is set.
     fn workspace_dir(&self) -> std::path::PathBuf {
         ToolSecurity::default().workspace_dir
     }

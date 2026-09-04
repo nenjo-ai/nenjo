@@ -8,7 +8,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use anyhow::Result;
 use nenjo::manifest::{
     AbilityManifest, AbilityPromptConfig, AgentManifest, Manifest, ModelManifest, ProjectManifest,
-    PromptConfig, PromptTemplates, model_manifest_slug,
+    PromptConfig, model_manifest_slug,
 };
 use nenjo::provider::{ModelProviderFactory, NoopToolFactory, Provider, ToolFactory};
 use nenjo::{Buffered, ChatInput, Slug, Streaming};
@@ -29,6 +29,7 @@ fn message_text(message: &nenjo_models::ConversationMessage) -> String {
             .collect::<Vec<_>>()
             .join("\n"),
         nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => analysis.text.clone(),
+        nenjo_models::ConversationMessage::RuntimeContext(context) => context.content().to_string(),
     }
 }
 
@@ -73,11 +74,6 @@ fn agent(_id: Uuid, name: &str, _model_id: Uuid) -> AgentManifest {
         description: Some(format!("{name} agent")),
         prompt_config: PromptConfig {
             system_prompt: format!("You are the {name} agent."),
-            templates: PromptTemplates {
-                task_execution: "Execute: {{ task.title }}".into(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval: String::new(),
-            },
             ..Default::default()
         },
         color: None,
@@ -886,9 +882,9 @@ async fn parent_tools_are_available_during_execution() {
             "{first_tools:?}"
         );
     }
-    for hidden in ["inspect", "send_input", "stop", "wait"] {
+    for expected in ["inspect", "send_input", "stop", "wait"] {
         assert!(
-            !first_tools.iter().any(|name| name == hidden),
+            first_tools.iter().any(|name| name == expected),
             "{first_tools:?}"
         );
     }
@@ -928,9 +924,9 @@ async fn parent_tools_are_injected_for_ephemeral_sub_agents() {
             "{first_tools:?}"
         );
     }
-    for hidden in ["inspect", "send_input", "stop", "wait"] {
+    for expected in ["inspect", "send_input", "stop", "wait"] {
         assert!(
-            !first_tools.iter().any(|name| name == hidden),
+            first_tools.iter().any(|name| name == expected),
             "{first_tools:?}"
         );
     }
@@ -1000,12 +996,13 @@ async fn spawn_child_waits_and_returns_slug_based_digest() {
             .any(|name| name == "spawn_sub_agents")
     );
     assert!(
-        !first_parent_tools.iter().any(|name| name == "wait"),
+        first_parent_tools.iter().any(|name| name == "wait"),
         "{all_tool_names:?}"
     );
     assert!(
-        all_tool_names.iter().skip(1).any(|names| {
-            names.iter().any(|name| name == "send_input")
+        all_tool_names.iter().any(|names| {
+            names.iter().any(|name| name == "spawn_sub_agents")
+                && names.iter().any(|name| name == "send_input")
                 && names.iter().any(|name| name == "inspect")
                 && names.iter().any(|name| name == "stop")
                 && names.iter().any(|name| name == "wait")
@@ -1160,6 +1157,10 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
         "platform_echo",
         "list_assigned_abilities",
         "use_ability",
+        "inspect",
+        "send_input",
+        "stop",
+        "wait",
     ] {
         assert!(
             child_tools.iter().any(|name| name == expected),
@@ -1170,10 +1171,6 @@ async fn delegate_to_runs_installed_agent_with_own_capabilities_and_child_tools(
         "delegate_to",
         "list_delegatable_agents",
         "spawn_sub_agents",
-        "inspect",
-        "send_input",
-        "stop",
-        "wait",
         "respond_to_user",
     ] {
         assert!(
@@ -1315,7 +1312,7 @@ async fn delegated_child_can_invoke_assigned_ability_and_wait_for_it() {
         "{tool_sets:?}"
     );
     assert!(
-        tool_sets
+        !tool_sets
             .iter()
             .any(|names| names.iter().any(|name| name == "use_ability")
                 && !names.iter().any(|name| name == "wait")),
@@ -1501,5 +1498,5 @@ async fn max_depth_zero_disables_parent_tools() {
         .await
         .unwrap();
     let first_tools = captured.tool_names().remove(0);
-    assert_eq!(first_tools, vec!["list_knowledge_packs"]);
+    assert_eq!(first_tools, vec!["inspect", "send_input", "stop", "wait"]);
 }

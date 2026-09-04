@@ -2,20 +2,23 @@
 //! Most LLM APIs follow the same `/v1/chat/completions` format.
 //! This module provides a single implementation that works for all of them.
 
-use crate::ToolSpec;
 use crate::audio_data_uri::decode_base64_data_uri;
 use crate::native::{
     MediaCapabilitiesProvider, MediaExecutionMode, MediaInputAsset, MediaOperation,
     MediaToolSpec as NativeMediaToolSpec, ModelMediaCapabilities, NativeMediaRequest,
     NativeMediaResponse, ProviderMediaCapabilities, TranscribeAudioRequest, TranscriptSegment,
 };
-use crate::openai_multimodal::{
-    ChatArtifactDialect, ChatCompletionsContent, artifact_content, chat_artifact_transport,
+use crate::openai_chat::{
+    ChatCompletionsMessage as Message, InstructionRolePolicy, convert_messages,
 };
-use crate::openai_tools::{ProviderToolSpec, convert_tools};
+use crate::openai_multimodal::{ChatArtifactDialect, chat_artifact_transport};
+use crate::openai_responses::{
+    ResponsesInputItem, ResponsesResponse, ResponsesTool, convert_input, convert_local_tools,
+    response_text, response_tool_calls, response_usage,
+};
+use crate::openai_tools::{ProviderToolSpec, convert_tools_checked};
 use crate::traits::{
-    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, ProviderStreamEvent,
-    TokenUsage, ToolCall,
+    ChatRequest, ChatResponse, ModelProvider, ProviderStreamEvent, TokenUsage, ToolCall,
 };
 use crate::{ArtifactInputTransport, MediaType, ModelCapabilityId};
 use anyhow::Context;
@@ -201,32 +204,6 @@ struct NativeChatRequest {
 #[derive(Debug, Serialize)]
 struct NativeStreamOptions {
     include_usage: bool,
-}
-
-#[derive(Debug, Serialize)]
-struct Message {
-    role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<ChatCompletionsContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<NativeToolCall>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct NativeToolCall {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
-    function: NativeFunctionCall,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct NativeFunctionCall {
-    name: String,
-    arguments: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -473,38 +450,10 @@ async fn absorb_sse_frame(
 #[derive(Debug, Serialize)]
 struct ResponsesRequest {
     model: String,
-    input: Vec<ResponsesInput>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    instructions: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    stream: Option<bool>,
-}
-
-#[derive(Debug, Serialize)]
-struct ResponsesInput {
-    role: String,
-    content: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponsesResponse {
-    #[serde(default)]
-    output: Vec<ResponsesOutput>,
-    #[serde(default)]
-    output_text: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponsesOutput {
-    #[serde(default)]
-    content: Vec<ResponsesContent>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ResponsesContent {
-    #[serde(rename = "type")]
-    kind: Option<String>,
-    text: Option<String>,
+    input: Vec<ResponsesInputItem>,
+    tools: Vec<ResponsesTool>,
+    temperature: f64,
+    stream: bool,
 }
 
 #[derive(Debug)]
@@ -536,43 +485,6 @@ struct AudioTranscriptionSegment {
     text: String,
     #[serde(flatten)]
     extra: Map<String, Value>,
-}
-
-fn first_nonempty(text: Option<&str>) -> Option<String> {
-    text.and_then(|value| {
-        let trimmed = value.trim();
-        if trimmed.is_empty() {
-            None
-        } else {
-            Some(trimmed.to_string())
-        }
-    })
-}
-
-fn extract_responses_text(response: ResponsesResponse) -> Option<String> {
-    if let Some(text) = first_nonempty(response.output_text.as_deref()) {
-        return Some(text);
-    }
-
-    for item in &response.output {
-        for content in &item.content {
-            if content.kind.as_deref() == Some("output_text")
-                && let Some(text) = first_nonempty(content.text.as_deref())
-            {
-                return Some(text);
-            }
-        }
-    }
-
-    for item in &response.output {
-        for content in &item.content {
-            if let Some(text) = first_nonempty(content.text.as_deref()) {
-                return Some(text);
-            }
-        }
-    }
-
-    None
 }
 
 fn compatible_transcribe_audio_tool_spec() -> NativeMediaToolSpec {
@@ -728,10 +640,6 @@ impl OpenAiCompatibleProvider {
         }
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<ProviderToolSpec>> {
-        convert_tools(tools, crate::sanitize_tool_name)
-    }
-
     #[cfg(test)]
     fn convert_messages(
         request: &ChatRequest<'_>,
@@ -749,133 +657,101 @@ impl OpenAiCompatibleProvider {
         supports_developer_role: bool,
         artifact_dialect: ChatArtifactDialect,
     ) -> anyhow::Result<Vec<Message>> {
-        let mut native = Vec::new();
-        for message in request.messages {
-            match message {
-                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
-                    native.push(Message {
-                        role: "assistant".to_string(),
-                        content: text.clone().map(ChatCompletionsContent::text),
-                        tool_call_id: None,
-                        tool_calls: Some(
-                            tool_calls
-                                .iter()
-                                .map(|tc| NativeToolCall {
-                                    id: Some(tc.id.clone()),
-                                    kind: Some("function".to_string()),
-                                    function: NativeFunctionCall {
-                                        name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                    },
-                                })
-                                .collect(),
-                        ),
-                    });
-                }
-                ConversationMessage::ToolResults(results) => {
-                    for result in results {
-                        native.push(Message {
-                            role: "tool".to_string(),
-                            content: Some(ChatCompletionsContent::text(
-                                result.output.text_content(),
-                            )),
-                            tool_call_id: Some(result.tool_call_id.clone()),
-                            tool_calls: None,
-                        });
-                    }
-                    let references = results.iter().flat_map(|result| {
-                        result.output.parts().iter().filter_map(|part| match part {
-                            crate::ToolOutputPart::Artifact(reference) => Some((reference, None)),
-                            crate::ToolOutputPart::Text(_) => None,
-                        })
-                    });
-                    let content = artifact_content(
-                        "Inspect the attached artifact.",
-                        references,
-                        request.prepared_artifacts,
-                        artifact_dialect,
-                    )?;
-                    if content.has_media() {
-                        native.push(Message {
-                            role: "user".to_string(),
-                            content: Some(content),
-                            tool_call_id: None,
-                            tool_calls: None,
-                        });
-                    }
-                }
-                ConversationMessage::Chat(message) => native.push(Message {
-                    role: if message.role == ChatRole::Developer && !supports_developer_role {
-                        "user".to_string()
-                    } else {
-                        message.role.to_string()
-                    },
-                    content: Some(artifact_content(
-                        &message.content,
-                        message.artifacts.iter().map(|input| {
-                            (
-                                input.artifact(),
-                                input.instruction().map(|value| value.as_str()),
-                            )
-                        }),
-                        request.prepared_artifacts,
-                        artifact_dialect,
-                    )?),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }),
-                ConversationMessage::ArtifactAnalysis(analysis) => native.push(Message {
-                    role: "user".to_string(),
-                    content: Some(ChatCompletionsContent::text(analysis.model_context())),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }),
-            }
-        }
-        Ok(native)
+        convert_messages(
+            request,
+            artifact_dialect,
+            InstructionRolePolicy::from_supports_developer_role(supports_developer_role),
+        )
     }
 
-    fn responses_fallback_allowed(&self, request: &ChatRequest<'_>) -> bool {
-        self.supports_responses_fallback
-            && !request
-                .messages
-                .iter()
-                .any(ConversationMessage::has_artifact_references)
+    fn build_chat_request(
+        &self,
+        request: &ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+        stream: bool,
+    ) -> anyhow::Result<NativeChatRequest> {
+        let tools = convert_tools_checked(request.tools, crate::sanitize_tool_name)?;
+        Ok(NativeChatRequest {
+            model: model.to_string(),
+            messages: Self::convert_messages_for_dialect(
+                request,
+                self.supports_developer_role(model),
+                self.artifact_dialect,
+            )?,
+            temperature,
+            stream: Some(stream),
+            stream_options: stream.then_some(NativeStreamOptions {
+                include_usage: true,
+            }),
+            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            tools,
+        })
+    }
+
+    fn build_responses_request(
+        &self,
+        request: &ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<ResponsesRequest> {
+        Ok(ResponsesRequest {
+            model: model.to_string(),
+            input: convert_input(
+                request,
+                InstructionRolePolicy::from_supports_developer_role(
+                    self.supports_developer_role(model),
+                ),
+            )?,
+            tools: convert_local_tools(request.tools)?,
+            temperature,
+            stream: false,
+        })
     }
 
     async fn chat_via_responses(
         &self,
         api_key: &str,
-        system_prompt: Option<&str>,
-        message: &str,
+        request: &ChatRequest<'_>,
         model: &str,
-    ) -> anyhow::Result<String> {
-        let request = ResponsesRequest {
-            model: model.to_string(),
-            input: vec![ResponsesInput {
-                role: "user".to_string(),
-                content: message.to_string(),
-            }],
-            instructions: system_prompt.map(str::to_string),
-            stream: Some(false),
-        };
-
+        temperature: f64,
+    ) -> anyhow::Result<ChatResponse> {
+        let native_request = self.build_responses_request(request, model, temperature)?;
+        crate::request_logging::debug_provider_request(
+            &self.name,
+            model,
+            1,
+            request.messages,
+            &native_request,
+        );
         let url = self.responses_url();
-
         let response = self
-            .apply_auth_header(self.client.post(&url).json(&request), api_key)
+            .apply_auth_header(self.client.post(&url).json(&native_request), api_key)
             .send()
             .await?;
 
         if !response.status().is_success() {
+            let status = response.status();
             let error = response.text().await?;
-            anyhow::bail!("{} Responses API error: {error}", self.name);
+            anyhow::bail!(
+                "{} Responses API request to {url} failed with {status}: {error}",
+                self.name
+            );
         }
 
         let responses: ResponsesResponse = response.json().await?;
-
-        extract_responses_text(responses)
-            .ok_or_else(|| anyhow::anyhow!("No response from {} Responses API", self.name))
+        let text = response_text(&responses);
+        let tool_calls = response_tool_calls(&responses);
+        if text.is_none() && tool_calls.is_empty() {
+            anyhow::bail!("No response from {} Responses API at {url}", self.name);
+        }
+        Ok(ChatResponse {
+            text,
+            finish_reason: crate::FinishReason::from_provider(None, !tool_calls.is_empty()),
+            tool_calls,
+            provider_tool_calls: Vec::new(),
+            usage: response_usage(&responses),
+        })
     }
 
     async fn transcribe_audio(
@@ -967,20 +843,15 @@ impl ModelProvider for OpenAiCompatibleProvider {
             )
         })?;
 
-        let tools = Self::convert_tools(request.tools);
-        let chat_request = NativeChatRequest {
-            model: model.to_string(),
-            messages: Self::convert_messages_for_dialect(
-                &request,
-                self.supports_developer_role(model),
-                self.artifact_dialect,
-            )?,
-            temperature,
-            stream: Some(false),
-            stream_options: None,
-            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
-            tools,
-        };
+        let chat_request = self.build_chat_request(&request, model, temperature, false)?;
+
+        crate::request_logging::debug_provider_request(
+            &self.name,
+            model,
+            1,
+            request.messages,
+            &chat_request,
+        );
 
         let url = self.chat_completions_url();
         let response = self
@@ -992,43 +863,20 @@ impl ModelProvider for OpenAiCompatibleProvider {
             let status = response.status();
 
             // 404 may mean this provider uses the Responses API instead
-            if status == reqwest::StatusCode::NOT_FOUND && self.responses_fallback_allowed(&request)
-            {
+            if status == reqwest::StatusCode::NOT_FOUND && self.supports_responses_fallback {
                 warn!(
                     provider = %self.name,
-                    "Chat completions returned 404 — falling back to Responses API (tool calls will be unavailable)"
+                    "Chat completions returned 404 — falling back to Responses API"
                 );
-                let system = request.messages.iter().find_map(|message| {
-                    message
-                        .as_chat()
-                        .filter(|chat| chat.role == ChatRole::System)
-                });
-                let last_user = request.messages.iter().rev().find_map(|message| {
-                    message.as_chat().filter(|chat| chat.role == ChatRole::User)
-                });
-                if let Some(user_msg) = last_user {
-                    let text = self
-                        .chat_via_responses(
-                            api_key,
-                            system.map(|m| m.content.as_str()),
-                            &user_msg.content,
-                            model,
+                return self
+                    .chat_via_responses(api_key, &request, model, temperature)
+                    .await
+                    .map_err(|responses_err| {
+                        anyhow::anyhow!(
+                            "{} API error (chat completions unavailable; responses fallback failed: {responses_err})",
+                            self.name
                         )
-                        .await
-                        .map_err(|responses_err| {
-                            anyhow::anyhow!(
-                                "{} API error (chat completions unavailable; responses fallback failed: {responses_err})",
-                                self.name
-                            )
-                        })?;
-                    return Ok(ChatResponse {
-                        text: Some(text),
-                        tool_calls: vec![],
-                        provider_tool_calls: vec![],
-                        usage: TokenUsage::default(),
-                        finish_reason: crate::FinishReason::Stop,
                     });
-                }
             }
 
             return Err(crate::api_error(&self.name, response).await);
@@ -1119,22 +967,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
                 self.name
             )
         })?;
-        let tools = Self::convert_tools(request.tools);
-        let chat_request = NativeChatRequest {
-            model: model.to_string(),
-            messages: Self::convert_messages_for_dialect(
-                &request,
-                self.supports_developer_role(model),
-                self.artifact_dialect,
-            )?,
-            temperature,
-            stream: Some(true),
-            stream_options: Some(NativeStreamOptions {
-                include_usage: true,
-            }),
-            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
-            tools,
-        };
+        let chat_request = self.build_chat_request(&request, model, temperature, true)?;
+        crate::request_logging::debug_provider_request(
+            &self.name,
+            model,
+            1,
+            request.messages,
+            &chat_request,
+        );
         let url = self.chat_completions_url();
         let response = self
             .apply_auth_header(self.client.post(&url).json(&chat_request), api_key)
@@ -1142,13 +982,20 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .await?;
         if !response.status().is_success() {
             let status = response.status();
-            if status == reqwest::StatusCode::NOT_FOUND && self.responses_fallback_allowed(&request)
-            {
+            if status == reqwest::StatusCode::NOT_FOUND && self.supports_responses_fallback {
                 warn!(
                     provider = %self.name,
-                    "Streaming chat completions returned 404 — falling back to the buffered provider path"
+                    "Streaming chat completions returned 404 — falling back directly to buffered Responses API"
                 );
-                return self.chat(request, model, temperature).await;
+                return self
+                    .chat_via_responses(api_key, &request, model, temperature)
+                    .await
+                    .map_err(|responses_err| {
+                        anyhow::anyhow!(
+                            "{} API error (streaming chat completions unavailable; responses fallback failed: {responses_err})",
+                            self.name
+                        )
+                    });
             }
             return Err(crate::api_error(&self.name, response).await);
         }
@@ -1214,7 +1061,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
     fn supports_developer_role(&self, _model: &str) -> bool {
         // A generic compatible endpoint does not identify the server-side chat
-        // template. Use `system`, which is the portable role across these APIs.
+        // template. Interleaved developer messages therefore fall back to user.
         false
     }
 
@@ -1319,13 +1166,161 @@ mod tests {
     use uuid::Uuid;
 
     use super::*;
+    use crate::openai_multimodal::ChatCompletionsContent;
+    use crate::test_support::{assert_serialized_equal, assert_serialized_prefix};
     use crate::{
-        ArtifactInput, ArtifactInputSource, ArtifactRef, ChatMessage, PreparedArtifact,
-        PreparedArtifactInputs, ToolResultMessage,
+        ArtifactInput, ArtifactInputSource, ArtifactRef, ChatMessage, ConversationMessage,
+        PreparedArtifact, PreparedArtifactInputs, ToolCall, ToolOutput, ToolResultMessage,
+        ToolSpec,
     };
 
     fn make_provider(name: &str, url: &str, key: Option<&str>) -> OpenAiCompatibleProvider {
         OpenAiCompatibleProvider::new(name, url, key, AuthStyle::Bearer)
+    }
+
+    fn cache_test_tool() -> ToolSpec {
+        ToolSpec {
+            name: "app.example/lookup".into(),
+            description: "Lookup a value".into(),
+            parameters: serde_json::json!({
+                "type":"object",
+                "properties":{"query":{"type":"string"}},
+                "required":["query"]
+            }),
+            category: Default::default(),
+        }
+    }
+
+    #[test]
+    fn compatible_and_vllm_native_prefix_tools_and_streaming_projection_are_byte_stable() {
+        let tools = vec![cache_test_tool()];
+        let first_messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::session_control(
+                "session-control",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data(
+                "turn-data",
+            )),
+            ConversationMessage::user("first"),
+        ];
+        let mut later_messages = first_messages.clone();
+        later_messages.push(ConversationMessage::assistant("answer"));
+        later_messages.push(ConversationMessage::user("second"));
+
+        for dialect in [ChatArtifactDialect::OpenAi, ChatArtifactDialect::Vllm] {
+            let provider = OpenAiCompatibleProvider::new_with_dialect(
+                "test",
+                "http://localhost/v1",
+                Some("key"),
+                AuthStyle::Bearer,
+                dialect,
+            );
+            let first_request = ChatRequest {
+                messages: &first_messages,
+                tools: Some(&tools),
+                native_tools: None,
+                prepared_artifacts: None,
+            };
+            let later_request = ChatRequest {
+                messages: &later_messages,
+                tools: Some(&tools),
+                native_tools: None,
+                prepared_artifacts: None,
+            };
+            let buffered = provider
+                .build_chat_request(&first_request, "model", 0.1, false)
+                .unwrap();
+            let streaming = provider
+                .build_chat_request(&first_request, "model", 0.1, true)
+                .unwrap();
+            let later = provider
+                .build_chat_request(&later_request, "model", 0.1, false)
+                .unwrap();
+
+            assert_serialized_prefix(&buffered.messages, &later.messages);
+            assert_serialized_equal(&buffered.messages, &streaming.messages);
+            assert_serialized_equal(&buffered.tools, &streaming.tools);
+            assert_serialized_equal(&buffered.tools, &later.tools);
+            assert!(
+                buffered
+                    .messages
+                    .windows(2)
+                    .all(|pair| pair[0].role != "user" || pair[1].role != "user")
+            );
+        }
+    }
+
+    #[test]
+    fn compatible_responses_prefix_and_tools_are_byte_stable() {
+        let provider = make_provider("compatible", "http://localhost/v1", Some("key"));
+        let tools = vec![cache_test_tool()];
+        let first_messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::session_data(
+                "session-data",
+            )),
+            ConversationMessage::user("first"),
+        ];
+        let mut later_messages = first_messages.clone();
+        later_messages.push(ConversationMessage::assistant("answer"));
+        later_messages.push(ConversationMessage::user("second"));
+        let first = provider
+            .build_responses_request(
+                &ChatRequest {
+                    messages: &first_messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "model",
+                0.1,
+            )
+            .unwrap();
+        let later = provider
+            .build_responses_request(
+                &ChatRequest {
+                    messages: &later_messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "model",
+                0.1,
+            )
+            .unwrap();
+        assert_serialized_prefix(&first.input, &later.input);
+        assert_serialized_equal(&first.tools, &later.tools);
+    }
+
+    #[test]
+    fn compatible_builder_rejects_post_sanitization_tool_name_collisions() {
+        let provider = make_provider("compatible", "http://localhost/v1", Some("key"));
+        let tools = vec![
+            ToolSpec {
+                name: "a.b".into(),
+                ..cache_test_tool()
+            },
+            ToolSpec {
+                name: "a/b".into(),
+                ..cache_test_tool()
+            },
+        ];
+        let messages = vec![ConversationMessage::user("hello")];
+        let error = provider
+            .build_chat_request(
+                &ChatRequest {
+                    messages: &messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "model",
+                0.0,
+                false,
+            )
+            .unwrap_err();
+        assert!(error.to_string().contains("both serialize as 'a_b'"));
     }
 
     fn prepared_artifact(media_type: &str, bytes: &[u8]) -> (ArtifactRef, PreparedArtifactInputs) {
@@ -1482,6 +1477,182 @@ mod tests {
         (format!("http://{address}/v1"), receiver)
     }
 
+    async fn read_raw_json_request(stream: &mut tokio::net::TcpStream) -> (String, Vec<u8>) {
+        let mut request = Vec::new();
+        let header_end = loop {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.expect("read request");
+            assert!(read > 0, "request ended before headers");
+            request.extend_from_slice(&chunk[..read]);
+            if let Some(index) = request.windows(4).position(|window| window == b"\r\n\r\n") {
+                break index + 4;
+            }
+        };
+        let headers = String::from_utf8(request[..header_end].to_vec()).expect("UTF-8 headers");
+        let content_length = headers
+            .lines()
+            .find_map(|line| {
+                let (name, value) = line.split_once(':')?;
+                name.eq_ignore_ascii_case("content-length")
+                    .then(|| value.trim().parse::<usize>().expect("content length"))
+            })
+            .expect("content length header");
+        while request.len() - header_end < content_length {
+            let mut chunk = [0_u8; 4096];
+            let read = stream.read(&mut chunk).await.expect("read request body");
+            assert!(read > 0, "request body ended early");
+            request.extend_from_slice(&chunk[..read]);
+        }
+        (
+            headers.lines().next().unwrap_or_default().to_string(),
+            request[header_end..header_end + content_length].to_vec(),
+        )
+    }
+
+    async fn capture_fallback_exchange() -> (
+        String,
+        tokio::sync::oneshot::Receiver<Vec<(String, Vec<u8>)>>,
+    ) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind fallback fixture");
+        let address = listener.local_addr().expect("fallback fixture address");
+        let (sender, receiver) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut captured = Vec::new();
+            for response in [
+                r#"{"error":"chat unavailable"}"#,
+                r#"{"output":[{"type":"function_call","call_id":"fallback-call","name":"app_example_lookup","arguments":"{\"query\":\"next\"}"}],"usage":{"input_tokens":11,"output_tokens":4}}"#,
+            ] {
+                let (mut stream, _) = listener.accept().await.expect("accept fallback request");
+                captured.push(read_raw_json_request(&mut stream).await);
+                let status = if captured.len() == 1 {
+                    "404 Not Found"
+                } else {
+                    "200 OK"
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                            response.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .expect("write fallback response");
+            }
+            sender.send(captured).expect("return fallback requests");
+        });
+        (format!("http://{address}/v1"), receiver)
+    }
+
+    fn full_fallback_history() -> Vec<ConversationMessage> {
+        vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::developer("developer"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::session_data(
+                "session-context",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "turn-context",
+            )),
+            ConversationMessage::user("first"),
+            ConversationMessage::assistant_tool_calls(
+                Some("checking".into()),
+                vec![ToolCall {
+                    id: "call-1".into(),
+                    name: "app_example_lookup".into(),
+                    arguments: "{\"query\":\"first\"}".into(),
+                }],
+            ),
+            ConversationMessage::tool_result(ToolResultMessage {
+                tool_call_id: "call-1".into(),
+                output: ToolOutput::text("tool-result"),
+            }),
+            ConversationMessage::user("later"),
+        ]
+    }
+
+    #[tokio::test]
+    async fn buffered_fallback_sends_the_pure_complete_responses_request_and_returns_tools() {
+        let (base_url, captured) = capture_fallback_exchange().await;
+        let provider = make_provider("fixture-provider", &base_url, Some("key"));
+        let messages = full_fallback_history();
+        let tools = vec![cache_test_tool()];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: Some(&tools),
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let expected_chat = provider
+            .build_chat_request(&request, "model", 0.2, false)
+            .unwrap();
+        let expected_responses = provider
+            .build_responses_request(&request, "model", 0.2)
+            .unwrap();
+
+        let response = provider.chat(request, "model", 0.2).await.unwrap();
+        let captured = captured.await.unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].0, "POST /v1/chat/completions HTTP/1.1");
+        assert_eq!(captured[1].0, "POST /v1/responses HTTP/1.1");
+        assert_eq!(captured[0].1, serde_json::to_vec(&expected_chat).unwrap());
+        assert_eq!(
+            captured[1].1,
+            serde_json::to_vec(&expected_responses).unwrap()
+        );
+        let body: serde_json::Value = serde_json::from_slice(&captured[1].1).unwrap();
+        assert!(body["input"].as_array().unwrap().iter().any(|item| {
+            item["content"] == "developer\n\nsession-context\n\nturn-context\n\nfirst"
+        }));
+        assert!(body["input"].as_array().unwrap().iter().any(|item| {
+            item["type"] == "function_call_output" && item["output"] == "tool-result"
+        }));
+        assert_eq!(response.tool_calls[0].id, "fallback-call");
+        assert_eq!(response.tool_calls[0].name, "app_example_lookup");
+        assert_eq!(response.usage.input_tokens, 11);
+    }
+
+    #[tokio::test]
+    async fn streaming_vllm_fallback_sends_one_chat_request_then_one_responses_request() {
+        let (base_url, captured) = capture_fallback_exchange().await;
+        let provider = OpenAiCompatibleProvider::new_with_dialect(
+            "vllm",
+            &base_url,
+            Some("key"),
+            AuthStyle::Bearer,
+            ChatArtifactDialect::Vllm,
+        );
+        let messages = full_fallback_history();
+        let tools = vec![cache_test_tool()];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: Some(&tools),
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let expected_responses = provider
+            .build_responses_request(&request, "model", 0.2)
+            .unwrap();
+        let (events, _events_rx) = tokio::sync::mpsc::channel(8);
+
+        let response = provider
+            .chat_stream(request, "model", 0.2, events)
+            .await
+            .unwrap();
+        let captured = captured.await.unwrap();
+        assert_eq!(captured.len(), 2);
+        assert_eq!(captured[0].0, "POST /v1/chat/completions HTTP/1.1");
+        assert_eq!(captured[1].0, "POST /v1/responses HTTP/1.1");
+        assert_eq!(
+            captured[1].1,
+            serde_json::to_vec(&expected_responses).unwrap()
+        );
+        assert_eq!(response.tool_calls[0].id, "fallback-call");
+    }
+
     #[test]
     fn creates_with_key() {
         let p = make_provider("venice", "https://api.venice.ai", Some("vn-key"));
@@ -1597,6 +1768,34 @@ mod tests {
         let converted = OpenAiCompatibleProvider::convert_messages(&request, true).unwrap();
 
         assert_eq!(converted[0].role, "developer");
+    }
+
+    #[test]
+    fn runtime_control_uses_developer_with_user_fallback_while_data_stays_user() {
+        let messages = vec![
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "clock",
+            )),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data("memory")),
+        ];
+        let request = ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+
+        let supported = OpenAiCompatibleProvider::convert_messages(&request, true).unwrap();
+        assert_eq!(supported[0].role, "developer");
+        assert_eq!(supported[1].role, "user");
+
+        let fallback = OpenAiCompatibleProvider::convert_messages(&request, false).unwrap();
+        assert_eq!(fallback[0].role, "user");
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(
+            serde_json::to_value(fallback[0].content.as_ref().unwrap()).unwrap(),
+            serde_json::json!("clock\n\nmemory")
+        );
     }
 
     #[test]
@@ -1855,7 +2054,7 @@ mod tests {
     }
 
     #[test]
-    fn responses_fallback_is_disabled_for_artifact_requests() {
+    fn responses_fallback_explicitly_rejects_artifact_requests() {
         let provider = make_provider("compatible", "https://example.com/v1", Some("key"));
         let text_messages = vec![ConversationMessage::user("hello")];
         let text_request = ChatRequest {
@@ -1864,7 +2063,11 @@ mod tests {
             native_tools: None,
             prepared_artifacts: None,
         };
-        assert!(provider.responses_fallback_allowed(&text_request));
+        assert!(
+            provider
+                .build_responses_request(&text_request, "model", 0.0)
+                .is_ok()
+        );
 
         let (reference, prepared) = prepared_artifact("image/png", b"png");
         let artifact_messages = vec![ConversationMessage::chat(
@@ -1879,7 +2082,14 @@ mod tests {
             native_tools: None,
             prepared_artifacts: Some(&prepared),
         };
-        assert!(!provider.responses_fallback_allowed(&artifact_request));
+        let error = provider
+            .build_responses_request(&artifact_request, "model", 0.0)
+            .unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("cannot encode unresolved multimodal artifact")
+        );
     }
 
     #[test]
@@ -1957,7 +2167,7 @@ mod tests {
         let json = r#"{"output_text":"Hello from top-level","output":[]}"#;
         let response: ResponsesResponse = serde_json::from_str(json).unwrap();
         assert_eq!(
-            extract_responses_text(response).as_deref(),
+            response_text(&response).as_deref(),
             Some("Hello from top-level")
         );
     }
@@ -1968,7 +2178,7 @@ mod tests {
             r#"{"output":[{"content":[{"type":"output_text","text":"Hello from nested"}]}]}"#;
         let response: ResponsesResponse = serde_json::from_str(json).unwrap();
         assert_eq!(
-            extract_responses_text(response).as_deref(),
+            response_text(&response).as_deref(),
             Some("Hello from nested")
         );
     }
@@ -1977,10 +2187,7 @@ mod tests {
     fn responses_extracts_any_text_as_fallback() {
         let json = r#"{"output":[{"content":[{"type":"message","text":"Fallback text"}]}]}"#;
         let response: ResponsesResponse = serde_json::from_str(json).unwrap();
-        assert_eq!(
-            extract_responses_text(response).as_deref(),
-            Some("Fallback text")
-        );
+        assert_eq!(response_text(&response).as_deref(), Some("Fallback text"));
     }
 
     // ══════════════════════════════════════════════════════════

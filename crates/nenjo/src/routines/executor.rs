@@ -987,7 +987,7 @@ where
     }
 
     // Resolve project context from manifest so agent prompts can reference
-    // {{ project.name }}, {{ project.description }}, etc.
+    // The agent builder serializes this project snapshot into session context.
     // Inject routine + step context into the agent's render vars.
     let (routine_ctx, step_ctx) = build_routine_ctx(state, step);
     builder = builder
@@ -1172,6 +1172,7 @@ fn build_task(state: &RoutineState, description: String) -> Result<TaskInput> {
 }
 
 fn attach_location(mut run: AgentRun, state: &RoutineState) -> AgentRun {
+    run.execution.timezone = state.input.timezone;
     if let Some(git) = state.input.git.clone() {
         run.execution.project_location = Some(ProjectLocation::from_git(git));
     }

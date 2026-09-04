@@ -96,6 +96,8 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
             "properties": {
                 "agents": {
                     "type": "array",
+                    "minItems": 1,
+                    "maxItems": self.handle.max_per_spawn(),
                     "items": {
                         "type": "object",
                         "properties": {
@@ -172,13 +174,24 @@ impl<P: ProviderRuntime> Tool for SpawnSubAgentsTool<P> {
             });
         }
 
-        let results = self.handle.spawn_many(requests).await;
+        let results = match self.handle.spawn_many(requests).await {
+            Ok(results) => results,
+            Err(err) => {
+                return Ok(ToolResult {
+                    success: false,
+                    output: json!({ "sub_agents": [], "errors": [err.as_json()] })
+                        .to_string()
+                        .into(),
+                    error: Some(err.to_string()),
+                });
+            }
+        };
         let mut spawned = Vec::new();
         let mut failures = Vec::new();
         for result in results {
             match result {
                 Ok(item) => spawned.push(item),
-                Err(err) => failures.push(err.to_string()),
+                Err(err) => failures.push(err.as_json()),
             }
         }
         if failures.is_empty() {

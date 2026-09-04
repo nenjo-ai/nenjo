@@ -22,6 +22,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use parking_lot::Mutex;
+use tokio::sync::Semaphore;
 use tracing::debug;
 
 use nenjo::ModelProviderFactory;
@@ -29,6 +30,7 @@ use nenjo_models::{ArtifactInputTransport, MediaType, ModelProvider, ProviderMed
 use nenjo_models::{ReliableProvider, VllmStreaming};
 
 use super::ModelProviders;
+use super::admission::AdmissionControlledProvider;
 use crate::config::{Config as WorkerConfig, ReliabilityConfig};
 use crate::media::{ArtifactTransportResolver, ArtifactTransportTarget, MediaCapabilitySource};
 
@@ -38,6 +40,7 @@ pub struct ModelProviderRegistryConfig {
     api_keys: HashMap<String, String>,
     reliability: ReliabilityConfig,
     vllm_streaming: VllmStreaming,
+    max_concurrent_requests: usize,
 }
 
 impl ModelProviderRegistryConfig {
@@ -63,6 +66,11 @@ impl ModelProviderRegistryConfig {
         self.vllm_streaming = streaming;
         self
     }
+
+    pub fn with_max_concurrent_requests(mut self, max: usize) -> Self {
+        self.max_concurrent_requests = max.max(1);
+        self
+    }
 }
 
 impl Default for ModelProviderRegistryConfig {
@@ -71,6 +79,7 @@ impl Default for ModelProviderRegistryConfig {
             api_keys: HashMap::new(),
             reliability: ReliabilityConfig::default(),
             vllm_streaming: VllmStreaming::Enabled,
+            max_concurrent_requests: 3,
         }
     }
 }
@@ -81,6 +90,7 @@ impl From<&WorkerConfig> for ModelProviderRegistryConfig {
             .with_api_keys(&config.model_provider_api_keys)
             .with_reliability(config.reliability.clone())
             .with_vllm_streaming(config.vllm.streaming.into())
+            .with_max_concurrent_requests(config.model_runtime.max_concurrent_requests)
     }
 }
 
@@ -93,6 +103,8 @@ pub struct ModelProviderRegistry {
     api_keys: HashMap<String, String>,
     reliability: ReliabilityConfig,
     vllm_streaming: VllmStreaming,
+    model_admission: Arc<Semaphore>,
+    max_concurrent_requests: usize,
     cache: Mutex<HashMap<ProviderCacheKey, Arc<dyn ModelProvider>>>,
 }
 
@@ -123,6 +135,8 @@ impl ModelProviderRegistry {
             api_keys: config.api_keys,
             reliability: config.reliability,
             vllm_streaming: config.vllm_streaming,
+            model_admission: Arc::new(Semaphore::new(config.max_concurrent_requests)),
+            max_concurrent_requests: config.max_concurrent_requests,
             cache: Mutex::new(HashMap::new()),
         }
     }
@@ -238,7 +252,11 @@ impl ModelProviderRegistry {
     ) -> Result<Arc<dyn ModelProvider>> {
         let mut providers: Vec<(String, Box<dyn ModelProvider>)> = vec![(
             provider_name.to_string(),
-            Self::create_bare(provider_name, api_key, base_url, self.vllm_streaming),
+            Box::new(AdmissionControlledProvider::new(
+                Self::create_bare(provider_name, api_key, base_url, self.vllm_streaming),
+                Arc::clone(&self.model_admission),
+                self.max_concurrent_requests,
+            )),
         )];
 
         for fallback_name in &self.reliability.fallback_providers {
@@ -248,7 +266,11 @@ impl ModelProviderRegistry {
             if let Some(fallback_key) = self.api_keys.get(fallback_name.as_str()) {
                 providers.push((
                     fallback_name.clone(),
-                    Self::create_bare(fallback_name, fallback_key, None, self.vllm_streaming),
+                    Box::new(AdmissionControlledProvider::new(
+                        Self::create_bare(fallback_name, fallback_key, None, self.vllm_streaming),
+                        Arc::clone(&self.model_admission),
+                        self.max_concurrent_requests,
+                    )),
                 ));
             }
         }
@@ -388,8 +410,6 @@ impl ModelProviderFactory for ModelProviderRegistry {
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
-
     use nenjo::ModelProviderFactory;
 
     use super::*;
@@ -408,12 +428,14 @@ mod tests {
             .insert(ModelProviders::OpenAI, "configured-key".to_string());
         worker.reliability.max_retries = 7;
         worker.vllm.streaming = false;
+        worker.model_runtime.max_concurrent_requests = 3;
 
         let config = ModelProviderRegistryConfig::from(&worker);
 
         assert_eq!(config.api_keys["openai"], "configured-key");
         assert_eq!(config.reliability.max_retries, 7);
         assert_eq!(config.vllm_streaming, VllmStreaming::Disabled);
+        assert_eq!(config.max_concurrent_requests, 3);
     }
 
     #[test]

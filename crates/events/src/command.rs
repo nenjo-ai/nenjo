@@ -82,6 +82,13 @@ pub enum Command {
         /// Client-generated message ID for delivery tracking.
         #[serde(default)]
         id: Option<String>,
+        /// Stable identity for this execution attempt. Reconnecting clients reuse it;
+        /// an explicit user retry creates a new value while retaining `id`.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_id: Option<Uuid>,
+        /// Failed run that this attempt is replaying, when explicitly requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_of_run_id: Option<Uuid>,
         /// The user's message text.
         content: String,
         /// Optional encrypted content body. When present, workers should prefer this over `content`.
@@ -124,6 +131,12 @@ pub enum Command {
         /// Client-generated message ID for delivery tracking.
         #[serde(default)]
         id: Option<String>,
+        /// Stable identity for this execution attempt.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        attempt_id: Option<Uuid>,
+        /// Failed run that this attempt is replaying, when explicitly requested.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        retry_of_run_id: Option<Uuid>,
         /// The installed slash command, including its leading slash.
         command: String,
         /// The user's original message text.
@@ -257,6 +270,13 @@ pub enum Command {
         schedules: Vec<TaskScheduleAssignment>,
     },
 
+    /// Replace the worker's cached organization-wide runtime settings.
+    #[serde(rename = "organization_settings.sync")]
+    OrganizationSettingsSync {
+        #[serde(default)]
+        settings: crate::OrganizationSettings,
+    },
+
     // -----------------------------------------------------------------
     // Repository
     // -----------------------------------------------------------------
@@ -381,6 +401,13 @@ impl std::fmt::Display for Command {
             Self::TaskSchedulesSync { schedules } => {
                 write!(f, "task_schedules.sync(count={})", schedules.len())
             }
+            Self::OrganizationSettingsSync { settings } => {
+                write!(
+                    f,
+                    "organization_settings.sync(timezone={})",
+                    settings.timezone
+                )
+            }
             Self::RepoSync { project, .. } => write!(f, "repo.sync(project={project})"),
             Self::RepoUnsync { project } => write!(f, "repo.unsync(project={project})"),
             Self::WorkerPing => write!(f, "worker.ping"),
@@ -415,7 +442,7 @@ impl Command {
             | Command::ExecutionResume { .. }
             | Command::ExecutionContinue { .. } => Capability::Task,
 
-            Command::WorkerPing => Capability::Ping,
+            Command::WorkerPing | Command::OrganizationSettingsSync { .. } => Capability::Ping,
             Command::TaskSchedulesSync { .. } => Capability::Manifest,
             Command::WorkerAccountKeyUpdated { .. } => Capability::Manifest,
 
@@ -432,6 +459,7 @@ impl Command {
             Command::ChatCancel { .. }
             | Command::ExecutionCancel { .. }
             | Command::TaskSchedulesSync { .. }
+            | Command::OrganizationSettingsSync { .. }
             | Command::ManifestChanged { .. }
             | Command::PackageGraphChanged { .. }
             | Command::RepoSync { .. }
@@ -513,8 +541,12 @@ mod tests {
     fn chat_artifacts_round_trip_and_legacy_commands_default_to_empty() {
         let reference = artifact();
         let session_id = Uuid::new_v4();
+        let attempt_id = Uuid::new_v4();
+        let retry_of_run_id = Uuid::new_v4();
         let command = Command::ChatMessage {
             id: Some(Uuid::new_v4().to_string()),
+            attempt_id: Some(attempt_id),
+            retry_of_run_id: Some(retry_of_run_id),
             content: String::new(),
             encrypted_content: None,
             artifacts: vec![reference.clone()],
@@ -536,7 +568,14 @@ mod tests {
         let decoded: Command = serde_json::from_value(encoded).expect("deserialize chat command");
         assert!(matches!(
             decoded,
-            Command::ChatMessage { artifacts, .. } if artifacts == vec![reference]
+            Command::ChatMessage {
+                attempt_id: Some(decoded_attempt_id),
+                retry_of_run_id: Some(decoded_retry_of_run_id),
+                artifacts,
+                ..
+            } if decoded_attempt_id == attempt_id
+                && decoded_retry_of_run_id == retry_of_run_id
+                && artifacts == vec![reference]
         ));
 
         let legacy: Command = serde_json::from_value(serde_json::json!({
@@ -547,7 +586,12 @@ mod tests {
         .expect("deserialize command without artifact field");
         assert!(matches!(
             legacy,
-            Command::ChatMessage { artifacts, .. } if artifacts.is_empty()
+            Command::ChatMessage {
+                attempt_id: None,
+                retry_of_run_id: None,
+                artifacts,
+                ..
+            } if artifacts.is_empty()
         ));
     }
 
@@ -575,6 +619,20 @@ mod tests {
             }
             .delivery(),
             CommandDelivery::Queue
+        );
+        assert_eq!(
+            Command::OrganizationSettingsSync {
+                settings: crate::OrganizationSettings::default(),
+            }
+            .delivery(),
+            CommandDelivery::Broadcast
+        );
+        assert_eq!(
+            Command::OrganizationSettingsSync {
+                settings: crate::OrganizationSettings::default(),
+            }
+            .capability(),
+            Capability::Ping
         );
         assert_eq!(
             Command::ExecutionCancel {
@@ -641,5 +699,20 @@ mod tests {
             .delivery(),
             CommandDelivery::Targeted
         );
+    }
+
+    #[test]
+    fn organization_settings_sync_decodes_the_platform_snapshot() {
+        let command: Command = serde_json::from_value(serde_json::json!({
+            "type": "organization_settings.sync",
+            "settings": { "timezone": "America/Chicago" }
+        }))
+        .expect("decode organization settings sync");
+
+        assert!(matches!(
+            command,
+            Command::OrganizationSettingsSync { settings }
+                if settings.timezone == chrono_tz::America::Chicago
+        ));
     }
 }

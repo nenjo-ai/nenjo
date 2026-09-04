@@ -8,11 +8,12 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
+use arc_swap::ArcSwap;
 use dashmap::DashMap;
 use nenjo::LocalRoutineExecutionWatcher;
 use nenjo_crypto_auth::WrappedAccountContentKey as AuthWrappedAccountContentKey;
-use nenjo_events::TaskScheduleAssignment;
 use nenjo_events::WrappedAccountContentKey as EventWrappedAccountContentKey;
+use nenjo_events::{OrganizationSettings, TaskScheduleAssignment};
 use nenjo_secure_envelope::SecureEnvelopeBus;
 use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
@@ -93,6 +94,8 @@ pub struct CommandContext {
     pub git_locks: GitLocks,
     pub manifest_cache: Arc<WorkerManifestCache>,
     pub manifest_change_lock: Arc<tokio::sync::Mutex<()>>,
+    /// Organization settings captured when this command began handling.
+    pub organization_settings: OrganizationSettings,
     pub(crate) local_execution_watcher: LocalRoutineExecutionWatcher,
 }
 
@@ -114,6 +117,7 @@ pub struct WorkerRuntime {
     git_locks: GitLocks,
     manifest_cache: Arc<WorkerManifestCache>,
     manifest_change_lock: Arc<tokio::sync::Mutex<()>>,
+    organization_settings: ArcSwap<OrganizationSettings>,
     local_execution_watcher: LocalRoutineExecutionWatcher,
     seen_message_ids: SeenMessageIds,
     shutdown: CancellationToken,
@@ -153,6 +157,8 @@ impl WorkerRuntime {
             assembly.session_stores.clone(),
             shutdown.clone(),
         );
+        let organization_settings =
+            crate::bootstrap::load_cached_organization_settings(&config.manifests_dir);
 
         Ok(Self {
             harness: assembly.harness,
@@ -167,6 +173,7 @@ impl WorkerRuntime {
             git_locks: Arc::new(DashMap::new()),
             manifest_cache: assembly.manifest_cache,
             manifest_change_lock: assembly.manifest_change_lock,
+            organization_settings: ArcSwap::from_pointee(organization_settings),
             local_execution_watcher: assembly.local_execution_watcher,
             seen_message_ids,
             shutdown,
@@ -199,6 +206,7 @@ impl WorkerRuntime {
             git_locks: self.git_locks.clone(),
             manifest_cache: self.manifest_cache.clone(),
             manifest_change_lock: self.manifest_change_lock.clone(),
+            organization_settings: *self.organization_settings.load_full(),
             local_execution_watcher: self.local_execution_watcher.clone(),
         }
     }
@@ -255,6 +263,20 @@ impl WorkerRuntime {
 
     pub(crate) fn cached_task_schedules(&self) -> Vec<TaskScheduleAssignment> {
         crate::bootstrap::load_cached_task_schedules(&self.config.manifests_dir)
+    }
+
+    pub(crate) fn organization_timezone(&self) -> chrono_tz::Tz {
+        self.organization_settings.load().timezone
+    }
+
+    pub(crate) fn replace_organization_settings(
+        &self,
+        settings: OrganizationSettings,
+    ) -> Result<()> {
+        self.manifest_cache
+            .persist_organization_settings(&settings)?;
+        self.organization_settings.store(Arc::new(settings));
+        Ok(())
     }
 
     pub(crate) fn task_schedule_cache_path(&self) -> std::path::PathBuf {

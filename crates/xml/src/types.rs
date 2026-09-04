@@ -2,7 +2,7 @@
 
 use serde::Serialize;
 
-use crate::xml::to_xml_pretty;
+use crate::xml::{to_xml_pretty, xml_escape};
 
 /// Render a slice of `Serialize` items as pretty-printed, indented XML lines.
 /// Filters out empty items. Returns empty string if no items render.
@@ -43,7 +43,11 @@ pub fn metadata_json_to_xml(settings: &serde_json::Value) -> String {
                 serde_json::Value::String(s) => s.clone(),
                 other => other.to_string(),
             };
-            format!("  <entry key=\"{k}\">{val}</entry>")
+            format!(
+                "  <entry key=\"{}\">{}</entry>",
+                xml_escape(k),
+                xml_escape(&val)
+            )
         })
         .collect();
 
@@ -105,5 +109,17 @@ mod tests {
         let result = metadata_json_to_xml(&settings);
         assert!(result.contains("keep"));
         assert!(!result.contains("\"b\""));
+    }
+
+    #[test]
+    fn metadata_json_to_xml_escapes_keys_and_values() {
+        let settings = serde_json::json!({
+            "metadata": { "a\"b": "<unsafe>&value" }
+        });
+
+        let result = metadata_json_to_xml(&settings);
+
+        assert!(result.contains("key=\"a&quot;b\""));
+        assert!(result.contains("&lt;unsafe&gt;&amp;value"));
     }
 }

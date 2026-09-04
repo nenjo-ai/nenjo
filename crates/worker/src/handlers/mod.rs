@@ -256,6 +256,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
     match command {
         Command::ChatMessage {
             id,
+            attempt_id,
+            retry_of_run_id,
             content,
             artifacts,
             project,
@@ -272,6 +274,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     &ctx.chat_context(),
                     ChatCommandRequest {
                         message_id: id.as_deref(),
+                        attempt_id,
+                        retry_of_run_id,
                         content: &content,
                         artifacts: &artifacts,
                         project: project.as_deref(),
@@ -281,8 +285,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         session_id,
                         domain_session_id,
                         domain_activation,
-                        template_override: None,
                         hook_scopes: Vec::new(),
+                        timezone: ctx.organization_settings.timezone,
                     },
                 )
                 .await
@@ -290,6 +294,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
 
         Command::ChatCommand {
             id,
+            attempt_id,
+            retry_of_run_id,
             command,
             content,
             artifacts,
@@ -307,6 +313,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                     &ctx.chat_context(),
                     ChatSlashCommandRequest {
                         message_id: id.as_deref(),
+                        attempt_id,
+                        retry_of_run_id,
                         command: &command,
                         content: &content,
                         artifacts: &artifacts,
@@ -317,6 +325,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         session_id,
                         domain_session_id,
                         domain_activation,
+                        timezone: ctx.organization_settings.timezone,
                     },
                 )
                 .await
@@ -408,6 +417,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         priority: payload.priority.as_deref(),
                         artifacts: &payload.artifacts,
                         cancellation: tokio_util::sync::CancellationToken::new(),
+                        timezone: ctx.organization_settings.timezone,
                     },
                 )
                 .await?;
@@ -418,6 +428,8 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
         }
 
         Command::TaskSchedulesSync { .. } => Ok(()),
+
+        Command::OrganizationSettingsSync { .. } => Ok(()),
 
         Command::ExecutionCancel { execution_run_id } => {
             ctx.harness

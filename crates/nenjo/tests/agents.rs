@@ -8,7 +8,7 @@ use uuid::Uuid;
 
 use nenjo::manifest::{
     AbilityManifest, AgentManifest, ContextBlockManifest, DomainManifest, Manifest, ModelManifest,
-    ProjectManifest, PromptConfig, PromptTemplates, model_manifest_slug,
+    ProjectManifest, PromptConfig, model_manifest_slug,
 };
 use nenjo::provider::{
     ArtifactInputPreparer, ModelProviderFactory, NoopToolFactory, PreparedModelArtifacts, Provider,
@@ -307,15 +307,6 @@ fn test_manifest() -> Manifest {
         prompt_config: PromptConfig {
             system_prompt: "You are a helpful coding assistant.".into(),
             developer_prompt: "Focus on writing clean, idiomatic Rust.".into(),
-            templates: PromptTemplates {
-                task_execution:
-                    "Execute the following task:\n\nTitle: {{ task.title }}\nDescription: {{ task.description }}"
-                        .into(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval:
-                    "Evaluate:\n{{ routine.step.instructions }}\n\nIncoming handoffs:\n{{ routine.handoffs }}"
-                        .into(),
-            },
             ..Default::default()
         },
         color: None,
@@ -452,8 +443,9 @@ async fn runner_uses_concrete_artifact_preparer_for_model_request() {
             message: "Inspect this image".into(),
             history: Vec::new(),
             project: None,
-            template_override: None,
+            replayed_turn_contexts: Vec::new(),
             artifacts: vec![reference],
+            timezone: chrono_tz::UTC,
         }))
         .await
         .unwrap();
@@ -529,7 +521,7 @@ async fn runner_with_custom_tool() {
     );
     assert!(names.contains(&"echo"));
     assert!(!names.contains(&"respond_to_user"));
-    assert!(names.contains(&"list_knowledge_packs"));
+    assert!(!names.contains(&"list_knowledge_packs"));
     assert!(names.contains(&"inspect"));
     assert!(names.contains(&"stop"));
 
@@ -571,7 +563,7 @@ async fn runner_with_tool_factory() {
     );
     assert!(names.contains(&"echo"));
     assert!(!names.contains(&"respond_to_user"));
-    assert!(names.contains(&"list_knowledge_packs"));
+    assert!(!names.contains(&"list_knowledge_packs"));
     assert!(names.contains(&"inspect"));
     assert!(names.contains(&"stop"));
 
@@ -599,10 +591,7 @@ async fn instance_builds_prompts() {
         .agent("test-coder")
         .await
         .unwrap()
-        .with_memory_vars(std::collections::HashMap::from([(
-            "memories".to_string(),
-            "<memories>test memory</memories>".to_string(),
-        )]))
+        .with_memory_context("<memories>test memory</memories>")
         .build()
         .await
         .unwrap();
@@ -611,8 +600,9 @@ async fn instance_builds_prompts() {
         message: "Hello!".into(),
         history: vec![],
         project: None,
-        template_override: None,
+        replayed_turn_contexts: Vec::new(),
         artifacts: Vec::new(),
+        timezone: chrono_tz::UTC,
     });
 
     let prompts = runner.instance().build_prompts(&task).unwrap();
@@ -628,16 +618,19 @@ async fn instance_builds_prompts() {
         "developer prompt should contain configured text, got: {}",
         prompts.developer
     );
+    assert!(!prompts.system.contains("test memory"));
+    assert!(
+        prompts
+            .session_context
+            .messages()
+            .iter()
+            .any(|context| context.content().contains("test memory"))
+    );
 }
 
 #[tokio::test]
-async fn instance_renders_self_prompt_var() {
-    let mut manifest = test_manifest();
-    manifest.agents[0].prompt_config.system_prompt = "{{ self }}".into();
-    manifest.agents[0].prompt_config.developer_prompt =
-        "{{ agent.slug }}|{{ agent.role }}|{{ agent.name }}|{{ agent.model }}|{{ agent.description }}"
-            .into();
-
+async fn instance_injects_agent_identity_into_session_control_context() {
+    let manifest = test_manifest();
     let provider = Provider::builder()
         .with_manifest(manifest)
         .with_model_factory(MockModelProviderFactory::new("irrelevant"))
@@ -658,24 +651,28 @@ async fn instance_renders_self_prompt_var() {
         message: "Hello!".into(),
         history: vec![],
         project: None,
-        template_override: None,
+        replayed_turn_contexts: Vec::new(),
         artifacts: Vec::new(),
+        timezone: chrono_tz::UTC,
     });
     let prompts = runner.instance().build_prompts(&task).unwrap();
+    let control = prompts
+        .session_context
+        .messages()
+        .iter()
+        .find(|context| context.authority() == nenjo_models::RuntimeContextAuthority::Control)
+        .expect("session control context");
 
-    assert!(prompts.system.contains("<agent "));
-    assert!(prompts.system.contains("slug=\"test-coder\""));
-    assert!(prompts.system.contains("name=\"test-coder\""));
-    assert!(prompts.system.contains("llm_model_name=\"mock-llm-v1\""));
+    assert!(control.content().contains("slug=\"test-coder\""));
+    assert!(control.content().contains("name=\"test-coder\""));
     assert!(
-        prompts
-            .system
+        control
+            .content()
             .contains("description=\"A test coding agent\"")
     );
-    assert_eq!(
-        prompts.developer,
-        "test-coder||test-coder|mock-llm-v1|A test coding agent"
-    );
+    assert!(!control.content().contains("model"));
+    assert!(!prompts.system.contains("<agent "));
+    assert!(!prompts.developer.contains("<agent "));
 }
 
 // ---------------------------------------------------------------------------
@@ -760,11 +757,6 @@ fn manifest_with_abilities_and_domains(
         prompt_config: PromptConfig {
             system_prompt: "You are a test agent.".into(),
             developer_prompt: "Be helpful.".into(),
-            templates: PromptTemplates {
-                task_execution: String::new(),
-                chat_task: "{{ chat.message }}".into(),
-                gate_eval: String::new(),
-            },
             ..Default::default()
         },
         color: None,
@@ -1145,8 +1137,9 @@ async fn domain_expansion_appends_prompt_addon_without_changing_abilities() {
             message: "Deploy it".into(),
             history: vec![],
             project: None,
-            template_override: None,
+            replayed_turn_contexts: Vec::new(),
             artifacts: Vec::new(),
+            timezone: chrono_tz::UTC,
         }))
         .unwrap();
     assert!(

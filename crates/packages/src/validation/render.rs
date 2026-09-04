@@ -1,11 +1,8 @@
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::OnceLock;
 
 use anyhow::{Context, anyhow};
-use nenjo::context::{
-    AgentContext, FocusListContext, GitContext, MemoryProfileContext, ProjectContext,
-    RenderContextVars, RoutineContext, RoutineHandoffContext, RoutineHandoffsContext,
-    RoutineStepContext, TaskContext,
-};
+use regex::Regex;
 
 use crate::{PackageKind, ResolvedModule, ResolvedPackage};
 
@@ -304,6 +301,11 @@ pub(crate) fn validate_template_selectors(
     module: &ResolvedModule,
     template: &str,
 ) -> anyhow::Result<()> {
+    if let Some(selector) = first_runtime_selector(template) {
+        anyhow::bail!(
+            "references runtime-owned selector {selector}; prompts and context fragments may use only static package arguments, context includes, and knowledge indexes"
+        );
+    }
     for selector in scan_pkg_selectors(template) {
         if !fixture.selector_exists(&selector) {
             anyhow::bail!("references unresolved package selector {selector}");
@@ -331,6 +333,20 @@ pub(crate) fn validate_template_selectors(
     Ok(())
 }
 
+fn first_runtime_selector(template: &str) -> Option<String> {
+    static RUNTIME_SELECTOR: OnceLock<Regex> = OnceLock::new();
+    let regex = RUNTIME_SELECTOR.get_or_init(|| {
+        Regex::new(
+            r"\{[%{](?:[^}%]*?[^A-Za-z0-9_.])?((?:self|agent|global|chat|task|project|routine|gate|git|memories|memory_profile|heartbeat|artifacts)(?:\.[A-Za-z_][A-Za-z0-9_]*)*)",
+        )
+        .expect("runtime selector regex is valid")
+    });
+    regex
+        .captures(template)
+        .and_then(|captures| captures.get(1))
+        .map(|selector| selector.as_str().to_string())
+}
+
 fn normalize_named_template_refs(
     template: &str,
     named_templates: &HashMap<String, String>,
@@ -356,129 +372,15 @@ fn normalize_named_template_refs(
 }
 
 fn synthetic_vars() -> HashMap<String, String> {
-    let mut ctx = RenderContextVars {
-        _self: AgentContext {
-            slug: "validator".into(),
-            name: "Validator".into(),
-            model_name: "validation-model".into(),
-            description: Some("Package validation fixture".into()),
-        },
-        task: TaskContext {
-            id: "validation-task".into(),
-            slug: "validate-package".into(),
-            status: "in_progress".into(),
-            priority: "medium".into(),
-            title: "Validate package".into(),
-            instructions:
-                "Synthetic validation task. All runtime-rendered templates render strictly".into(),
-            labels: "validation,package".into(),
-        },
-        project: ProjectContext {
-            name: "Validation Project".into(),
-            slug: "validation-project".into(),
-            description: "Project used for package runtime validation".into(),
-            working_dir: "/workspace/validation-project".into(),
-            context: "Validation project context".into(),
-            metadata: "<metadata><item key=\"purpose\">validation</item></metadata>".into(),
-            git: Some(GitContext {
-                repo_url: "https://example.com/validation.git".into(),
-                branch: "validation".into(),
-                target_branch: "main".into(),
-                work_dir: "/workspace/validation-project".into(),
-            }),
-        },
-        routine: RoutineContext {
-            slug: "validation-routine".into(),
-            name: "Validation Routine".into(),
-            execution_id: "validation-execution".into(),
-            description: Some("Synthetic routine context".into()),
-            step: RoutineStepContext {
-                name: "Validation Step".into(),
-                step_type: "agent".into(),
-                instructions: "Validate package runtime behavior".into(),
-                metadata: r#"{"purpose":"validation"}"#.into(),
-            },
-            handoffs: RoutineHandoffsContext {
-                items: vec![RoutineHandoffContext {
-                    source_step: "validation-source".into(),
-                    target_step: "validation-step".into(),
-                    purpose: Some("Synthetic handoff coverage".into()),
-                    summary: Some("Validation handoff".into()),
-                    payload: r#"{"work":"Validate handoff rendering"}"#.into(),
-                }],
-            },
-        },
-        memory_profile: MemoryProfileContext {
-            core_focus: Some(FocusListContext {
-                items: vec!["runtime validation".into()],
-            }),
-            project_focus: Some(FocusListContext {
-                items: vec!["package prompts".into()],
-            }),
-            shared_focus: Some(FocusListContext {
-                items: vec!["runtime safety".into()],
-            }),
-        },
-        git: GitContext {
-            repo_url: "https://example.com/validation.git".into(),
-            branch: "validation".into(),
-            target_branch: "main".into(),
-            work_dir: "/workspace/validation-project".into(),
-        },
-        chat_message: "Validate this package".into(),
-        timestamp: "2026-01-01T00:00:00Z".into(),
-        memory_vars: HashMap::from([
-            (
-                "memories".into(),
-                "<memories>validation memory</memories>".into(),
-            ),
-            (
-                "memories.core".into(),
-                "<memories-core>core memory</memories-core>".into(),
-            ),
-            (
-                "memories.project".into(),
-                "<memories-project>project memory</memories-project>".into(),
-            ),
-            (
-                "memories.shared".into(),
-                "<memories-shared>shared memory</memories-shared>".into(),
-            ),
-        ]),
-        knowledge_vars: HashMap::from([(
-            "knowledge.validation.summary".into(),
-            "Validation knowledge".into(),
-        )]),
-        context_blocks: HashMap::new(),
-    };
-    if let Some(project_git) = &ctx.project.git {
-        ctx.context_blocks.insert(
-            "project.git".into(),
-            nenjo_xml::to_xml_pretty(project_git, 2),
-        );
-    }
-
-    ctx.to_vars()
+    HashMap::from([(
+        "knowledge.validation.summary".into(),
+        "Validation knowledge".into(),
+    )])
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn synthetic_vars_cover_declared_runtime_template_vars() {
-        let vars = synthetic_vars();
-        let missing = nenjo::context::template_var_defs()
-            .into_iter()
-            .filter(|var| !vars.contains_key(var.name))
-            .map(|var| var.name)
-            .collect::<Vec<_>>();
-
-        assert!(
-            missing.is_empty(),
-            "synthetic validation vars missing declared runtime vars: {missing:?}"
-        );
-    }
 
     #[test]
     fn normalizes_named_template_refs_with_partial_spacing() {

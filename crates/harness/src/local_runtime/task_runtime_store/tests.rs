@@ -17,6 +17,7 @@ fn submission(task_id: Uuid, execution_run_id: Uuid) -> TaskSubmission {
         execution_run_id,
         project: None,
         target: TaskExecutionTarget::agent("coder"),
+        timezone: chrono_tz::UTC,
         content: TaskContent {
             title: "task".to_string(),
             instructions: "work".to_string(),
@@ -248,6 +249,7 @@ async fn scheduled_occurrence_advances_and_enqueues_atomically() {
         execution_run_id: Uuid::new_v5(&schedule_id, scheduled_for.to_rfc3339().as_bytes()),
         project: None,
         target: schedule.target.clone(),
+        timezone: chrono_tz::UTC,
         content: schedule.content.clone(),
         trigger: TaskTrigger::Schedule {
             schedule_id,
@@ -299,6 +301,7 @@ async fn final_occurrence_disables_schedule_and_records_progress_atomically() {
         execution_run_id: Uuid::new_v5(&schedule_id, scheduled_for.to_rfc3339().as_bytes()),
         project: None,
         target: schedule.target.clone(),
+        timezone: chrono_tz::UTC,
         content: schedule.content.clone(),
         trigger: TaskTrigger::Schedule {
             schedule_id,
@@ -370,6 +373,7 @@ async fn unchanged_snapshot_does_not_rewind_local_schedule_progress() {
         execution_run_id: Uuid::new_v4(),
         project: None,
         target: incoming.target.clone(),
+        timezone: chrono_tz::UTC,
         content: incoming.content.clone(),
         trigger: TaskTrigger::Schedule {
             schedule_id,

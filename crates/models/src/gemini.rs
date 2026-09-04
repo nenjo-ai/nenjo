@@ -134,6 +134,81 @@ struct GeminiCliOAuthCreds {
 }
 
 impl GeminiProvider {
+    fn convert_messages(messages: &[ConversationMessage]) -> (Option<Content>, Vec<Content>) {
+        let mut system_instruction: Option<Content> = None;
+        let mut contents = Vec::new();
+
+        for message in messages {
+            match message {
+                ConversationMessage::Chat(msg) if msg.role == ChatRole::System => {
+                    match &mut system_instruction {
+                        Some(existing) => existing.parts.push(Part {
+                            text: msg.content.clone(),
+                        }),
+                        None => {
+                            system_instruction = Some(Content {
+                                role: None,
+                                parts: vec![Part {
+                                    text: msg.content.clone(),
+                                }],
+                            });
+                        }
+                    }
+                }
+                ConversationMessage::Chat(msg) if msg.role == ChatRole::Assistant => {
+                    contents.push(Content {
+                        role: Some("model".to_string()),
+                        parts: vec![Part {
+                            text: msg.content.clone(),
+                        }],
+                    });
+                }
+                ConversationMessage::Chat(msg) => contents.push(Content {
+                    role: Some("user".to_string()),
+                    parts: vec![Part {
+                        text: msg.content.clone(),
+                    }],
+                }),
+                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                    let mut parts = Vec::new();
+                    if let Some(text) = text {
+                        parts.push(Part { text: text.clone() });
+                    }
+                    parts.extend(tool_calls.iter().map(|call| Part {
+                        text: format!("Tool call {}: {}", call.name, call.arguments),
+                    }));
+                    contents.push(Content {
+                        role: Some("model".to_string()),
+                        parts,
+                    });
+                }
+                ConversationMessage::ToolResults(results) => contents.push(Content {
+                    role: Some("user".to_string()),
+                    parts: results
+                        .iter()
+                        .map(|result| Part {
+                            text: result.output.text_content(),
+                        })
+                        .collect(),
+                }),
+                ConversationMessage::ArtifactAnalysis(analysis) => contents.push(Content {
+                    role: Some("user".to_string()),
+                    parts: vec![Part {
+                        text: analysis.model_context(),
+                    }],
+                }),
+                ConversationMessage::RuntimeContext(context) => contents.push(Content {
+                    role: Some("user".to_string()),
+                    parts: vec![Part {
+                        text: context.content().to_string(),
+                    }],
+                }),
+            }
+        }
+
+        (system_instruction, contents)
+    }
+
     /// Create a new Gemini provider.
     ///
     /// Authentication priority:
@@ -284,81 +359,7 @@ impl ModelProvider for GeminiProvider {
             )
         })?;
 
-        // Convert ChatMessages to Gemini Content format
-        let mut system_instruction: Option<Content> = None;
-        let mut contents = Vec::new();
-
-        for message in request.messages {
-            match message {
-                ConversationMessage::Chat(msg)
-                    if matches!(msg.role, ChatRole::System | ChatRole::Developer) =>
-                {
-                    match &mut system_instruction {
-                        Some(existing) => {
-                            existing.parts.push(Part {
-                                text: msg.content.clone(),
-                            });
-                        }
-                        None => {
-                            system_instruction = Some(Content {
-                                role: None,
-                                parts: vec![Part {
-                                    text: msg.content.clone(),
-                                }],
-                            });
-                        }
-                    }
-                }
-                ConversationMessage::Chat(msg) if msg.role == ChatRole::Assistant => {
-                    contents.push(Content {
-                        role: Some("model".to_string()),
-                        parts: vec![Part {
-                            text: msg.content.clone(),
-                        }],
-                    });
-                }
-                ConversationMessage::Chat(msg) => {
-                    contents.push(Content {
-                        role: Some("user".to_string()),
-                        parts: vec![Part {
-                            text: msg.content.clone(),
-                        }],
-                    });
-                }
-                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
-                    let mut parts = Vec::new();
-                    if let Some(text) = text {
-                        parts.push(Part { text: text.clone() });
-                    }
-                    parts.extend(tool_calls.iter().map(|call| Part {
-                        text: format!("Tool call {}: {}", call.name, call.arguments),
-                    }));
-                    contents.push(Content {
-                        role: Some("model".to_string()),
-                        parts,
-                    });
-                }
-                ConversationMessage::ToolResults(results) => {
-                    contents.push(Content {
-                        role: Some("user".to_string()),
-                        parts: results
-                            .iter()
-                            .map(|result| Part {
-                                text: result.output.text_content(),
-                            })
-                            .collect(),
-                    });
-                }
-                ConversationMessage::ArtifactAnalysis(analysis) => {
-                    contents.push(Content {
-                        role: Some("user".to_string()),
-                        parts: vec![Part {
-                            text: analysis.model_context(),
-                        }],
-                    });
-                }
-            }
-        }
+        let (system_instruction, contents) = Self::convert_messages(request.messages);
 
         let gemini_request = GenerateContentRequest {
             contents,
@@ -368,6 +369,14 @@ impl ModelProvider for GeminiProvider {
                 max_output_tokens: 65536,
             },
         };
+
+        crate::request_logging::debug_provider_request(
+            "gemini",
+            model,
+            1,
+            request.messages,
+            &gemini_request,
+        );
 
         let url = Self::build_generate_content_url(model, auth);
 
@@ -462,6 +471,26 @@ mod tests {
     fn provider_rejects_empty_key() {
         let provider = GeminiProvider::new(Some(""));
         assert!(!matches!(provider.auth, Some(GeminiAuth::ExplicitKey(_))));
+    }
+
+    #[test]
+    fn convert_messages_keeps_one_system_and_degrades_control_context_to_user() {
+        let messages = vec![
+            ConversationMessage::system("System prompt"),
+            ConversationMessage::developer("Developer instructions"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_control(
+                "clock",
+            )),
+        ];
+
+        let (system, contents) = GeminiProvider::convert_messages(&messages);
+
+        assert_eq!(system.unwrap().parts[0].text, "System prompt");
+        assert_eq!(contents.len(), 2);
+        assert_eq!(contents[0].role.as_deref(), Some("user"));
+        assert_eq!(contents[0].parts[0].text, "Developer instructions");
+        assert_eq!(contents[1].role.as_deref(), Some("user"));
+        assert_eq!(contents[1].parts[0].text, "clock");
     }
 
     #[test]

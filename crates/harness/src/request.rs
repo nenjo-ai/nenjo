@@ -31,15 +31,18 @@ pub struct ChatRequest {
     pub session_id: Uuid,
     /// Durable identity of the user message that initiated this turn.
     pub input_message_id: Option<Uuid>,
+    /// Failed run being deliberately replayed. Retry attempts reuse the logical
+    /// user turn without appending it to provider history a second time.
+    pub retry_of_run_id: Option<Uuid>,
     pub agent: Slug,
     pub message: String,
     pub project: Option<Slug>,
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<ChatDomainActivation>,
-    pub template_override: Option<String>,
     pub hook_scopes: Vec<ActiveHookScope>,
     pub hook_transcript_dir: Option<PathBuf>,
     pub artifacts: Vec<ArtifactRef>,
+    pub timezone: chrono_tz::Tz,
 }
 
 impl ChatRequest {
@@ -48,15 +51,16 @@ impl ChatRequest {
         Self {
             session_id: Uuid::new_v4(),
             input_message_id: None,
+            retry_of_run_id: None,
             agent: agent.into_slug(),
             message: message.into(),
             project: None,
             domain_session_id: None,
             domain_activation: None,
-            template_override: None,
             hook_scopes: Vec::new(),
             hook_transcript_dir: None,
             artifacts: Vec::new(),
+            timezone: chrono_tz::UTC,
         }
     }
 
@@ -69,6 +73,11 @@ impl ChatRequest {
     /// Associate this execution with its persisted user-message identity.
     pub fn with_input_message_id(mut self, input_message_id: Uuid) -> Self {
         self.input_message_id = Some(input_message_id);
+        self
+    }
+
+    pub fn retrying_run(mut self, run_id: Uuid) -> Self {
+        self.retry_of_run_id = Some(run_id);
         self
     }
 
@@ -100,12 +109,6 @@ impl ChatRequest {
         self
     }
 
-    /// Replace the agent chat template for this turn.
-    pub fn with_template_override(mut self, template: impl Into<String>) -> Self {
-        self.template_override = Some(template.into());
-        self
-    }
-
     /// Store Claude-compatible hook transcript files outside the working tree.
     pub fn with_hook_transcript_dir(mut self, dir: impl Into<PathBuf>) -> Self {
         self.hook_transcript_dir = Some(dir.into());
@@ -115,6 +118,11 @@ impl ChatRequest {
     /// Attach immutable artifact revisions to this chat turn.
     pub fn with_artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
         self.artifacts = artifacts;
+        self
+    }
+
+    pub fn with_timezone(mut self, timezone: chrono_tz::Tz) -> Self {
+        self.timezone = timezone;
         self
     }
 }
@@ -135,6 +143,7 @@ pub struct TaskRequest {
     pub priority: Option<String>,
     pub project_location: Option<ProjectLocation>,
     pub artifacts: Vec<ArtifactRef>,
+    pub timezone: chrono_tz::Tz,
 }
 
 impl TaskRequest {
@@ -154,6 +163,7 @@ impl TaskRequest {
             priority: None,
             project_location: None,
             artifacts: Vec::new(),
+            timezone: chrono_tz::UTC,
         }
     }
 
@@ -179,6 +189,7 @@ impl TaskRequest {
             priority: task.priority.clone(),
             project_location: None,
             artifacts: task.artifacts.clone(),
+            timezone: chrono_tz::UTC,
         }
     }
 
@@ -239,6 +250,11 @@ impl TaskRequest {
     /// Attach immutable artifact revisions to this task execution.
     pub fn with_artifacts(mut self, artifacts: Vec<ArtifactRef>) -> Self {
         self.artifacts = artifacts;
+        self
+    }
+
+    pub fn with_timezone(mut self, timezone: chrono_tz::Tz) -> Self {
+        self.timezone = timezone;
         self
     }
 }

@@ -53,7 +53,8 @@ impl PreparedModelArtifacts {
                 ConversationMessage::ArtifactAnalysis(analysis) => Some(analysis),
                 ConversationMessage::Chat(_)
                 | ConversationMessage::AssistantToolCalls { .. }
-                | ConversationMessage::ToolResults(_) => None,
+                | ConversationMessage::ToolResults(_)
+                | ConversationMessage::RuntimeContext(_) => None,
             })
             .chain(new_analysis_messages.iter())
             .collect::<Vec<_>>();
@@ -116,6 +117,9 @@ fn compile_message(
         }
         ConversationMessage::ArtifactAnalysis(analysis) => {
             ConversationMessage::user(analysis.model_context())
+        }
+        ConversationMessage::RuntimeContext(context) => {
+            ConversationMessage::runtime_context(context.clone())
         }
     }
 }

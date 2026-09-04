@@ -229,6 +229,118 @@ pub struct UnresolvedArtifactInputError {
     pub artifact_count: usize,
 }
 
+/// Placement of runtime-owned model context in a conversation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeContextScope {
+    /// Stable context snapshotted once for a session context epoch.
+    Session,
+    /// Context snapshotted once for one logical user turn.
+    Turn,
+}
+
+impl RuntimeContextScope {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Session => "session",
+            Self::Turn => "turn",
+        }
+    }
+}
+
+/// Trust level assigned by the runtime to model context.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuntimeContextAuthority {
+    /// Runtime-owned control facts or workflow instructions.
+    Control,
+    /// Reference material that may contain user-authored or otherwise untrusted text.
+    #[default]
+    Data,
+}
+
+impl RuntimeContextAuthority {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Control => "control",
+            Self::Data => "data",
+        }
+    }
+}
+
+/// Runtime-owned model context that is hidden from ordinary chat history.
+///
+/// The content is persisted exactly as sent to providers so replay never
+/// reserializes an older context with newer formatting rules.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RuntimeContextMessage {
+    scope: RuntimeContextScope,
+    /// Defaults to data so contexts persisted before authority was introduced
+    /// retain their original user-role behavior when replayed.
+    #[serde(default)]
+    authority: RuntimeContextAuthority,
+    content: String,
+}
+
+impl RuntimeContextMessage {
+    pub fn session_control(content: impl Into<String>) -> Self {
+        Self {
+            scope: RuntimeContextScope::Session,
+            authority: RuntimeContextAuthority::Control,
+            content: content.into(),
+        }
+    }
+
+    pub fn session_data(content: impl Into<String>) -> Self {
+        Self {
+            scope: RuntimeContextScope::Session,
+            authority: RuntimeContextAuthority::Data,
+            content: content.into(),
+        }
+    }
+
+    pub fn turn_control(content: impl Into<String>) -> Self {
+        Self {
+            scope: RuntimeContextScope::Turn,
+            authority: RuntimeContextAuthority::Control,
+            content: content.into(),
+        }
+    }
+
+    pub fn turn_data(content: impl Into<String>) -> Self {
+        Self {
+            scope: RuntimeContextScope::Turn,
+            authority: RuntimeContextAuthority::Data,
+            content: content.into(),
+        }
+    }
+
+    pub const fn scope(&self) -> RuntimeContextScope {
+        self.scope
+    }
+
+    pub const fn authority(&self) -> RuntimeContextAuthority {
+        self.authority
+    }
+
+    /// Preferred provider role when native developer messages are available.
+    pub const fn preferred_role(&self) -> ChatRole {
+        match self.authority {
+            RuntimeContextAuthority::Control => ChatRole::Developer,
+            RuntimeContextAuthority::Data => ChatRole::User,
+        }
+    }
+
+    /// Portable role used by providers without native developer messages.
+    pub const fn fallback_role(&self) -> ChatRole {
+        ChatRole::User
+    }
+
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+}
+
 /// Token usage reported by the LLM provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct TokenUsage {
@@ -307,6 +419,10 @@ impl FinishReason {
 pub enum ProviderStreamEvent {
     TextDelta(String),
     ReasoningDelta(String),
+    CapacityWaiting {
+        limit: usize,
+    },
+    CapacityAcquired,
     ProviderToolStarted(ProviderToolTrace),
     ProviderToolCompleted(ProviderToolTrace),
     RetryScheduled {
@@ -393,6 +509,8 @@ pub enum ConversationMessage {
     ToolResults(Vec<ToolResultMessage>),
     /// Assigned-model analysis of immutable artifact revisions.
     ArtifactAnalysis(ArtifactAnalysisMessage),
+    /// Runtime-owned session or turn context, visible to the model but not the user transcript.
+    RuntimeContext(RuntimeContextMessage),
 }
 
 impl ConversationMessage {
@@ -428,6 +546,10 @@ impl ConversationMessage {
         Self::ArtifactAnalysis(message)
     }
 
+    pub fn runtime_context(message: RuntimeContextMessage) -> Self {
+        Self::RuntimeContext(message)
+    }
+
     pub fn unresolved_artifact_count(&self) -> usize {
         self.artifact_references().count()
     }
@@ -444,6 +566,7 @@ impl ConversationMessage {
                 parts: None,
             },
             Self::ArtifactAnalysis(_) => ArtifactReferences::Empty,
+            Self::RuntimeContext(_) => ArtifactReferences::Empty,
         }
     }
 
@@ -455,7 +578,8 @@ impl ConversationMessage {
                 tool_calls: _,
             }
             | Self::ToolResults(_)
-            | Self::ArtifactAnalysis(_) => None,
+            | Self::ArtifactAnalysis(_)
+            | Self::RuntimeContext(_) => None,
         }
     }
 
@@ -467,7 +591,8 @@ impl ConversationMessage {
                 tool_calls: _,
             }
             | Self::ToolResults(_)
-            | Self::ArtifactAnalysis(_) => None,
+            | Self::ArtifactAnalysis(_)
+            | Self::RuntimeContext(_) => None,
         }
     }
 
@@ -561,7 +686,8 @@ pub trait ModelProvider: Send + Sync {
 
     /// Whether the given model supports the `developer` message role (OpenAI-spec).
     /// When true, app-owned instructions are sent as a developer message.
-    /// When false, they are folded into the provider's system-equivalent role.
+    /// When false, the host may combine static instructions into its single
+    /// system message; interleaved developer messages fall back to user.
     fn supports_developer_role(&self, _model: &str) -> bool {
         false
     }
@@ -735,6 +861,33 @@ mod tests {
             ConversationMessage::ToolResults(vec![ToolResultMessage::text("1", "done")]);
         let json = serde_json::to_string(&tool_result).unwrap();
         assert!(json.contains("\"type\":\"ToolResults\""));
+    }
+
+    #[test]
+    fn runtime_context_authority_selects_native_or_fallback_role() {
+        let control = RuntimeContextMessage::turn_control("clock");
+        let data = RuntimeContextMessage::turn_data("memory");
+
+        assert_eq!(control.authority(), RuntimeContextAuthority::Control);
+        assert_eq!(control.preferred_role(), ChatRole::Developer);
+        assert_eq!(control.fallback_role(), ChatRole::User);
+        assert_eq!(data.authority(), RuntimeContextAuthority::Data);
+        assert_eq!(data.preferred_role(), ChatRole::User);
+        assert_eq!(data.fallback_role(), ChatRole::User);
+    }
+
+    #[test]
+    fn persisted_runtime_context_without_authority_remains_data() {
+        let serialized =
+            r#"{"type":"RuntimeContext","data":{"scope":"session","content":"legacy bytes"}}"#;
+        let message: ConversationMessage = serde_json::from_str(serialized).unwrap();
+        let ConversationMessage::RuntimeContext(context) = message else {
+            panic!("expected runtime context");
+        };
+
+        assert_eq!(context.authority(), RuntimeContextAuthority::Data);
+        assert_eq!(context.preferred_role(), ChatRole::User);
+        assert_eq!(context.content(), "legacy bytes");
     }
 
     #[test]

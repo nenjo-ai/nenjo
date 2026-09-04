@@ -29,6 +29,12 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 delta.len()
             )
         }
+        nenjo::TurnEvent::ModelCapacityWaiting { request_id, limit } => {
+            format!("model_capacity_waiting(request={request_id}, limit={limit})")
+        }
+        nenjo::TurnEvent::ModelCapacityAcquired { request_id } => {
+            format!("model_capacity_acquired(request={request_id})")
+        }
         nenjo::TurnEvent::ProviderRetryScheduled {
             request_id,
             attempt,
@@ -187,6 +193,11 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
                 "transcript_message(kind=artifact_analysis, sources={}, content_len={})",
                 analysis.source_inputs.len(),
                 analysis.text.len()
+            ),
+            nenjo_models::ConversationMessage::RuntimeContext(context) => format!(
+                "transcript_message(kind=runtime_context, scope={}, authority={})",
+                context.scope().as_str(),
+                context.authority().as_str()
             ),
         },
         nenjo::TurnEvent::Paused => "paused".to_string(),

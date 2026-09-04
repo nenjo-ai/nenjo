@@ -20,7 +20,7 @@ pub(crate) enum ChatArtifactDialect {
     Vllm,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub(crate) enum ChatCompletionsContent {
     Text(String),
@@ -51,9 +51,33 @@ impl ChatCompletionsContent {
     pub(crate) fn has_media(&self) -> bool {
         matches!(self, Self::Parts(_))
     }
+
+    /// Join two adjacent user-message payloads without changing any existing
+    /// multipart element. A multipart join is represented by one separator
+    /// text part between the original content sequences.
+    pub(crate) fn join_adjacent_user(self, next: Self) -> Self {
+        match (self, next) {
+            (Self::Text(left), Self::Text(right)) => Self::Text(format!("{left}\n\n{right}")),
+            (left, right) => {
+                let mut parts = left.into_parts();
+                parts.push(ChatCompletionsContentPart::Text {
+                    text: "\n\n".to_string(),
+                });
+                parts.extend(right.into_parts());
+                Self::Parts(parts)
+            }
+        }
+    }
+
+    fn into_parts(self) -> Vec<ChatCompletionsContentPart> {
+        match self {
+            Self::Text(text) => vec![ChatCompletionsContentPart::Text { text }],
+            Self::Parts(parts) => parts,
+        }
+    }
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub(crate) enum ChatCompletionsContentPart {
     Text {
@@ -73,25 +97,25 @@ pub(crate) enum ChatCompletionsContentPart {
     },
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ChatCompletionsImageUrl {
     url: String,
     detail: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ChatCompletionsInputAudio {
     data: String,
     format: &'static str,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ChatCompletionsFile {
     filename: String,
     file_data: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, PartialEq, Serialize)]
 pub(crate) struct ChatCompletionsVideoUrl {
     url: String,
 }
@@ -554,5 +578,30 @@ mod tests {
         ));
         assert!(transport.accepts(ArtifactSize::new(MAX_INLINE_TEXT_ARTIFACT_BYTES)));
         assert!(!transport.accepts(ArtifactSize::new(MAX_INLINE_TEXT_ARTIFACT_BYTES + 1)));
+    }
+
+    #[test]
+    fn multipart_user_join_preserves_parts_and_inserts_only_the_separator() {
+        let left = ChatCompletionsContent::Parts(vec![
+            ChatCompletionsContentPart::Text {
+                text: "left".into(),
+            },
+            ChatCompletionsContentPart::ImageUrl {
+                image_url: ChatCompletionsImageUrl {
+                    url: "data:image/png;base64,cG5n".into(),
+                    detail: "auto",
+                },
+            },
+        ]);
+        let joined = left.join_adjacent_user(ChatCompletionsContent::text("right"));
+        assert_eq!(
+            serde_json::to_value(joined).unwrap(),
+            serde_json::json!([
+                {"type":"text","text":"left"},
+                {"type":"image_url","image_url":{"url":"data:image/png;base64,cG5n","detail":"auto"}},
+                {"type":"text","text":"\n\n"},
+                {"type":"text","text":"right"}
+            ])
+        );
     }
 }

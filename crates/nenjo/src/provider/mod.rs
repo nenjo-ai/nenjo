@@ -46,6 +46,12 @@ use nenjo_knowledge::{
 };
 use tracing::{debug, warn};
 
+pub(crate) fn knowledge_read_scope_granted(scopes: &[String]) -> bool {
+    scopes
+        .iter()
+        .any(|scope| matches!(scope.as_str(), "knowledge:read" | "knowledge:write"))
+}
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------
@@ -847,7 +853,6 @@ where
         debug!(
             agent = %agent.name,
             system_prompt_len = prompt_config.system_prompt.len(),
-            task_execution_len = prompt_config.templates.task_execution.len(),
             "Loaded typed prompt_config"
         );
 
@@ -922,7 +927,7 @@ where
             })
     }
 
-    fn build_prompt_context(&self, agent: &AgentManifest) -> PromptContext {
+    fn build_prompt_context(&self, _agent: &AgentManifest) -> PromptContext {
         let current_project = self
             .inner
             .manifest
@@ -941,8 +946,6 @@ where
         render_ctx_extra.knowledge_vars = self.refresh_knowledge_prompt_vars();
 
         PromptContext {
-            agent_name: agent.name.clone(),
-            agent_description: agent.description.clone().unwrap_or_default(),
             current_project,
             active_domain: None,
             append_active_domain_addon: true,

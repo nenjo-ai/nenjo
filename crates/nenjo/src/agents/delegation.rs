@@ -378,10 +378,10 @@ where
         .with(AsyncControl::SendInput)
         .with(AsyncControl::Stop)
         .with(AsyncControl::Wait);
-    let started = instance
+    let started = match instance
         .runtime
         .async_ops
-        .start(
+        .start_nested(
             StartAsyncOp {
                 id: operation_id.clone(),
                 kind: AsyncOpKind::Delegation,
@@ -394,7 +394,11 @@ where
             },
             parent_events_tx.clone(),
         )
-        .await;
+        .await
+    {
+        Ok(started) => started,
+        Err(error) => return Ok(error.into_tool_result()),
+    };
 
     let child_handle = started.child.clone();
     let op_handle = started.handle.clone();
@@ -626,6 +630,8 @@ where
         }
         TurnEvent::AbilityStarted { .. }
         | TurnEvent::AbilityCompleted { .. }
+        | TurnEvent::ModelCapacityWaiting { .. }
+        | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::ProviderRetryScheduled { .. }
         | TurnEvent::HookStarted { .. }
         | TurnEvent::HookActivated { .. }
@@ -705,7 +711,8 @@ async fn bridge_delegation_transcript(
                 }
                 nenjo_models::ConversationMessage::AssistantToolCalls { .. }
                 | nenjo_models::ConversationMessage::ToolResults(_)
-                | nenjo_models::ConversationMessage::ArtifactAnalysis(_) => return,
+                | nenjo_models::ConversationMessage::ArtifactAnalysis(_)
+                | nenjo_models::ConversationMessage::RuntimeContext(_) => return,
             };
             handle.transcript(transcript, events_tx).await;
         }
@@ -714,6 +721,8 @@ async fn bridge_delegation_transcript(
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
         | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ModelCapacityWaiting { .. }
+        | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::ProviderRetryScheduled { .. }
         | TurnEvent::ModelRequestCompleted { .. }
         | TurnEvent::HookStarted { .. }
