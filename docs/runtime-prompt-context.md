@@ -24,6 +24,21 @@ developer and data context as user. Providers without that role serialize both
 as user at their original chronological position. Dynamic context is never
 promoted into an additional system prompt.
 
+At an OpenAI-shaped adapter boundary, models without a native `developer` role
+use a portable projection. After roles are mapped, adjacent `user` messages are
+coalesced with the exact separator `\n\n`. This is a wire-only normalization:
+the durable transcript retains every runtime-context boundary. Coalescing never
+crosses an assistant message, function call, function-call output, tool result,
+system message, or native developer message. Multipart Chat Completions content
+keeps every original part in order and inserts only one separator text part.
+
+Chat Completions and Responses use the same chronological transcript. Responses
+input contains every instruction, runtime context, user/assistant message,
+local function call, function output, and text artifact-analysis message in its
+original order. Instructions are not lifted into a separate `instructions`
+field. A compatible Responses fallback rejects unresolved multimodal artifact
+references explicitly because that transport does not yet encode them.
+
 Persisted runtime contexts from before the authority field existed deserialize
 as data. This preserves their original user-role behavior instead of elevating
 old mixed-content snapshots during replay.
@@ -104,6 +119,35 @@ A retry excludes the failed logical turn's user, assistant, and tool messages,
 then reuses every persisted context message for that turn. It does not generate
 a new clock or memory snapshot. Context bodies are omitted from ordinary trace
 previews and Claude-compatible hook transcripts.
+
+## Execution cache epochs and tool catalogs
+
+The model-visible local tool catalog is resolved exactly once when a turn loop
+starts, after ability, delegation, async-control, and host tools are installed.
+Canonical names are checked for uniqueness and sorted once. The resulting owned
+snapshot is reused for request budgeting, diagnostics, every model turn, and
+every provider retry in that execution. Provider adapters preserve its order
+and reject any distinct canonical names that collide after provider-specific
+name sanitization.
+
+Executions with their own capability surface always advertise the same four
+async controls for their full lifetime: `inspect`, `send_input`, `stop`, and
+`wait`. Starting, completing, failing, stopping, or pruning an operation does
+not alter those tool definitions. Each operation's `AsyncControls` metadata
+still authorizes which controls apply; unsupported or unmatched model calls
+return typed, machine-readable outcomes. Internal execution cancellation uses
+a separate path that can stop hidden owned operations.
+
+Tool availability is therefore an execution-start decision. A host capability
+that becomes applicable midway through a run is first advertised in the next
+execution. Configuration, capability, model-transport, or tool-catalog changes
+start a new cache epoch rather than mutating the cache-visible prefix in place.
+
+Prompt-cache byte stability is measured on provider-native projections:
+Chat Completions compares serialized `messages` prefixes, Responses compares
+serialized `input` prefixes, and both compare the complete serialized `tools`
+array across turns and retries. The later HTTP body itself is not required to
+have the earlier body as a literal byte prefix.
 
 ## Compaction
 

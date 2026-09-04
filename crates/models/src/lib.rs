@@ -18,7 +18,9 @@ pub mod gemini;
 pub mod native;
 pub mod ollama;
 pub mod openai;
+mod openai_chat;
 mod openai_multimodal;
+mod openai_responses;
 mod openai_tools;
 pub mod openrouter;
 pub mod reliable;
@@ -255,6 +257,7 @@ pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::E
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde::Serialize;
 
     #[test]
     fn strip_thinking_removes_think_block() {
@@ -288,5 +291,34 @@ mod tests {
     fn strip_thinking_only_thinking() {
         let input = "<think>All reasoning, no output</think>";
         assert_eq!(strip_thinking(input), "");
+    }
+
+    pub(crate) fn assert_serialized_prefix<T: Serialize>(first: &[T], later: &[T]) {
+        assert!(
+            later.len() >= first.len(),
+            "later request is shorter than its prefix"
+        );
+        let expected = serde_json::to_vec(first).expect("serialize first provider-native prefix");
+        let actual = serde_json::to_vec(&later[..first.len()])
+            .expect("serialize later provider-native prefix");
+        assert_eq!(
+            actual,
+            expected,
+            "provider-native prefix changed\nfirst: {}\nlater: {}",
+            String::from_utf8_lossy(&expected),
+            String::from_utf8_lossy(&actual),
+        );
+    }
+
+    pub(crate) fn assert_serialized_equal<T: Serialize>(first: &T, later: &T) {
+        let expected = serde_json::to_vec(first).expect("serialize first provider value");
+        let actual = serde_json::to_vec(later).expect("serialize later provider value");
+        assert_eq!(
+            actual,
+            expected,
+            "provider-native bytes changed\nfirst: {}\nlater: {}",
+            String::from_utf8_lossy(&expected),
+            String::from_utf8_lossy(&actual),
+        );
     }
 }

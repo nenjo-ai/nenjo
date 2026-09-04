@@ -12,6 +12,70 @@ pub const SEND_INPUT_TOOL_NAME: &str = "send_input";
 pub const STOP_TOOL_NAME: &str = "stop";
 pub const WAIT_TOOL_NAME: &str = "wait";
 
+/// Summary status for a model-issued async control operation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsyncControlResultStatus {
+    Applied,
+    Partial,
+    NoMatchingOperations,
+}
+
+/// Why an explicitly selected operation was not eligible for a model control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AsyncControlRejectionReason {
+    NotFound,
+    KindMismatch,
+    UnsupportedControl,
+    NotModelVisible,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AsyncControlRejection {
+    pub operation_id: String,
+    pub reason: AsyncControlRejectionReason,
+}
+
+/// Machine-readable result returned by each generic async control tool.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AsyncControlResult<T> {
+    pub status: AsyncControlResultStatus,
+    pub results: Vec<T>,
+    pub rejected: Vec<AsyncControlRejection>,
+}
+
+impl<T> AsyncControlResult<T> {
+    pub fn from_parts(results: Vec<T>, rejected: Vec<AsyncControlRejection>) -> Self {
+        let status = match (results.is_empty(), rejected.is_empty()) {
+            (false, true) => AsyncControlResultStatus::Applied,
+            (false, false) => AsyncControlResultStatus::Partial,
+            (true, _) => AsyncControlResultStatus::NoMatchingOperations,
+        };
+        Self {
+            status,
+            results,
+            rejected,
+        }
+    }
+
+    pub fn no_matching_operations() -> Self {
+        Self {
+            status: AsyncControlResultStatus::NoMatchingOperations,
+            results: Vec::new(),
+            rejected: Vec::new(),
+        }
+    }
+}
+
+impl<T> std::ops::Deref for AsyncControlResult<T> {
+    type Target = [T];
+
+    fn deref(&self) -> &Self::Target {
+        &self.results
+    }
+}
+
 /// A model-facing action supported by an async operation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]

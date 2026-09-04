@@ -14,7 +14,7 @@ use tokio::sync::mpsc;
 use tracing::debug;
 
 use crate::tools::{
-    AsyncControl, AsyncControls, AsyncOperationStartReceipt, INSPECT_TOOL_NAME,
+    AsyncControl, AsyncControlResult, AsyncControls, AsyncOperationStartReceipt, INSPECT_TOOL_NAME,
     InspectOperationsArgs, SEND_INPUT_TOOL_NAME, STOP_TOOL_NAME, SendOperationInputArgs,
     StopOperationsArgs, Tool, ToolCategory, ToolOrigin, ToolResult, WAIT_TOOL_NAME,
     WaitOperationsArgs, inspect_operations_parameters_schema,
@@ -32,7 +32,9 @@ use super::runner::types::{AsyncOperationTranscriptEvent, TurnEvent};
 use super::runner::{build_instruction_messages, turn_loop};
 use crate::input::{AgentRun, ChatInput};
 use crate::manifest::{AbilityManifest, PromptConfig};
-use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
+use crate::provider::{
+    ErasedProvider, ProviderRuntime, ToolContext, ToolFactory, knowledge_read_scope_granted,
+};
 
 pub const LIST_ASSIGNED_ABILITIES_TOOL_NAME: &str = "list_assigned_abilities";
 pub const USE_ABILITY_TOOL_NAME: &str = "use_ability";
@@ -286,22 +288,18 @@ impl Tool for InspectOperationsTool {
         ToolOrigin::Harness
     }
 
-    async fn is_available_to_model(&self) -> bool {
-        self.async_ops
-            .has_model_visible_control(AsyncControl::Inspect)
-            .await
-    }
-
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: InspectOperationsArgs = serde_json::from_value(args)?;
-        Ok(json_tool(serde_json::json!({
-            "operations": self.async_ops.inspect(
-                parsed.operations,
-                parsed.kind,
-                parsed.include_transcript,
-                parsed.limit,
-            ).await
-        })))
+        Ok(json_tool(serde_json::json!(
+            self.async_ops
+                .inspect(
+                    parsed.operations,
+                    parsed.kind,
+                    parsed.include_transcript,
+                    parsed.limit,
+                )
+                .await
+        )))
     }
 }
 
@@ -327,22 +325,18 @@ impl Tool for StopOperationsTool {
         ToolOrigin::Harness
     }
 
-    async fn is_available_to_model(&self) -> bool {
-        self.async_ops
-            .has_model_visible_control(AsyncControl::Stop)
-            .await
-    }
-
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: StopOperationsArgs = serde_json::from_value(args)?;
-        Ok(json_tool(serde_json::json!({
-            "stopped": self.async_ops.stop(
-                parsed.operations,
-                parsed.kind,
-                parsed.reason,
-                super::runner::turn_loop::current_events_tx(),
-            ).await
-        })))
+        Ok(json_tool(serde_json::json!(
+            self.async_ops
+                .stop(
+                    parsed.operations,
+                    parsed.kind,
+                    parsed.reason,
+                    super::runner::turn_loop::current_events_tx(),
+                )
+                .await
+        )))
     }
 }
 
@@ -368,17 +362,13 @@ impl Tool for SendOperationInputTool {
         ToolOrigin::Harness
     }
 
-    async fn is_available_to_model(&self) -> bool {
-        self.async_ops
-            .has_model_visible_control(AsyncControl::SendInput)
-            .await
-    }
-
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: SendOperationInputArgs = serde_json::from_value(args)?;
-        Ok(json_tool(serde_json::json!({
-            "sent": self.async_ops.send_input(parsed.operations, parsed.message).await
-        })))
+        Ok(json_tool(serde_json::json!(
+            self.async_ops
+                .send_input(parsed.operations, parsed.message)
+                .await
+        )))
     }
 }
 
@@ -404,15 +394,19 @@ impl Tool for WaitOperationsTool {
         ToolOrigin::Harness
     }
 
-    async fn is_available_to_model(&self) -> bool {
-        self.async_ops
-            .has_model_visible_control(AsyncControl::Wait)
-            .await
-    }
-
     async fn execute(&self, args: serde_json::Value) -> Result<ToolResult> {
         let parsed: WaitOperationsArgs = serde_json::from_value(args)?;
         let _reason = parsed.reason;
+        if !self
+            .async_ops
+            .has_open_model_visible_matching(parsed.kind, AsyncControl::Wait)
+            .await
+        {
+            return Ok(json_tool(serde_json::json!(AsyncControlResult::<
+                super::async_ops::AsyncOpWaitResult,
+            >::no_matching_operations(
+            ))));
+        }
         if let Some(turn_input) = super::runner::turn_loop::current_turn_input() {
             let result = tokio::select! {
                 result = self.async_ops.wait(parsed.seconds, AsyncOpWaitFilter::control(AsyncControl::Wait, parsed.kind)) => result,
@@ -422,15 +416,19 @@ impl Tool for WaitOperationsTool {
                     updates: Vec::new(),
                 },
             };
-            return Ok(json_tool(serde_json::json!(result)));
+            return Ok(json_tool(serde_json::json!(
+                AsyncControlResult::from_parts(vec![result], Vec::new(),)
+            )));
         }
+        let result = self
+            .async_ops
+            .wait(
+                parsed.seconds,
+                AsyncOpWaitFilter::control(AsyncControl::Wait, parsed.kind),
+            )
+            .await;
         Ok(json_tool(serde_json::json!(
-            self.async_ops
-                .wait(
-                    parsed.seconds,
-                    AsyncOpWaitFilter::control(AsyncControl::Wait, parsed.kind),
-                )
-                .await
+            AsyncControlResult::from_parts(vec![result], Vec::new(),)
         )))
     }
 }
@@ -1285,7 +1283,7 @@ where
         scoped_agent.media = ability.media.clone();
         scoped_agent.abilities.clear();
         scoped_agent.domains.clear();
-        provider
+        let mut tools = provider
             .tool_factory()
             .create_tools_with_context(
                 &scoped_agent,
@@ -1295,7 +1293,15 @@ where
                     current_session_id: caller.runtime.current_session_id,
                 },
             )
-            .await
+            .await;
+        if knowledge_read_scope_granted(&ability_scopes) {
+            let knowledge_policy = crate::package_resolve::policy_from_agent_metadata(
+                Some(&ability.source_type),
+                Some(&ability.metadata),
+            );
+            tools.extend(provider.create_knowledge_tools_with_policy(knowledge_policy));
+        }
+        tools
     } else {
         Vec::new()
     };
@@ -2454,8 +2460,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn generic_async_controls_are_hidden_until_matching_operation_starts() {
-        assert!(visible_generic_control_names(None).await.is_empty());
+    async fn generic_async_controls_are_fixed_before_during_and_after_operations() {
+        assert_eq!(
+            visible_generic_control_names(None).await,
+            ["inspect", "send_input", "stop", "wait"]
+        );
         let all_controls = AsyncControls::new(AsyncControl::Inspect)
             .with(AsyncControl::SendInput)
             .with(AsyncControl::Stop)
@@ -2478,8 +2487,164 @@ mod tests {
                     .with(AsyncControl::Wait),
             )))
             .await,
-            ["inspect", "stop", "wait"]
+            ["inspect", "send_input", "stop", "wait"]
         );
+    }
+
+    #[tokio::test]
+    async fn serialized_async_control_specs_do_not_change_across_all_operation_lifecycles() {
+        let mut instance = test_instance_with_active_domain();
+        let async_ops = instance.runtime.async_ops.clone();
+        instance.runtime.tools = build_async_operation_tools(async_ops.clone());
+        let baseline = serde_json::to_vec(&instance.visible_local_tool_specs().await).unwrap();
+
+        for (index, kind) in [
+            AsyncOpKind::Ability,
+            AsyncOpKind::Delegation,
+            AsyncOpKind::SubAgent,
+            AsyncOpKind::Shell,
+            AsyncOpKind::Media,
+            AsyncOpKind::TaskExecution,
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let controls = if matches!(
+                kind,
+                AsyncOpKind::Ability | AsyncOpKind::Delegation | AsyncOpKind::SubAgent
+            ) {
+                AsyncControls::new(AsyncControl::Inspect)
+                    .with(AsyncControl::SendInput)
+                    .with(AsyncControl::Stop)
+                    .with(AsyncControl::Wait)
+            } else {
+                AsyncControls::new(AsyncControl::Inspect)
+                    .with(AsyncControl::Stop)
+                    .with(AsyncControl::Wait)
+            };
+            let started = async_ops
+                .start(
+                    StartAsyncOp {
+                        id: AsyncOpId::new(format!("{}-{index}", kind.as_str())),
+                        kind,
+                        label: kind.as_str().into(),
+                        parent_operation_id: None,
+                        parent_tool_name: Some("test".into()),
+                        started_summary: "started".into(),
+                        model_visible: true,
+                        controls,
+                    },
+                    None,
+                )
+                .await;
+            assert_eq!(
+                serde_json::to_vec(&instance.visible_local_tool_specs().await).unwrap(),
+                baseline
+            );
+
+            match index % 3 {
+                0 => {
+                    started
+                        .handle
+                        .complete(
+                            AsyncOpSignal::Completed {
+                                summary: "done".into(),
+                                output: None,
+                            },
+                            None,
+                        )
+                        .await;
+                }
+                1 => {
+                    started
+                        .handle
+                        .complete(
+                            AsyncOpSignal::Failed {
+                                error: "failed".into(),
+                                output: None,
+                            },
+                            None,
+                        )
+                        .await;
+                }
+                _ => {
+                    async_ops
+                        .stop(
+                            vec![format!("{}-{index}", kind.as_str())],
+                            Some(kind),
+                            Some("stopped".into()),
+                            None,
+                        )
+                        .await;
+                }
+            }
+            assert_eq!(
+                serde_json::to_vec(&instance.visible_local_tool_specs().await).unwrap(),
+                baseline
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn child_execution_mode_does_not_register_async_control_surface() {
+        let mut instance = test_instance_with_active_domain();
+        instance.runtime.execution_mode = AgentExecutionMode::Ability;
+        instance.runtime.tools.clear();
+        let runner = super::super::runner::AgentRunner::<ErasedProvider>::new(instance, None, None)
+            .await
+            .unwrap();
+        let names = runner
+            .instance()
+            .local_tool_specs()
+            .into_iter()
+            .map(|tool| tool.name)
+            .collect::<Vec<_>>();
+        assert!(
+            !names.iter().any(|name| {
+                matches!(name.as_str(), "inspect" | "send_input" | "stop" | "wait")
+            })
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_model_control_is_machine_readable() {
+        let async_ops = AsyncOpManager::new();
+        let tools = build_async_operation_tools(async_ops.clone());
+        async_ops
+            .start(
+                StartAsyncOp {
+                    id: AsyncOpId::new("media-1"),
+                    kind: AsyncOpKind::Media,
+                    label: "media".into(),
+                    parent_operation_id: None,
+                    parent_tool_name: Some("generate_image".into()),
+                    started_summary: "started".into(),
+                    model_visible: true,
+                    controls: AsyncControls::new(AsyncControl::Inspect)
+                        .with(AsyncControl::Stop)
+                        .with(AsyncControl::Wait),
+                },
+                None,
+            )
+            .await;
+        let send_input = tools
+            .iter()
+            .find(|tool| tool.name() == SEND_INPUT_TOOL_NAME)
+            .unwrap();
+
+        let result = send_input
+            .execute(serde_json::json!({
+                "operations": ["media-1"],
+                "message": "continue"
+            }))
+            .await
+            .unwrap();
+        let output: serde_json::Value =
+            serde_json::from_str(result.output.as_text().unwrap()).unwrap();
+        assert_eq!(output["status"], "no_matching_operations");
+        assert_eq!(output["results"], serde_json::json!([]));
+        assert_eq!(output["rejected"][0]["operation_id"], "media-1");
+        assert_eq!(output["rejected"][0]["reason"], "unsupported_control");
     }
 
     async fn visible_generic_control_names(

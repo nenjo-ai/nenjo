@@ -285,9 +285,19 @@ impl<P: ProviderRuntime> AgentInstance<P> {
         specs
     }
 
-    /// Get the tool specs currently visible to the model, including native tools.
-    pub(crate) async fn visible_tool_specs(&self) -> Vec<ToolSpec> {
-        let mut specs = self.visible_local_tool_specs().await;
+    /// Resolve the provider-visible local catalog once for one execution.
+    /// Canonical names are sorted and checked before any model request.
+    pub(crate) async fn execution_local_tool_specs(&self) -> anyhow::Result<Vec<ToolSpec>> {
+        let specs = self.visible_local_tool_specs().await;
+        validate_unique_tool_specs(&specs)?;
+        Ok(specs)
+    }
+
+    pub(crate) fn tool_specs_from_execution_snapshot(
+        &self,
+        local_specs: &[ToolSpec],
+    ) -> Vec<ToolSpec> {
+        let mut specs = local_specs.to_vec();
         specs.extend(native_model_tool_specs(&self.model_manifest.native_tools));
         sort_tool_specs(&mut specs);
         specs
@@ -544,6 +554,17 @@ fn sort_tool_specs(specs: &mut [ToolSpec]) {
     specs.sort_by(|left, right| left.name.cmp(&right.name));
 }
 
+fn validate_unique_tool_specs(specs: &[ToolSpec]) -> anyhow::Result<()> {
+    if let Some(duplicate) = specs
+        .windows(2)
+        .find(|pair| pair[0].name == pair[1].name)
+        .map(|pair| pair[0].name.as_str())
+    {
+        anyhow::bail!("duplicate canonical tool name '{duplicate}' in execution snapshot");
+    }
+    Ok(())
+}
+
 fn populate_project_working_directory(project: &mut ProjectContext, workspace_dir: &Path) {
     if !project.slug.is_empty() && project.working_dir.is_empty() {
         project.working_dir = workspace_dir
@@ -608,6 +629,36 @@ mod tests {
             specs
                 .iter()
                 .all(|spec| spec.category == crate::tools::ToolCategory::Read)
+        );
+    }
+
+    #[test]
+    fn execution_tool_snapshot_names_are_sorted_and_unique() {
+        let tool = |name: &str| ToolSpec {
+            name: name.to_string(),
+            description: format!("{name} tool"),
+            parameters: serde_json::json!({"type": "object"}),
+            category: crate::tools::ToolCategory::Read,
+        };
+        let mut specs = vec![tool("wait"), tool("inspect"), tool("send_input")];
+
+        sort_tool_specs(&mut specs);
+        validate_unique_tool_specs(&specs).unwrap();
+        assert_eq!(
+            specs
+                .iter()
+                .map(|spec| spec.name.as_str())
+                .collect::<Vec<_>>(),
+            ["inspect", "send_input", "wait"]
+        );
+
+        specs.push(tool("inspect"));
+        sort_tool_specs(&mut specs);
+        let error = validate_unique_tool_specs(&specs).unwrap_err();
+        assert!(
+            error
+                .to_string()
+                .contains("duplicate canonical tool name 'inspect'")
         );
     }
 

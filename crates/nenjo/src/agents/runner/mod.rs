@@ -32,7 +32,9 @@ use crate::Slug;
 use crate::input::{AgentRun, AgentRunKind, ChatInput, TaskInput};
 use crate::manifest::{AbilityManifest, DomainManifest, Manifest};
 use crate::memory::{self, MemoryScope};
-use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
+use crate::provider::{
+    ErasedProvider, ProviderRuntime, ToolContext, ToolFactory, knowledge_read_scope_granted,
+};
 use crate::types::ActiveDomain;
 use chat::{ChatDelivery, ChatHandle, ProviderResponseDelivery};
 use types::{TurnEvent, TurnOutput};
@@ -333,7 +335,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
         // are added by name.
         if instance.runtime.execution_mode.has_own_capability_surface() {
             let project_slug = active_project_slug(&instance);
-            let domain_tools = provider
+            let mut domain_tools = provider
                 .tool_factory()
                 .create_tools_with_context(
                     &instance.manifest,
@@ -344,6 +346,13 @@ impl<P: ProviderRuntime> AgentRunner<P> {
                     },
                 )
                 .await;
+            if knowledge_read_scope_granted(&instance.manifest.platform_scopes) {
+                let knowledge_policy = crate::package_resolve::policy_from_agent_metadata(
+                    instance.manifest.source_type.as_deref(),
+                    Some(&instance.manifest.metadata),
+                );
+                domain_tools.extend(provider.create_knowledge_tools_with_policy(knowledge_policy));
+            }
             let mut tool_names = instance
                 .runtime
                 .tools

@@ -1021,11 +1021,11 @@ async fn worker_factory_exposes_manifest_tools_without_duplicate_platform_tools(
     assert!(!names.iter().any(|name| name == "list_knowledge_neighbors"));
     assert!(!names.iter().any(|name| name == "list_projects"));
 
-    let library_agent = AgentManifest {
-        platform_scopes: vec!["library:write".into()],
+    let knowledge_agent = AgentManifest {
+        platform_scopes: vec!["knowledge:write".into()],
         ..agent
     };
-    let tools = factory.create_tools(&library_agent).await;
+    let tools = factory.create_tools(&knowledge_agent).await;
     let names: Vec<_> = tools.iter().map(|tool| tool.name().to_string()).collect();
 
     assert!(!names.iter().any(|name| name == "list_knowledge_packs"));

@@ -489,8 +489,117 @@ impl ModelProvider for ReliableProvider {
 mod tests {
     use super::*;
     use crate::traits::{ChatRequest, ChatResponse, ConversationMessage, TokenUsage, one_shot};
-    use crate::{ProviderStreamEvent, ProviderToolTrace};
+    use crate::{
+        AuthStyle, OpenAiCompatibleProvider, ProviderStreamEvent, ProviderToolTrace, ToolSpec,
+    };
     use std::sync::Arc;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn capture_two_retry_bodies() -> (String, tokio::sync::oneshot::Receiver<Vec<Vec<u8>>>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+            .await
+            .expect("bind retry fixture");
+        let address = listener.local_addr().unwrap();
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let mut bodies = Vec::new();
+            for attempt in 0..2 {
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                let header_end = loop {
+                    let mut chunk = [0_u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                    if let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                        break index + 4;
+                    }
+                };
+                let headers = String::from_utf8(request[..header_end].to_vec()).unwrap();
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        let (name, value) = line.split_once(':')?;
+                        name.eq_ignore_ascii_case("content-length")
+                            .then(|| value.trim().parse::<usize>().unwrap())
+                    })
+                    .unwrap();
+                while request.len() - header_end < content_length {
+                    let mut chunk = [0_u8; 4096];
+                    let read = stream.read(&mut chunk).await.unwrap();
+                    assert!(read > 0);
+                    request.extend_from_slice(&chunk[..read]);
+                }
+                bodies.push(request[header_end..header_end + content_length].to_vec());
+                let (status, body) = if attempt == 0 {
+                    ("500 Internal Server Error", r#"{"error":"temporary"}"#)
+                } else {
+                    ("200 OK", r#"{"choices":[{"message":{"content":"ok"}}]}"#)
+                };
+                stream
+                    .write_all(
+                        format!(
+                            "HTTP/1.1 {status}\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{body}",
+                            body.len()
+                        )
+                        .as_bytes(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            tx.send(bodies).unwrap();
+        });
+        (format!("http://{address}/v1"), rx)
+    }
+
+    #[tokio::test]
+    async fn reliable_provider_retries_with_identical_native_message_and_tool_bytes() {
+        let (base_url, captured) = capture_two_retry_bodies().await;
+        let provider = ReliableProvider::new(
+            vec![(
+                "compatible".into(),
+                Box::new(OpenAiCompatibleProvider::new(
+                    "compatible",
+                    &base_url,
+                    Some("key"),
+                    AuthStyle::Bearer,
+                )) as Box<dyn ModelProvider>,
+            )],
+            1,
+            1,
+        );
+        let messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::turn_data(
+                "runtime-context",
+            )),
+            ConversationMessage::user("hello"),
+        ];
+        let tools = vec![ToolSpec {
+            name: "app.example/lookup".into(),
+            description: "Lookup".into(),
+            parameters: serde_json::json!({"type":"object"}),
+            category: Default::default(),
+        }];
+
+        let response = provider
+            .chat(
+                ChatRequest {
+                    messages: &messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "model",
+                0.0,
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.text.as_deref(), Some("ok"));
+        let bodies = captured.await.unwrap();
+        assert_eq!(bodies.len(), 2);
+        assert_eq!(bodies[0], bodies[1]);
+    }
 
     struct MockProvider {
         calls: Arc<AtomicUsize>,

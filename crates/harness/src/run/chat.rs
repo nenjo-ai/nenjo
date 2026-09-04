@@ -1180,7 +1180,7 @@ mod tests {
     fn retry_reuses_all_original_turn_context_bytes() {
         let session_id = Uuid::new_v4();
         let turn_id = Uuid::new_v4();
-        let contexts = vec![
+        let contexts = [
             RuntimeContextMessage::turn_control("original clock and control bytes"),
             RuntimeContextMessage::turn_data("original turn data bytes"),
             RuntimeContextMessage::turn_control("latest clock and control bytes"),

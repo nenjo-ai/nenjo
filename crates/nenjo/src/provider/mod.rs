@@ -46,6 +46,12 @@ use nenjo_knowledge::{
 };
 use tracing::{debug, warn};
 
+pub(crate) fn knowledge_read_scope_granted(scopes: &[String]) -> bool {
+    scopes
+        .iter()
+        .any(|scope| matches!(scope.as_str(), "knowledge:read" | "knowledge:write"))
+}
+
 // ---------------------------------------------------------------------------
 // Provider
 // ---------------------------------------------------------------------------

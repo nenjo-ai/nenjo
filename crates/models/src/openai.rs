@@ -1,6 +1,5 @@
 //! OpenAI provider. Authenticates via Bearer token.
 
-use crate::ToolSpec;
 use crate::audio_data_uri::decode_base64_data_uri;
 use crate::native::{
     MediaCapabilitiesProvider, MediaExecutionMode, MediaInputAsset, MediaOperation,
@@ -8,13 +7,13 @@ use crate::native::{
     ModelMediaCapabilities, NativeMediaRequest, NativeMediaResponse, ProviderMediaCapabilities,
     TranscribeAudioRequest, TranscriptSegment,
 };
-use crate::openai_multimodal::{
-    ChatArtifactDialect, ChatCompletionsContent, artifact_content, chat_artifact_transport,
+use crate::openai_chat::{
+    ChatCompletionsMessage as NativeMessage, ChatCompletionsToolCall as NativeToolCall,
+    InstructionRolePolicy, convert_messages,
 };
-use crate::openai_tools::{ProviderToolSpec, convert_tools};
-use crate::traits::{
-    ChatRequest, ChatResponse, ChatRole, ConversationMessage, ModelProvider, TokenUsage, ToolCall,
-};
+use crate::openai_multimodal::{ChatArtifactDialect, chat_artifact_transport};
+use crate::openai_tools::{ProviderToolSpec, convert_tools_checked};
+use crate::traits::{ChatRequest, ChatResponse, ModelProvider, TokenUsage, ToolCall};
 use anyhow::Context;
 use async_trait::async_trait;
 use reqwest::Client;
@@ -39,32 +38,6 @@ struct NativeChatRequest {
     tools: Option<Vec<ProviderToolSpec>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     tool_choice: Option<String>,
-}
-
-#[derive(Debug, Serialize)]
-struct NativeMessage {
-    role: String,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    content: Option<ChatCompletionsContent>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_call_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    tool_calls: Option<Vec<NativeToolCall>>,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct NativeToolCall {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    id: Option<String>,
-    #[serde(rename = "type", skip_serializing_if = "Option::is_none")]
-    kind: Option<String>,
-    function: NativeFunctionCall,
-}
-
-#[derive(Debug, Serialize, Deserialize)]
-struct NativeFunctionCall {
-    name: String,
-    arguments: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -366,110 +339,32 @@ impl OpenAiProvider {
             || m.starts_with("gpt-4.1")
     }
 
-    fn convert_tools(tools: Option<&[ToolSpec]>) -> Option<Vec<ProviderToolSpec>> {
-        convert_tools(tools, crate::sanitize_tool_name)
-    }
-
     fn convert_messages(
         request: &ChatRequest<'_>,
         supports_developer_role: bool,
     ) -> anyhow::Result<Vec<NativeMessage>> {
-        let mut native = Vec::new();
-        for message in request.messages {
-            match message {
-                ConversationMessage::AssistantToolCalls { text, tool_calls } => {
-                    native.push(NativeMessage {
-                        role: "assistant".to_string(),
-                        content: text.clone().map(ChatCompletionsContent::text),
-                        tool_call_id: None,
-                        tool_calls: Some(
-                            tool_calls
-                                .iter()
-                                .map(|tc| NativeToolCall {
-                                    id: Some(tc.id.clone()),
-                                    kind: Some("function".to_string()),
-                                    function: NativeFunctionCall {
-                                        name: tc.name.clone(),
-                                        arguments: tc.arguments.clone(),
-                                    },
-                                })
-                                .collect(),
-                        ),
-                    });
-                }
-                ConversationMessage::ToolResults(results) => {
-                    for result in results {
-                        native.push(NativeMessage {
-                            role: "tool".to_string(),
-                            content: Some(ChatCompletionsContent::text(
-                                result.output.text_content(),
-                            )),
-                            tool_call_id: Some(result.tool_call_id.clone()),
-                            tool_calls: None,
-                        });
-                    }
-                    let references = results.iter().flat_map(|result| {
-                        result.output.parts().iter().filter_map(|part| match part {
-                            crate::ToolOutputPart::Artifact(reference) => Some((reference, None)),
-                            crate::ToolOutputPart::Text(_) => None,
-                        })
-                    });
-                    let content = artifact_content(
-                        "Inspect the attached artifact.",
-                        references,
-                        request.prepared_artifacts,
-                        ChatArtifactDialect::OpenAi,
-                    )?;
-                    if content.has_media() {
-                        native.push(NativeMessage {
-                            role: "user".to_string(),
-                            content: Some(content),
-                            tool_call_id: None,
-                            tool_calls: None,
-                        });
-                    }
-                }
-                ConversationMessage::Chat(message) => native.push(NativeMessage {
-                    role: if message.role == ChatRole::Developer && !supports_developer_role {
-                        ChatRole::User
-                    } else {
-                        message.role
-                    }
-                    .to_string(),
-                    content: Some(artifact_content(
-                        &message.content,
-                        message.artifacts.iter().map(|input| {
-                            (
-                                input.artifact(),
-                                input.instruction().map(|value| value.as_str()),
-                            )
-                        }),
-                        request.prepared_artifacts,
-                        ChatArtifactDialect::OpenAi,
-                    )?),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }),
-                ConversationMessage::ArtifactAnalysis(analysis) => native.push(NativeMessage {
-                    role: "user".to_string(),
-                    content: Some(ChatCompletionsContent::text(analysis.model_context())),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }),
-                ConversationMessage::RuntimeContext(context) => native.push(NativeMessage {
-                    role: if supports_developer_role {
-                        context.preferred_role()
-                    } else {
-                        context.fallback_role()
-                    }
-                    .to_string(),
-                    content: Some(ChatCompletionsContent::text(context.content())),
-                    tool_call_id: None,
-                    tool_calls: None,
-                }),
-            }
-        }
-        Ok(native)
+        convert_messages(
+            request,
+            ChatArtifactDialect::OpenAi,
+            InstructionRolePolicy::from_supports_developer_role(supports_developer_role),
+        )
+    }
+
+    fn build_chat_request(
+        request: &ChatRequest<'_>,
+        model: &str,
+        temperature: f64,
+    ) -> anyhow::Result<NativeChatRequest> {
+        let is_reasoning = Self::is_reasoning_model(model);
+        let tools = convert_tools_checked(request.tools, crate::sanitize_tool_name)?;
+        Ok(NativeChatRequest {
+            model: model.to_string(),
+            messages: Self::convert_messages(request, Self::is_developer_role_model(model))?,
+            temperature: (!is_reasoning).then_some(temperature),
+            max_completion_tokens: Some(if is_reasoning { 65536 } else { 16384 }),
+            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
+            tools,
+        })
     }
 
     fn parse_native_response(
@@ -655,21 +550,7 @@ impl ModelProvider for OpenAiProvider {
             anyhow::anyhow!("OpenAI API key not set. Set OPENAI_API_KEY or edit config.toml.")
         })?;
 
-        let is_reasoning = Self::is_reasoning_model(model);
-        let tools = Self::convert_tools(request.tools);
-        let native_request = NativeChatRequest {
-            model: model.to_string(),
-            messages: Self::convert_messages(&request, Self::is_developer_role_model(model))?,
-            // Reasoning models (o1/o3/o4) require temperature=1; omit it to use the default.
-            temperature: if is_reasoning {
-                None
-            } else {
-                Some(temperature)
-            },
-            max_completion_tokens: Some(if is_reasoning { 65536 } else { 16384 }),
-            tool_choice: tools.as_ref().map(|_| "auto".to_string()),
-            tools,
-        };
+        let native_request = Self::build_chat_request(&request, model, temperature)?;
 
         let response = self
             .client
@@ -826,6 +707,65 @@ impl MediaCapabilitiesProvider for OpenAiProvider {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::{assert_serialized_equal, assert_serialized_prefix};
+    use crate::{ConversationMessage, ToolSpec};
+
+    fn cache_test_tool() -> ToolSpec {
+        ToolSpec {
+            name: "app.example/lookup".into(),
+            description: "Lookup a value".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": {"query": {"type": "string"}},
+                "required": ["query"]
+            }),
+            category: Default::default(),
+        }
+    }
+
+    #[test]
+    fn openai_native_prefix_and_tools_are_byte_stable_for_both_role_policies() {
+        let tools = vec![cache_test_tool()];
+        let first_messages = vec![
+            ConversationMessage::system("system"),
+            ConversationMessage::developer("developer"),
+            ConversationMessage::runtime_context(crate::RuntimeContextMessage::session_data(
+                "<session>exact</session>",
+            )),
+            ConversationMessage::user("first"),
+        ];
+        let mut later_messages = first_messages.clone();
+        later_messages.push(ConversationMessage::assistant("answer"));
+        later_messages.push(ConversationMessage::user("second"));
+
+        for model in ["gpt-5.1", "gpt-4o"] {
+            let first = OpenAiProvider::build_chat_request(
+                &ChatRequest {
+                    messages: &first_messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                model,
+                0.2,
+            )
+            .unwrap();
+            let later = OpenAiProvider::build_chat_request(
+                &ChatRequest {
+                    messages: &later_messages,
+                    tools: Some(&tools),
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                model,
+                0.2,
+            )
+            .unwrap();
+
+            assert_serialized_prefix(&first.messages, &later.messages);
+            assert_serialized_equal(&first.tools, &later.tools);
+        }
+    }
 
     #[test]
     fn creates_with_key() {
@@ -863,7 +803,11 @@ mod tests {
 
         let fallback = OpenAiProvider::convert_messages(&request, false).unwrap();
         assert_eq!(fallback[0].role, "user");
-        assert_eq!(fallback[1].role, "user");
+        assert_eq!(fallback.len(), 1);
+        assert_eq!(
+            serde_json::to_value(fallback[0].content.as_ref().unwrap()).unwrap(),
+            serde_json::json!("clock\n\nmemory")
+        );
     }
 
     #[test]

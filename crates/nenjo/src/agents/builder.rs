@@ -16,7 +16,9 @@ use crate::context::{ProjectContext, RoutineContext, RoutineStepContext};
 use crate::hooks::HookRuntime;
 use crate::manifest::{AgentManifest, ModelManifest, ProjectManifest};
 use crate::memory::types::MemoryScope;
-use crate::provider::{ErasedProvider, ProviderRuntime, ToolContext, ToolFactory};
+use crate::provider::{
+    ErasedProvider, ProviderRuntime, ToolContext, ToolFactory, knowledge_read_scope_granted,
+};
 use crate::tools::{Tool, ToolAutonomy, ToolSecurity};
 use uuid::Uuid;
 
@@ -331,11 +333,14 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
                     },
                 )
                 .await;
-            let knowledge_policy = crate::package_resolve::policy_from_agent_metadata(
-                agent.source_type.as_deref(),
-                Some(&agent.metadata),
-            );
-            provider_tools.extend(provider.create_knowledge_tools_with_policy(knowledge_policy));
+            if knowledge_read_scope_granted(&agent.platform_scopes) {
+                let knowledge_policy = crate::package_resolve::policy_from_agent_metadata(
+                    agent.source_type.as_deref(),
+                    Some(&agent.metadata),
+                );
+                provider_tools
+                    .extend(provider.create_knowledge_tools_with_policy(knowledge_policy));
+            }
             provider_tools.extend(self.tools);
             self.tools = provider_tools;
         }

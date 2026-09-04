@@ -117,10 +117,14 @@ mod tests {
         assert!(policy.has_scope(PlatformScope::write(ScopeResource::Projects)));
         assert!(!policy.has_scope(PlatformScope::read(ScopeResource::Agents)));
 
-        let policy = ManifestAccessPolicy::new(vec!["library:write".into()]);
-        assert!(policy.has_scope(PlatformScope::read(ScopeResource::Library)));
-        assert!(policy.has_scope(PlatformScope::write(ScopeResource::Library)));
+        let policy = ManifestAccessPolicy::new(vec!["knowledge:write".into()]);
+        assert!(policy.has_scope(PlatformScope::read(ScopeResource::Knowledge)));
+        assert!(policy.has_scope(PlatformScope::write(ScopeResource::Knowledge)));
         assert!(!policy.has_scope(PlatformScope::read(ScopeResource::Projects)));
+
+        let policy = ManifestAccessPolicy::new(vec!["knowledge:read".into()]);
+        assert!(policy.has_scope(PlatformScope::read(ScopeResource::Knowledge)));
+        assert!(!policy.has_scope(PlatformScope::write(ScopeResource::Knowledge)));
 
         let policy = ManifestAccessPolicy::new(vec!["notify:write".into()]);
         assert!(policy.has_scope(PlatformScope::read(ScopeResource::Notify)));

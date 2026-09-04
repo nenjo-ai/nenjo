@@ -15,7 +15,8 @@ use tokio::task::{AbortHandle, JoinError, JoinHandle};
 use tokio_util::sync::CancellationToken;
 
 use crate::tools::{
-    AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind, ToolResult,
+    AsyncControl, AsyncControlRejection, AsyncControlRejectionReason, AsyncControlResult,
+    AsyncControls, AsyncOperationKind, AsyncOperationSignalKind, ToolResult,
 };
 pub(crate) use crate::tools::{
     AsyncOperationKind as AsyncOpKind, AsyncOperationStatus as AsyncOpStatus,
@@ -257,7 +258,7 @@ impl AsyncOpWaitFilter {
         Self {
             kind,
             control: Some(control),
-            model_visible_only: false,
+            model_visible_only: true,
         }
     }
 
@@ -294,6 +295,11 @@ pub(crate) struct AsyncOpDeliveryResult {
 pub(crate) struct AsyncOpStopped {
     pub(crate) operation_id: String,
     pub(crate) status: &'static str,
+}
+
+struct ModelOperationSelection {
+    operations: Vec<Arc<AsyncOperation>>,
+    rejected: Vec<AsyncControlRejection>,
 }
 
 #[derive(Clone)]
@@ -686,12 +692,12 @@ impl AsyncOpManager {
         &self,
         operation_ids: Vec<String>,
         message: String,
-    ) -> Vec<AsyncOpDeliveryResult> {
-        let operations = self
-            .select_operations(operation_ids, None, Some(AsyncControl::SendInput))
+    ) -> AsyncControlResult<AsyncOpDeliveryResult> {
+        let selection = self
+            .select_model_operations(operation_ids, None, AsyncControl::SendInput)
             .await;
-        let mut results = Vec::with_capacity(operations.len());
-        for operation in operations {
+        let mut results = Vec::with_capacity(selection.operations.len());
+        for operation in selection.operations {
             let mut lifecycle = operation.lifecycle.lock().await;
             let status = lifecycle.status();
             if !lifecycle.is_active() {
@@ -724,7 +730,7 @@ impl AsyncOpManager {
             };
             results.push(result);
         }
-        results
+        AsyncControlResult::from_parts(results, selection.rejected)
     }
 
     pub(crate) async fn stop(
@@ -733,17 +739,53 @@ impl AsyncOpManager {
         kind: Option<AsyncOpKind>,
         reason: Option<String>,
         events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) -> AsyncControlResult<AsyncOpStopped> {
+        let selection = self
+            .select_model_operations(operation_ids, kind, AsyncControl::Stop)
+            .await;
+        let stopped = self
+            .stop_operations(selection.operations, reason, events_tx)
+            .await;
+        AsyncControlResult::from_parts(stopped, selection.rejected)
+    }
+
+    /// Runtime cancellation bypasses model visibility and per-operation tool
+    /// applicability, but retains the same lifecycle transition behavior.
+    pub(crate) async fn stop_all_internal(
+        &self,
+        reason: Option<String>,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
     ) -> Vec<AsyncOpStopped> {
         let operations = self
-            .select_operations(operation_ids, kind, Some(AsyncControl::Stop))
-            .await;
+            .inner
+            .operations
+            .lock()
+            .await
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        self.stop_operations(operations, reason, events_tx).await
+    }
+
+    async fn stop_operations(
+        &self,
+        operations: Vec<Arc<AsyncOperation>>,
+        reason: Option<String>,
+        events_tx: Option<mpsc::UnboundedSender<TurnEvent>>,
+    ) -> Vec<AsyncOpStopped> {
         let mut stopped = Vec::with_capacity(operations.len());
         for operation in operations {
             let abort = {
                 let mut lifecycle = operation.lifecycle.lock().await;
                 match lifecycle.transition_terminal(AsyncOpStatus::Stopped) {
                     TerminalTransition::Applied(abort) => abort,
-                    TerminalTransition::AlreadyTerminal => continue,
+                    TerminalTransition::AlreadyTerminal => {
+                        stopped.push(AsyncOpStopped {
+                            operation_id: operation.id.to_string(),
+                            status: lifecycle.status().as_str(),
+                        });
+                        continue;
+                    }
                 }
             };
             operation.cancel.cancel();
@@ -778,13 +820,13 @@ impl AsyncOpManager {
         kind: Option<AsyncOpKind>,
         include_transcript: bool,
         limit: usize,
-    ) -> Vec<AsyncOpInspection> {
+    ) -> AsyncControlResult<AsyncOpInspection> {
         let limit = limit.clamp(1, INSPECT_LIMIT_CAP);
-        let operations = self
-            .select_operations(operation_ids, kind, Some(AsyncControl::Inspect))
+        let selection = self
+            .select_model_operations(operation_ids, kind, AsyncControl::Inspect)
             .await;
-        let mut inspected = Vec::with_capacity(operations.len());
-        for operation in operations {
+        let mut inspected = Vec::with_capacity(selection.operations.len());
+        for operation in selection.operations {
             let status = operation.lifecycle.lock().await.status();
             let latest_signal = operation
                 .signals
@@ -822,7 +864,7 @@ impl AsyncOpManager {
                 transcript_delta,
             });
         }
-        inspected
+        AsyncControlResult::from_parts(inspected, selection.rejected)
     }
 
     pub(crate) async fn wait(&self, seconds: u64, filter: AsyncOpWaitFilter) -> AsyncOpWaitResult {
@@ -833,7 +875,7 @@ impl AsyncOpManager {
         let updates = loop {
             let updates = self.drain_signals(filter.clone()).await;
             if !updates.is_empty()
-                || (filter.model_visible_only && !self.has_open_model_visible().await)
+                || (filter.model_visible_only && !self.has_open_matching(&filter).await)
             {
                 break updates;
             }
@@ -874,13 +916,37 @@ impl AsyncOpManager {
         false
     }
 
-    pub(crate) async fn has_model_visible_control(&self, control: AsyncControl) -> bool {
-        self.inner
-            .operations
-            .lock()
-            .await
-            .values()
-            .any(|operation| operation.model_visible && operation.controls.contains(control))
+    pub(crate) async fn has_open_model_visible_matching(
+        &self,
+        kind: Option<AsyncOpKind>,
+        control: AsyncControl,
+    ) -> bool {
+        self.has_open_matching(&AsyncOpWaitFilter {
+            kind,
+            control: Some(control),
+            model_visible_only: true,
+        })
+        .await
+    }
+
+    async fn has_open_matching(&self, filter: &AsyncOpWaitFilter) -> bool {
+        let operations = self.inner.operations.lock().await;
+        for operation in operations.values() {
+            if filter.model_visible_only && !operation.model_visible {
+                continue;
+            }
+            if filter.kind.is_some_and(|kind| operation.kind != kind)
+                || filter
+                    .control
+                    .is_some_and(|control| !operation.controls.contains(control))
+            {
+                continue;
+            }
+            if operation.lifecycle.lock().await.is_active() {
+                return true;
+            }
+        }
+        false
     }
 
     pub(crate) async fn drain_signals(
@@ -888,7 +954,7 @@ impl AsyncOpManager {
         filter: AsyncOpWaitFilter,
     ) -> Vec<AsyncOpSignalDigest> {
         let operations = self
-            .select_operations(Vec::new(), filter.kind, filter.control)
+            .select_operations_internal(Vec::new(), filter.kind, filter.control)
             .await;
         let mut updates = Vec::new();
         for operation in operations {
@@ -935,7 +1001,7 @@ impl AsyncOpManager {
             })
     }
 
-    async fn select_operations(
+    async fn select_operations_internal(
         &self,
         operation_ids: Vec<String>,
         kind: Option<AsyncOpKind>,
@@ -943,12 +1009,14 @@ impl AsyncOpManager {
     ) -> Vec<Arc<AsyncOperation>> {
         let operations = self.inner.operations.lock().await;
         if operation_ids.is_empty() {
-            return operations
+            let mut selected = operations
                 .values()
                 .filter(|operation| kind.is_none_or(|k| operation.kind == k))
                 .filter(|operation| control.is_none_or(|c| operation.controls.contains(c)))
                 .cloned()
-                .collect();
+                .collect::<Vec<_>>();
+            selected.sort_unstable_by_key(|operation| operation.sequence);
+            return selected;
         }
         operation_ids
             .into_iter()
@@ -956,6 +1024,62 @@ impl AsyncOpManager {
             .filter(|operation| kind.is_none_or(|k| operation.kind == k))
             .filter(|operation| control.is_none_or(|c| operation.controls.contains(c)))
             .collect()
+    }
+
+    async fn select_model_operations(
+        &self,
+        operation_ids: Vec<String>,
+        kind: Option<AsyncOpKind>,
+        control: AsyncControl,
+    ) -> ModelOperationSelection {
+        let operations = self.inner.operations.lock().await;
+        if operation_ids.is_empty() {
+            let mut selected = operations
+                .values()
+                .filter(|operation| operation.model_visible)
+                .filter(|operation| kind.is_none_or(|expected| operation.kind == expected))
+                .filter(|operation| operation.controls.contains(control))
+                .cloned()
+                .collect::<Vec<_>>();
+            selected.sort_unstable_by_key(|operation| operation.sequence);
+            return ModelOperationSelection {
+                operations: selected,
+                rejected: Vec::new(),
+            };
+        }
+
+        let mut selected = Vec::with_capacity(operation_ids.len());
+        let mut rejected = Vec::new();
+        for operation_id in operation_ids {
+            let Some(operation) = operations.get(&AsyncOpId::new(operation_id.clone())) else {
+                rejected.push(AsyncControlRejection {
+                    operation_id,
+                    reason: AsyncControlRejectionReason::NotFound,
+                });
+                continue;
+            };
+            let reason = if !operation.model_visible {
+                Some(AsyncControlRejectionReason::NotModelVisible)
+            } else if kind.is_some_and(|expected| operation.kind != expected) {
+                Some(AsyncControlRejectionReason::KindMismatch)
+            } else if !operation.controls.contains(control) {
+                Some(AsyncControlRejectionReason::UnsupportedControl)
+            } else {
+                None
+            };
+            if let Some(reason) = reason {
+                rejected.push(AsyncControlRejection {
+                    operation_id,
+                    reason,
+                });
+            } else {
+                selected.push(operation.clone());
+            }
+        }
+        ModelOperationSelection {
+            operations: selected,
+            rejected,
+        }
     }
 
     async fn prune_terminal_operations(&self) {
@@ -2076,5 +2200,110 @@ mod tests {
                 .len(),
             1
         );
+    }
+
+    #[tokio::test]
+    async fn model_control_selection_reports_typed_rejections_in_request_order() {
+        let manager = AsyncOpManager::new();
+        let mut media = shell_request("media-1");
+        media.kind = AsyncOpKind::Media;
+        media.controls = AsyncControls::new(AsyncControl::Inspect)
+            .with(AsyncControl::Stop)
+            .with(AsyncControl::Wait);
+        manager.start(media, None).await;
+
+        let mut hidden = shell_request("hidden-1");
+        hidden.model_visible = false;
+        manager.start(hidden, None).await;
+
+        let unsupported = manager
+            .send_input(vec!["media-1".into()], "hello".into())
+            .await;
+        assert_eq!(
+            unsupported.status,
+            crate::tools::AsyncControlResultStatus::NoMatchingOperations
+        );
+        assert_eq!(unsupported.rejected[0].operation_id, "media-1");
+        assert_eq!(
+            unsupported.rejected[0].reason,
+            AsyncControlRejectionReason::UnsupportedControl
+        );
+
+        let inspected = manager
+            .inspect(
+                vec!["media-1".into(), "missing".into(), "hidden-1".into()],
+                None,
+                false,
+                10,
+            )
+            .await;
+        assert_eq!(
+            inspected.status,
+            crate::tools::AsyncControlResultStatus::Partial
+        );
+        assert_eq!(inspected.results[0].operation_id, "media-1");
+        assert_eq!(inspected.rejected[0].operation_id, "missing");
+        assert_eq!(
+            inspected.rejected[0].reason,
+            AsyncControlRejectionReason::NotFound
+        );
+        assert_eq!(inspected.rejected[1].operation_id, "hidden-1");
+        assert_eq!(
+            inspected.rejected[1].reason,
+            AsyncControlRejectionReason::NotModelVisible
+        );
+
+        let wrong_kind = manager
+            .inspect(vec!["media-1".into()], Some(AsyncOpKind::Shell), false, 10)
+            .await;
+        assert_eq!(
+            wrong_kind.rejected[0].reason,
+            AsyncControlRejectionReason::KindMismatch
+        );
+
+        let no_match = manager
+            .inspect(Vec::new(), Some(AsyncOpKind::Ability), false, 10)
+            .await;
+        assert_eq!(
+            no_match.status,
+            crate::tools::AsyncControlResultStatus::NoMatchingOperations
+        );
+        assert!(no_match.rejected.is_empty());
+    }
+
+    #[tokio::test]
+    async fn internal_cancellation_stops_non_model_visible_operations_without_controls() {
+        let manager = AsyncOpManager::new();
+        let mut hidden = shell_request("hidden-1");
+        hidden.model_visible = false;
+        hidden.controls = AsyncControls::default();
+        let started = manager.start(hidden, None).await;
+
+        let stopped = manager
+            .stop_all_internal(Some("execution cancelled".into()), None)
+            .await;
+
+        assert_eq!(stopped.len(), 1);
+        assert_eq!(stopped[0].operation_id, "hidden-1");
+        assert_eq!(
+            started.handle.operation.lifecycle.lock().await.status(),
+            AsyncOpStatus::Stopped
+        );
+    }
+
+    #[tokio::test]
+    async fn wait_returns_immediately_when_no_open_operation_matches_kind_and_control() {
+        let manager = AsyncOpManager::new();
+        manager.start(shell_request("shell-1"), None).await;
+
+        let result = manager
+            .wait(
+                30,
+                AsyncOpWaitFilter::control(AsyncControl::Wait, Some(AsyncOpKind::Media)),
+            )
+            .await;
+
+        assert_eq!(result.elapsed_seconds, 0);
+        assert!(result.updates.is_empty());
     }
 }

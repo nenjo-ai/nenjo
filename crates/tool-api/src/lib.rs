@@ -69,7 +69,8 @@ use std::path::PathBuf;
 pub mod async_ops;
 
 pub use async_ops::{
-    AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind,
+    AsyncControl, AsyncControlRejection, AsyncControlRejectionReason, AsyncControlResult,
+    AsyncControlResultStatus, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind,
     AsyncOperationStartReceipt, AsyncOperationStatus, INSPECT_TOOL_NAME, InspectOperationsArgs,
     SEND_INPUT_TOOL_NAME, STOP_TOOL_NAME, SendOperationInputArgs, StopOperationsArgs,
     WAIT_TOOL_NAME, WaitOperationsArgs, deserialize_u64_from_json_number,

@@ -456,8 +456,10 @@ async fn task_prompt_does_not_append_routine_handoffs_twice() {
 
 #[tokio::test]
 async fn provider_registers_multiple_knowledge_packs() {
+    let mut manifest = test_manifest();
+    manifest.agents[0].platform_scopes = vec!["knowledge:read".into()];
     let provider = Provider::builder()
-        .with_manifest(test_manifest())
+        .with_manifest(manifest)
         .with_model_factory(MockFactory)
         .with_tool_factory(NoopToolFactory)
         .with_knowledge_packs([
@@ -511,6 +513,66 @@ async fn provider_registers_multiple_knowledge_packs() {
 
     assert!(tool_names.iter().any(|name| name == "search_knowledge"));
     assert!(tool_names.iter().any(|name| name == "read_knowledge_doc"));
+}
+
+#[tokio::test]
+async fn provider_requires_knowledge_scope_for_retrieval_tools() {
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(MockFactory)
+        .with_tool_factory(NoopToolFactory)
+        .with_knowledge_packs([KnowledgePackEntry::local(
+            "private",
+            TestKnowledgePack::new(
+                "private",
+                "local://private/",
+                "private_doc",
+                "local://private/private.md",
+            ),
+        )
+        .unwrap()])
+        .build()
+        .await
+        .unwrap();
+
+    let runner = provider
+        .agent("agent")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let tool_names = runner
+        .instance()
+        .tool_specs()
+        .into_iter()
+        .map(|tool| tool.name)
+        .collect::<Vec<_>>();
+
+    for denied in [
+        "list_knowledge_packs",
+        "search_knowledge",
+        "list_knowledge_neighbors",
+        "read_knowledge_doc",
+    ] {
+        assert!(!tool_names.iter().any(|name| name == denied));
+    }
+}
+
+#[test]
+fn knowledge_read_scope_gate_accepts_read_and_write_only() {
+    assert!(super::knowledge_read_scope_granted(&[
+        "knowledge:read".to_string()
+    ]));
+    assert!(super::knowledge_read_scope_granted(&[
+        "knowledge:write".to_string()
+    ]));
+    assert!(!super::knowledge_read_scope_granted(&[
+        "library:write".to_string()
+    ]));
+    assert!(!super::knowledge_read_scope_granted(&[
+        "projects:read".to_string()
+    ]));
 }
 
 #[tokio::test]

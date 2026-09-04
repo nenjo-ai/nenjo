@@ -6,6 +6,7 @@
 
 use crate::ToolSpec;
 use serde::Serialize;
+use std::collections::HashMap;
 
 #[derive(Debug, Serialize)]
 pub(crate) struct ProviderToolSpec {
@@ -38,6 +39,37 @@ pub(crate) fn convert_tools(
             })
             .collect()
     })
+}
+
+/// Convert tools while rejecting names that become ambiguous in the provider
+/// dialect. Input order is preserved exactly.
+pub(crate) fn convert_tools_checked(
+    tools: Option<&[ToolSpec]>,
+    sanitize_name: impl Fn(&str) -> String,
+) -> anyhow::Result<Option<Vec<ProviderToolSpec>>> {
+    let Some(tools) = tools else {
+        return Ok(None);
+    };
+    let mut canonical_by_wire_name = HashMap::with_capacity(tools.len());
+    let mut converted = Vec::with_capacity(tools.len());
+    for tool in tools {
+        let wire_name = sanitize_name(&tool.name);
+        if let Some(existing) = canonical_by_wire_name.insert(wire_name.clone(), &tool.name) {
+            anyhow::bail!(
+                "tool names '{existing}' and '{}' both serialize as '{wire_name}'",
+                tool.name
+            );
+        }
+        converted.push(ProviderToolSpec {
+            kind: "function".to_string(),
+            function: NativeToolFunctionSpec {
+                name: wire_name,
+                description: tool.description.clone(),
+                parameters: tool.parameters.clone(),
+            },
+        });
+    }
+    Ok(Some(converted))
 }
 
 #[cfg(test)]

@@ -1165,6 +1165,7 @@ where
 mod tests {
     use std::collections::VecDeque;
     use std::path::{Path, PathBuf};
+    use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::{Arc, Mutex};
 
     use async_trait::async_trait;
@@ -1178,8 +1179,8 @@ mod tests {
     };
     use nenjo_events::{Response, StreamEvent};
     use nenjo_models::{
-        ChatRequest as ModelChatRequest, ChatResponse, ConversationMessage,
-        RuntimeContextAuthority, RuntimeContextScope, TokenUsage, ToolCall,
+        ChatRequest as ModelChatRequest, ChatResponse, ConversationMessage, NativeModelToolId,
+        RuntimeContextAuthority, RuntimeContextScope, TokenUsage, ToolCall, ToolSpec,
     };
     use serde_json::Value;
     use uuid::Uuid;
@@ -1191,7 +1192,22 @@ mod tests {
 
     use super::*;
 
-    type ModelRequests = Arc<Mutex<Vec<Vec<ConversationMessage>>>>;
+    #[derive(Debug, Clone)]
+    struct ModelRequestSnapshot {
+        messages: Vec<ConversationMessage>,
+        local_tools: Vec<ToolSpec>,
+        native_tools: Vec<NativeModelToolId>,
+    }
+
+    impl std::ops::Deref for ModelRequestSnapshot {
+        type Target = [ConversationMessage];
+
+        fn deref(&self) -> &Self::Target {
+            &self.messages
+        }
+    }
+
+    type ModelRequests = Arc<Mutex<Vec<ModelRequestSnapshot>>>;
     type ScriptedResponses = Arc<Mutex<VecDeque<ChatResponse>>>;
 
     fn message_contains(message: &ConversationMessage, needle: &str) -> bool {
@@ -1224,10 +1240,11 @@ mod tests {
             _model: &str,
             _temperature: f64,
         ) -> anyhow::Result<ChatResponse> {
-            self.requests
-                .lock()
-                .unwrap()
-                .push(request.messages.to_vec());
+            self.requests.lock().unwrap().push(ModelRequestSnapshot {
+                messages: request.messages.to_vec(),
+                local_tools: request.tools.unwrap_or_default().to_vec(),
+                native_tools: request.native_tools.unwrap_or_default().to_vec(),
+            });
             self.responses
                 .lock()
                 .unwrap()
@@ -1258,6 +1275,52 @@ mod tests {
     impl ToolFactory for WorkspaceToolFactory {
         async fn create_tools(&self, _agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
             Vec::new()
+        }
+
+        fn workspace_dir(&self) -> PathBuf {
+            self.workspace_dir.clone()
+        }
+    }
+
+    struct VisibilityCountingTool {
+        probes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl Tool for VisibilityCountingTool {
+        fn name(&self) -> &str {
+            "visibility_probe"
+        }
+
+        fn description(&self) -> &str {
+            "Test-only visibility probe"
+        }
+
+        fn parameters_schema(&self) -> Value {
+            serde_json::json!({"type":"object"})
+        }
+
+        async fn is_available_to_model(&self) -> bool {
+            self.probes.fetch_add(1, Ordering::SeqCst);
+            true
+        }
+
+        async fn execute(&self, _args: Value) -> anyhow::Result<nenjo::ToolResult> {
+            Ok(nenjo::ToolResult::success("ok"))
+        }
+    }
+
+    struct VisibilityCountingToolFactory {
+        workspace_dir: PathBuf,
+        probes: Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ToolFactory for VisibilityCountingToolFactory {
+        async fn create_tools(&self, _agent: &AgentManifest) -> Vec<Arc<dyn Tool>> {
+            vec![Arc::new(VisibilityCountingTool {
+                probes: self.probes.clone(),
+            })]
         }
 
         fn workspace_dir(&self) -> PathBuf {
@@ -1583,17 +1646,24 @@ mod tests {
         let skill = ralph_loop_skill_manifest(temp.path(), temp.path(), Vec::new());
         let manifest = skill_test_manifest_with_hooks(skill, Vec::new());
         let (model_requests, model_responses) = scripted_model(vec![
+            tool_call_response(ToolCall {
+                id: "inspect-1".into(),
+                name: "inspect".into(),
+                arguments: "{}".into(),
+            }),
             text_response("first done"),
             text_response("second done"),
         ]);
+        let visibility_probes = Arc::new(AtomicUsize::new(0));
         let provider = Provider::builder()
             .with_manifest(manifest)
             .with_model_factory(ScriptedModelFactory {
                 requests: model_requests.clone(),
                 responses: model_responses,
             })
-            .with_tool_factory(WorkspaceToolFactory {
+            .with_tool_factory(VisibilityCountingToolFactory {
                 workspace_dir: workspace_dir.clone(),
+                probes: visibility_probes.clone(),
             })
             .build()
             .await
@@ -1664,7 +1734,7 @@ mod tests {
             .unwrap();
 
         let requests = model_requests.lock().unwrap();
-        assert_eq!(requests.len(), 2);
+        assert_eq!(requests.len(), 3);
         let messages = &requests[0];
         assert_eq!(messages.len(), 6);
         assert!(messages[0].is_role(nenjo_models::ChatRole::System));
@@ -1706,8 +1776,27 @@ mod tests {
         ));
         assert_eq!(
             requests[1].get(..messages.len()),
-            Some(messages.as_slice()),
-            "the second turn must retain the first request as a byte-stable cache prefix",
+            Some(messages.messages.as_slice()),
+            "the second model turn must retain the internal transcript prefix",
+        );
+        assert_eq!(
+            serde_json::to_vec(&requests[0].local_tools).unwrap(),
+            serde_json::to_vec(&requests[1].local_tools).unwrap(),
+            "the runner must reuse identical local tool specs within one execution",
+        );
+        assert_eq!(requests[0].native_tools, requests[1].native_tools);
+        let tool_names = requests[0]
+            .local_tools
+            .iter()
+            .map(|tool| tool.name.as_str())
+            .collect::<Vec<_>>();
+        for control in ["inspect", "send_input", "stop", "wait"] {
+            assert!(tool_names.contains(&control));
+        }
+        assert_eq!(
+            visibility_probes.load(Ordering::SeqCst),
+            2,
+            "visibility must be evaluated once per execution, not once per model turn",
         );
     }
 

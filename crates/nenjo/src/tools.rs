@@ -1,7 +1,8 @@
 //! Tool trait and security types re-exported from `nenjo-tool-api`.
 
 pub use nenjo_tool_api::{
-    AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind,
+    AsyncControl, AsyncControlRejection, AsyncControlRejectionReason, AsyncControlResult,
+    AsyncControlResultStatus, AsyncControls, AsyncOperationKind, AsyncOperationSignalKind,
     AsyncOperationStartReceipt, AsyncOperationStatus, INSPECT_TOOL_NAME, InspectOperationsArgs,
     SEND_INPUT_TOOL_NAME, STOP_TOOL_NAME, SendOperationInputArgs, StopOperationsArgs, Tool,
     ToolAutonomy, ToolCall, ToolCategory, ToolOrigin, ToolResult, ToolResultMessage, ToolSecurity,
