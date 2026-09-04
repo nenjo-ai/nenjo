@@ -156,6 +156,45 @@ fn decoded_routine_step_instructions(payload: serde_json::Value) -> Option<Strin
         .or_else(|| payload.as_str().map(str::to_string))
 }
 
+fn merge_retained_routine_step_instructions(
+    document: &mut RoutineDocument,
+    retained: Option<&RoutineManifest>,
+) {
+    let Some(retained) = retained else {
+        return;
+    };
+    let retained = retained
+        .steps
+        .iter()
+        .filter_map(|step| {
+            step.config
+                .get("instructions")
+                .and_then(serde_json::Value::as_str)
+                .map(|instructions| (&step.slug, instructions))
+        })
+        .collect::<HashMap<_, _>>();
+
+    for step in &mut document.steps {
+        if step
+            .config
+            .get("instructions")
+            .and_then(serde_json::Value::as_str)
+            .is_some()
+        {
+            continue;
+        }
+        let Some(instructions) = retained.get(&step.slug) else {
+            continue;
+        };
+        if let Some(config) = step.config.as_object_mut() {
+            config.insert(
+                "instructions".to_string(),
+                serde_json::Value::String((*instructions).to_string()),
+            );
+        }
+    }
+}
+
 fn command_matches_ref(command: &CommandManifest, command_ref: &str) -> bool {
     command.manifest_slug().as_str() == command_ref
         || command.command == command_ref
@@ -466,6 +505,73 @@ where
                 .context("failed to decode encrypted context block template payload")?,
         );
         record.encrypted_payload = None;
+        Ok(record)
+    }
+
+    async fn decode_routine_step_instruction_records(
+        &self,
+        mut record: RoutineRecord,
+    ) -> Result<RoutineRecord> {
+        let expected_object_type =
+            SensitiveContentKind::RoutineStepInstructions.encrypted_object_type();
+        for step in &mut record.steps {
+            let Some(payload) = step.encrypted_payload.as_ref() else {
+                continue;
+            };
+            let object_type = payload
+                .get("object_type")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default();
+            if object_type != expected_object_type {
+                bail!(
+                    "routine step {} carried encrypted payload type {}; expected {expected_object_type}",
+                    step.slug,
+                    object_type,
+                );
+            }
+            let object_id = payload
+                .get("object_id")
+                .and_then(serde_json::Value::as_str)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "routine step {} encrypted payload is missing object_id",
+                        step.slug
+                    )
+                })?;
+            let object_id = Uuid::parse_str(object_id).with_context(|| {
+                format!(
+                    "routine step {} encrypted payload has an invalid object_id",
+                    step.slug
+                )
+            })?;
+            if object_id != step.id {
+                bail!(
+                    "routine step {} encrypted payload object id did not match its step id",
+                    step.slug,
+                );
+            }
+            let Some(decoded) = self
+                .sensitive_payload_encoder
+                .decode_payload(payload)
+                .await?
+            else {
+                continue;
+            };
+            let instructions = decoded_routine_step_instructions(decoded).ok_or_else(|| {
+                anyhow!(
+                    "failed to decode encrypted instructions for routine step {}",
+                    step.slug
+                )
+            })?;
+            let config = step.config.as_object_mut().ok_or_else(|| {
+                anyhow!("routine step {} config must be a JSON object", step.slug)
+            })?;
+            config.insert(
+                "instructions".to_string(),
+                serde_json::Value::String(instructions),
+            );
+            step.encrypted_payload = None;
+        }
         Ok(record)
     }
 
@@ -1506,16 +1612,52 @@ where
     }
 
     async fn get_routine(&self, params: RoutinesGetParams) -> Result<RoutineGetResult> {
-        let routine = self
-            .merged_manifest()
+        let local = self.cached_local_routine(&params.slug).await?;
+        if local.is_none()
+            && let Some(routine) = self.read_only_manifest.as_ref().and_then(|manifest| {
+                manifest
+                    .routines
+                    .iter()
+                    .find(|routine| routine_matches_ref(routine, &params.slug))
+                    .cloned()
+            })
+        {
+            return Ok(RoutineGetResult {
+                routine: RoutineDocument::from(routine),
+            });
+        }
+
+        let Some(remote) = self
+            .platform_client
+            .get_routine_record_optional(&params.slug)
             .await?
-            .routines
-            .into_iter()
-            .find(|routine| routine_matches_ref(routine, &params.slug))
-            .ok_or_else(|| anyhow!("routine not found in local manifest: {}", params.slug))?;
-        Ok(RoutineGetResult {
-            routine: RoutineDocument::from(routine),
-        })
+        else {
+            let routine = local
+                .ok_or_else(|| anyhow!("routine not found in local manifest: {}", params.slug))?;
+            return Ok(RoutineGetResult {
+                routine: RoutineDocument::from(routine),
+            });
+        };
+
+        let routine_id = remote.id;
+        let mut routine = self
+            .decode_routine_step_instruction_records(remote)
+            .await?
+            .to_document();
+        merge_retained_routine_step_instructions(&mut routine, local.as_ref());
+
+        self.local_store
+            .cache_resource(&ManifestResource::Routine(local_routine_from_document(
+                &routine,
+            )))
+            .await?;
+        self.record_platform_object_id(
+            PlatformResourceKind::Routine,
+            &routine.summary.slug,
+            routine_id,
+        )?;
+
+        Ok(RoutineGetResult { routine })
     }
 
     async fn configure_routine(
@@ -2198,6 +2340,9 @@ mod tests {
                 Some("manifest.context_block.content") => {
                     Ok(Some(json!("DECODED_CONTEXT_TEMPLATE_123")))
                 }
+                Some("routine.step.instructions") => Ok(Some(json!({
+                    "instructions": "DECODED_ROUTINE_STEP_INSTRUCTIONS_123"
+                }))),
                 _ => Ok(None),
             }
         }
@@ -3108,6 +3253,150 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(result.context_block.template, "SMOKE_CONTEXT_TEMPLATE_123");
+    }
+
+    #[tokio::test]
+    async fn get_routine_hydrates_the_complete_graph_and_decrypts_step_instructions() {
+        let temp = tempdir().unwrap();
+        let store = Arc::new(LocalManifestStore::new(temp.path().join("manifests")));
+        let org_id = Uuid::new_v4();
+        let routine_id = Uuid::new_v4();
+        let draft_id = Uuid::new_v4();
+        let done_id = Uuid::new_v4();
+
+        store
+            .upsert_resource(&ManifestResource::Routine(RoutineManifest {
+                name: "Editorial Pipeline".to_string(),
+                slug: Slug::derive("editorial-pipeline"),
+                description: None,
+                entry_steps: vec![Slug::derive("draft")],
+                steps: vec![nenjo::manifest::RoutineStepManifest {
+                    slug: Slug::derive("draft"),
+                    routine: Slug::derive("editorial-pipeline"),
+                    name: "Draft".to_string(),
+                    step_type: nenjo::manifest::RoutineStepType::Agent,
+                    council: None,
+                    agent: Some(Slug::derive("writer")),
+                    config: json!({}),
+                    order_index: 0,
+                }],
+                edges: Vec::new(),
+            }))
+            .await
+            .unwrap();
+
+        let (base_url, server) = spawn_single_request_server(
+            "GET",
+            "/api/v1/routines/editorial-pipeline",
+            "200 OK",
+            json!({
+                "id": routine_id,
+                "org_id": org_id,
+                "project_id": null,
+                "slug": "editorial-pipeline",
+                "name": "Editorial Pipeline",
+                "description": "Draft and publish",
+                "is_default": false,
+                "step_count": 2,
+                "entry_steps": ["draft"],
+                "steps": [
+                    {
+                        "id": draft_id,
+                        "routine_id": routine_id,
+                        "slug": "draft",
+                        "routine": "editorial-pipeline",
+                        "name": "Draft",
+                        "step_type": "agent",
+                        "agent": "writer",
+                        "config": { "metadata": { "channel": "web" } },
+                        "encrypted_payload": {
+                            "account_id": org_id,
+                            "encryption_scope": "org",
+                            "object_id": draft_id,
+                            "object_type": "routine.step.instructions",
+                            "algorithm": "AES-256-GCM",
+                            "key_version": 1,
+                            "nonce": "nonce",
+                            "ciphertext": "encrypted-test-payload"
+                        },
+                        "position_x": 0.0,
+                        "position_y": 0.0,
+                        "order_index": 0,
+                        "created_at": "2026-05-23T00:00:00Z",
+                        "updated_at": "2026-05-23T00:00:00Z"
+                    },
+                    {
+                        "id": done_id,
+                        "routine_id": routine_id,
+                        "slug": "done",
+                        "routine": "editorial-pipeline",
+                        "name": "Done",
+                        "step_type": "terminal",
+                        "config": {},
+                        "position_x": 100.0,
+                        "position_y": 0.0,
+                        "order_index": 1,
+                        "created_at": "2026-05-23T00:00:00Z",
+                        "updated_at": "2026-05-23T00:00:00Z"
+                    }
+                ],
+                "edges": [{
+                    "id": Uuid::new_v4(),
+                    "routine_id": routine_id,
+                    "routine": "editorial-pipeline",
+                    "source_step_id": draft_id,
+                    "source_step": "draft",
+                    "target_step_id": done_id,
+                    "target_step": "done",
+                    "condition": "always",
+                    "created_at": "2026-05-23T00:00:00Z"
+                }],
+                "created_by": null,
+                "created_at": "2026-05-23T00:00:00Z",
+                "updated_at": "2026-05-23T00:00:00Z"
+            }),
+        )
+        .await
+        .unwrap();
+        let client = PlatformManifestClient::new(base_url, "test").unwrap();
+        let backend =
+            PlatformManifestBackend::new(store.clone(), client, TestSensitivePayloadEncoder)
+                .with_cached_org_id(Some(org_id));
+
+        let result = backend
+            .get_routine(RoutinesGetParams {
+                slug: Slug::derive("editorial-pipeline"),
+            })
+            .await
+            .unwrap();
+
+        assert_eq!(result.routine.entry_steps, vec![Slug::derive("draft")]);
+        assert_eq!(result.routine.steps.len(), 2);
+        assert_eq!(result.routine.edges.len(), 1);
+        assert_eq!(
+            result.routine.summary.description.as_deref(),
+            Some("Draft and publish")
+        );
+        assert_eq!(
+            result.routine.steps[0].config["instructions"],
+            "DECODED_ROUTINE_STEP_INSTRUCTIONS_123"
+        );
+        assert_eq!(result.routine.steps[0].config["metadata"]["channel"], "web");
+        assert_eq!(result.routine.edges[0].source_step, Slug::derive("draft"));
+        assert_eq!(result.routine.edges[0].target_step, Slug::derive("done"));
+        let cached = store
+            .get_routine(&Slug::derive("editorial-pipeline"))
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            cached.steps[0].config["instructions"],
+            "DECODED_ROUTINE_STEP_INSTRUCTIONS_123"
+        );
+
+        let requests = server.await.unwrap().unwrap();
+        assert_eq!(requests.len(), 1);
+        assert_eq!(requests[0].method, "GET");
     }
 
     #[tokio::test]

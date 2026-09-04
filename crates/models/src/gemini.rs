@@ -370,6 +370,14 @@ impl ModelProvider for GeminiProvider {
             },
         };
 
+        crate::request_logging::debug_provider_request(
+            "gemini",
+            model,
+            1,
+            request.messages,
+            &gemini_request,
+        );
+
         let url = Self::build_generate_content_url(model, auth);
 
         let response = self

@@ -149,6 +149,49 @@ serialized `input` prefixes, and both compare the complete serialized `tools`
 array across turns and retries. The later HTTP body itself is not required to
 have the earlier body as a literal byte prefix.
 
+## Provider request debugging
+
+Every provider adapter can emit a readable semantic view of the conversation
+immediately before sending it. The view begins with a summary and then emits
+one `model provider request part` event per message. Each part includes its
+index, kind, artifact count, and full content. Part kinds distinguish `system`,
+`developer`, `session_control`, `session_data`, `turn_control`, `turn_data`,
+`user`, `assistant`, `assistant_tool_calls`, `tool_results`, and
+`artifact_analysis`.
+
+Enable only this split view with:
+
+```sh
+RUST_LOG=nenjo_models::provider_request::parts=debug nenjo run
+```
+
+Empty session or turn data parts are omitted rather than sending empty XML
+wrappers. Control and data remain separate parts when both contain content.
+
+The exact provider-native JSON wire shape is still available separately at
+trace level, including role conversion, system-instruction placement, tool
+definitions, inline artifacts, streaming flags, Responses API fallbacks, and
+transport retries. Enable only that compact wire payload with:
+
+```sh
+RUST_LOG=nenjo_models::provider_request::wire=trace nenjo run
+```
+
+Enable both views with the parent target:
+
+```sh
+RUST_LOG=nenjo_models::provider_request=trace nenjo run
+```
+
+The exact payload event is named `model provider wire request`. Its
+`request_json` field is the complete compact JSON body; `provider`, `model`, and
+`attempt` identify the destination and individual send. Authentication headers
+and credential query parameters are not logged.
+
+This output can contain complete prompts, user input, tool results, and encoded
+artifact data. Treat diagnostic logs as sensitive and disable or delete them
+after diagnosis.
+
 ## Compaction
 
 Both session snapshots are protected from history compaction. Consecutive turn

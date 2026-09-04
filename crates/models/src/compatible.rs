@@ -716,10 +716,17 @@ impl OpenAiCompatibleProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
-        let request = self.build_responses_request(request, model, temperature)?;
+        let native_request = self.build_responses_request(request, model, temperature)?;
+        crate::request_logging::debug_provider_request(
+            &self.name,
+            model,
+            1,
+            request.messages,
+            &native_request,
+        );
         let url = self.responses_url();
         let response = self
-            .apply_auth_header(self.client.post(&url).json(&request), api_key)
+            .apply_auth_header(self.client.post(&url).json(&native_request), api_key)
             .send()
             .await?;
 
@@ -838,6 +845,14 @@ impl ModelProvider for OpenAiCompatibleProvider {
 
         let chat_request = self.build_chat_request(&request, model, temperature, false)?;
 
+        crate::request_logging::debug_provider_request(
+            &self.name,
+            model,
+            1,
+            request.messages,
+            &chat_request,
+        );
+
         let url = self.chat_completions_url();
         let response = self
             .apply_auth_header(self.client.post(&url).json(&chat_request), api_key)
@@ -953,6 +968,13 @@ impl ModelProvider for OpenAiCompatibleProvider {
             )
         })?;
         let chat_request = self.build_chat_request(&request, model, temperature, true)?;
+        crate::request_logging::debug_provider_request(
+            &self.name,
+            model,
+            1,
+            request.messages,
+            &chat_request,
+        );
         let url = self.chat_completions_url();
         let response = self
             .apply_auth_header(self.client.post(&url).json(&chat_request), api_key)

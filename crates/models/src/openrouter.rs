@@ -496,6 +496,13 @@ impl ModelProvider for OpenRouterProvider {
             let mut body = None;
 
             for attempt in 1..=OPENROUTER_MAX_TRANSPORT_ATTEMPTS {
+                crate::request_logging::debug_provider_request(
+                    "openrouter",
+                    model,
+                    attempt,
+                    request.messages,
+                    &native_request,
+                );
                 let response = match self
                     .client
                     .post(OPENROUTER_CHAT_COMPLETIONS_URL)

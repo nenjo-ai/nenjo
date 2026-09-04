@@ -552,6 +552,14 @@ impl ModelProvider for OpenAiProvider {
 
         let native_request = Self::build_chat_request(&request, model, temperature)?;
 
+        crate::request_logging::debug_provider_request(
+            "openai",
+            model,
+            1,
+            request.messages,
+            &native_request,
+        );
+
         let response = self
             .client
             .post("https://api.openai.com/v1/chat/completions")

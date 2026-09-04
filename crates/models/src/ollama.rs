@@ -168,6 +168,14 @@ impl ModelProvider for OllamaProvider {
             tools: Self::convert_tools(request.tools),
         };
 
+        crate::request_logging::debug_provider_request(
+            "ollama",
+            model,
+            1,
+            request.messages,
+            &ollama_request,
+        );
+
         let url = format!("{}/api/chat", self.base_url);
 
         let response = self

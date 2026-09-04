@@ -47,20 +47,21 @@ pub(crate) fn session_contexts(
         data_fragments.push(memory_context.trim().to_string());
     }
 
-    vec![
-        RuntimeContextMessage::session_control(wrap_context(
-            "session-context",
-            SESSION_CONTEXT_SCHEMA,
-            RuntimeContextAuthority::Control,
-            control_fragments,
-        )),
-        RuntimeContextMessage::session_data(wrap_context(
+    let mut messages = vec![RuntimeContextMessage::session_control(wrap_context(
+        "session-context",
+        SESSION_CONTEXT_SCHEMA,
+        RuntimeContextAuthority::Control,
+        control_fragments,
+    ))];
+    if !data_fragments.is_empty() {
+        messages.push(RuntimeContextMessage::session_data(wrap_context(
             "session-context",
             SESSION_CONTEXT_SCHEMA,
             RuntimeContextAuthority::Data,
             data_fragments,
-        )),
-    ]
+        )));
+    }
+    messages
 }
 
 /// Build the context snapshot for one logical model turn.
@@ -108,20 +109,21 @@ pub(crate) fn turn_contexts(
         ));
     }
 
-    vec![
-        RuntimeContextMessage::turn_control(wrap_context(
-            "turn-context",
-            TURN_CONTEXT_SCHEMA,
-            RuntimeContextAuthority::Control,
-            control_fragments,
-        )),
-        RuntimeContextMessage::turn_data(wrap_context(
+    let mut messages = vec![RuntimeContextMessage::turn_control(wrap_context(
+        "turn-context",
+        TURN_CONTEXT_SCHEMA,
+        RuntimeContextAuthority::Control,
+        control_fragments,
+    ))];
+    if !data_fragments.is_empty() {
+        messages.push(RuntimeContextMessage::turn_data(wrap_context(
             "turn-context",
             TURN_CONTEXT_SCHEMA,
             RuntimeContextAuthority::Data,
             data_fragments,
-        )),
-    ]
+        )));
+    }
+    messages
 }
 
 fn execution_kind(kind: &AgentRunKind) -> &'static str {
@@ -251,6 +253,20 @@ mod tests {
         assert!(!first[0].content().contains("stable"));
         assert_eq!(first[1].authority(), RuntimeContextAuthority::Data);
         assert!(first[1].content().contains("stable"));
+    }
+
+    #[test]
+    fn empty_data_contexts_are_omitted() {
+        let run = AgentRun::chat(ChatInput::new("hello"));
+        let context = render_context_from_agent_run(&run);
+
+        let session = session_contexts(&agent(), &context, "");
+        assert_eq!(session.len(), 1);
+        assert_eq!(session[0].authority(), RuntimeContextAuthority::Control);
+
+        let turn = turn_contexts(&context, &run);
+        assert_eq!(turn.len(), 1);
+        assert_eq!(turn[0].authority(), RuntimeContextAuthority::Control);
     }
 
     #[test]

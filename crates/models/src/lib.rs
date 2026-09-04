@@ -24,6 +24,7 @@ mod openai_responses;
 mod openai_tools;
 pub mod openrouter;
 pub mod reliable;
+mod request_logging;
 pub mod router;
 pub mod traits;
 pub mod vllm;
@@ -255,7 +256,7 @@ pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::E
 }
 
 #[cfg(test)]
-mod tests {
+mod test_support {
     use super::*;
     use serde::Serialize;
 

@@ -521,7 +521,7 @@ async fn runner_with_custom_tool() {
     );
     assert!(names.contains(&"echo"));
     assert!(!names.contains(&"respond_to_user"));
-    assert!(names.contains(&"list_knowledge_packs"));
+    assert!(!names.contains(&"list_knowledge_packs"));
     assert!(names.contains(&"inspect"));
     assert!(names.contains(&"stop"));
 
@@ -563,7 +563,7 @@ async fn runner_with_tool_factory() {
     );
     assert!(names.contains(&"echo"));
     assert!(!names.contains(&"respond_to_user"));
-    assert!(names.contains(&"list_knowledge_packs"));
+    assert!(!names.contains(&"list_knowledge_packs"));
     assert!(names.contains(&"inspect"));
     assert!(names.contains(&"stop"));
 

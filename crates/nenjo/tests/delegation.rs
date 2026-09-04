@@ -1498,14 +1498,5 @@ async fn max_depth_zero_disables_parent_tools() {
         .await
         .unwrap();
     let first_tools = captured.tool_names().remove(0);
-    assert_eq!(
-        first_tools,
-        vec![
-            "inspect",
-            "list_knowledge_packs",
-            "send_input",
-            "stop",
-            "wait"
-        ]
-    );
+    assert_eq!(first_tools, vec!["inspect", "send_input", "stop", "wait"]);
 }

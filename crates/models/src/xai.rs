@@ -989,6 +989,8 @@ impl XAiProvider {
         let body =
             self.build_responses_request(&request, model, temperature, native_tools, false)?;
 
+        crate::request_logging::debug_provider_request("xai", model, 1, request.messages, &body);
+
         let response = self
             .client
             .post(self.endpoint("/responses"))
@@ -1035,6 +1037,7 @@ impl XAiProvider {
         let api_key = self.api_key()?;
         let body =
             self.build_responses_request(&request, model, temperature, native_tools, true)?;
+        crate::request_logging::debug_provider_request("xai", model, 1, request.messages, &body);
         let response = self
             .client
             .post(self.endpoint("/responses"))

@@ -200,7 +200,7 @@ pub fn routine_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "get_routine".to_string(),
-            description: "Get one routine's name, description, entry steps, steps, and edges by slug."
+            description: "Get one routine's complete canonical graph by slug, including entry steps, full step config, and edges."
                 .to_string(),
             parameters: json!({
                 "type": "object",

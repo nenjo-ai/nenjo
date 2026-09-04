@@ -328,6 +328,14 @@ impl ModelProvider for AnthropicProvider {
             tools: Self::convert_tools(request.tools),
         };
 
+        crate::request_logging::debug_provider_request(
+            "anthropic",
+            model,
+            1,
+            request.messages,
+            &native_request,
+        );
+
         let req = self
             .client
             .post(format!("{}/v1/messages", self.base_url))

@@ -1736,7 +1736,7 @@ mod tests {
         let requests = model_requests.lock().unwrap();
         assert_eq!(requests.len(), 3);
         let messages = &requests[0];
-        assert_eq!(messages.len(), 6);
+        assert_eq!(messages.len(), 5);
         assert!(messages[0].is_role(nenjo_models::ChatRole::System));
         for (index, scope, authority) in [
             (
@@ -1754,7 +1754,6 @@ mod tests {
                 RuntimeContextScope::Turn,
                 RuntimeContextAuthority::Control,
             ),
-            (4, RuntimeContextScope::Turn, RuntimeContextAuthority::Data),
         ] {
             assert!(matches!(
                 &messages[index],
@@ -1769,7 +1768,7 @@ mod tests {
                     && !context.content().contains("model")
         ));
         assert!(matches!(
-            &messages[5],
+            &messages[4],
             ConversationMessage::Chat(message)
                 if message.role == nenjo_models::ChatRole::User
                     && message.content == raw_user_input
