@@ -114,6 +114,7 @@ where
     platform: PlatformToolServices,
     local_execution_watcher: LocalRoutineExecutionWatcher,
     file_mutations: Arc<FileMutationCoordinator>,
+    shell_admission: nenjo::concurrency::AdmissionPool,
 }
 
 impl<R> WorkerToolFactory<R>
@@ -169,7 +170,14 @@ where
     ) -> Self {
         let security = security.into();
         let runtime = Arc::new(runtime);
+        let shell_admission = nenjo::concurrency::AdmissionPool::new(
+            "shell processes",
+            config.shell.max_concurrent_processes,
+            config.shell.max_queued_processes,
+            std::time::Duration::from_secs(config.shell.queue_timeout_secs),
+        );
         Self {
+            shell_admission,
             security,
             runtime,
             config,
@@ -202,11 +210,14 @@ where
         skill_runtime: Arc<SkillRuntimeState>,
     ) -> Vec<Arc<dyn Tool>> {
         let mut tools: Vec<Arc<dyn Tool>> = vec![
-            Arc::new(ShellTool::with_skill_runtime(
-                security.clone(),
-                self.runtime.clone(),
-                skill_runtime.clone(),
-            )),
+            Arc::new(
+                ShellTool::with_skill_runtime(
+                    security.clone(),
+                    self.runtime.clone(),
+                    skill_runtime.clone(),
+                )
+                .with_admission_pool(self.shell_admission.clone()),
+            ),
             Arc::new(FileReadTool::new(security.clone())),
             Arc::new(FileWriteTool::with_coordinator(
                 security.clone(),

@@ -11,6 +11,15 @@ use std::collections::HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
+/// Local admission failures must not trigger provider retries or failover.
+#[derive(Debug, thiserror::Error)]
+pub enum ProviderAdmissionError {
+    #[error("{pool}: queue is full (maximum {limit} waiting requests)")]
+    QueueFull { pool: String, limit: usize },
+    #[error("{pool}: queue deadline exceeded after {seconds} seconds")]
+    QueueTimeout { pool: String, seconds: u64 },
+}
+
 /// Check if an error is non-retryable (client errors that won't resolve with retries).
 fn is_non_retryable(err: &anyhow::Error) -> bool {
     if let Some(reqwest_err) = err.downcast_ref::<reqwest::Error>()
@@ -196,6 +205,9 @@ impl ModelProvider for ReliableProvider {
                             return Ok(resp);
                         }
                         Err(e) => {
+                            if e.downcast_ref::<ProviderAdmissionError>().is_some() {
+                                return Err(e);
+                            }
                             let non_retryable = is_non_retryable(&e);
                             let rate_limited = is_rate_limited(&e);
 
@@ -319,6 +331,9 @@ impl ModelProvider for ReliableProvider {
                             return Ok(resp);
                         }
                         Err(e) => {
+                            if e.downcast_ref::<ProviderAdmissionError>().is_some() {
+                                return Err(e);
+                            }
                             let non_retryable = is_non_retryable(&e);
                             let rate_limited = is_rate_limited(&e);
 

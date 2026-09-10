@@ -1,27 +1,22 @@
-use std::sync::Arc;
-
 use anyhow::Context;
+use nenjo::concurrency::{AdmissionError, AdmissionPermit, AdmissionPool};
+use nenjo_models::reliable::ProviderAdmissionError;
 use nenjo_models::{ArtifactInputTransport, MediaType, ModelProvider, ProviderMediaCapabilities};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc};
-use tracing::debug;
+use tokio::sync::mpsc;
 
-/// Applies one worker-wide physical request budget beneath provider retries.
+/// Applies a configured provider’s physical request budget beneath retries.
 ///
 /// The wrapper belongs inside `ReliableProvider`: each retry or fallback must
 /// release its permit before backoff so sleeping attempts do not block useful
 /// work from other agents.
 pub(super) struct AdmissionControlledProvider {
     inner: Box<dyn ModelProvider>,
-    permits: Arc<Semaphore>,
+    permits: AdmissionPool,
     limit: usize,
 }
 
 impl AdmissionControlledProvider {
-    pub(super) fn new(
-        inner: Box<dyn ModelProvider>,
-        permits: Arc<Semaphore>,
-        limit: usize,
-    ) -> Self {
+    pub(super) fn new(inner: Box<dyn ModelProvider>, permits: AdmissionPool, limit: usize) -> Self {
         Self {
             inner,
             permits,
@@ -29,39 +24,34 @@ impl AdmissionControlledProvider {
         }
     }
 
-    async fn acquire(&self) -> anyhow::Result<OwnedSemaphorePermit> {
-        if let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() {
-            return Ok(permit);
-        }
-        let queued_at = std::time::Instant::now();
-        debug!(
-            max_concurrent_requests = self.limit,
-            "Model request waiting for worker admission capacity"
-        );
-        let permit = Arc::clone(&self.permits)
-            .acquire_owned()
-            .await
-            .context("model admission controller closed")?;
-        debug!(
-            max_concurrent_requests = self.limit,
-            queued_ms = queued_at.elapsed().as_millis(),
-            "Model request admitted after capacity wait"
-        );
-        Ok(permit)
+    async fn acquire(&self) -> anyhow::Result<AdmissionPermit> {
+        self.permits.acquire().await.map_err(|error| match error {
+            AdmissionError::QueueFull { pool, limit } => {
+                ProviderAdmissionError::QueueFull { pool, limit }.into()
+            }
+            AdmissionError::QueueTimeout { pool, seconds } => {
+                ProviderAdmissionError::QueueTimeout { pool, seconds }.into()
+            }
+        })
     }
 
     async fn acquire_for_stream(
         &self,
         events: &mpsc::Sender<nenjo_models::ProviderStreamEvent>,
-    ) -> anyhow::Result<OwnedSemaphorePermit> {
-        if let Ok(permit) = Arc::clone(&self.permits).try_acquire_owned() {
-            return Ok(permit);
+    ) -> anyhow::Result<AdmissionPermit> {
+        let acquire = self.acquire();
+        tokio::pin!(acquire);
+        if let std::task::Poll::Ready(result) = futures_util::poll!(&mut acquire) {
+            return result;
         }
         events
             .send(nenjo_models::ProviderStreamEvent::CapacityWaiting { limit: self.limit })
             .await
             .context("provider stream consumer closed while waiting for capacity")?;
-        let permit = self.acquire().await?;
+        let permit = tokio::select! {
+            result = &mut acquire => result?,
+            _ = events.closed() => anyhow::bail!("provider stream consumer closed while queued"),
+        };
         events
             .send(nenjo_models::ProviderStreamEvent::CapacityAcquired)
             .await
@@ -181,6 +171,84 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn full_queue_is_terminal_for_retries_and_fallbacks() {
+        let pool = AdmissionPool::new("local", 1, 0, std::time::Duration::from_secs(1));
+        let _held = pool.acquire().await.unwrap();
+        let active = Arc::new(AtomicUsize::new(0));
+        let max_observed = Arc::new(AtomicUsize::new(0));
+        let provider = nenjo_models::ReliableProvider::new(
+            vec![
+                (
+                    "local".into(),
+                    Box::new(AdmissionControlledProvider::new(
+                        Box::new(ConcurrencyProbe {
+                            active: active.clone(),
+                            max_observed: max_observed.clone(),
+                        }),
+                        pool,
+                        1,
+                    )),
+                ),
+                (
+                    "fallback".into(),
+                    Box::new(ConcurrencyProbe {
+                        active,
+                        max_observed: max_observed.clone(),
+                    }),
+                ),
+            ],
+            5,
+            50,
+        );
+        let request = ChatRequest {
+            messages: &[],
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let error = provider.chat(request, "test", 0.0).await.unwrap_err();
+        assert!(error.downcast_ref::<ProviderAdmissionError>().is_some());
+        let (tx, _rx) = mpsc::channel(8);
+        let error = provider
+            .chat_stream(request, "test", 0.0, tx)
+            .await
+            .unwrap_err();
+        assert!(error.downcast_ref::<ProviderAdmissionError>().is_some());
+        assert_eq!(max_observed.load(Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn disconnected_stream_cancels_its_queue_ticket() {
+        let pool = AdmissionPool::new("local", 1, 1, std::time::Duration::from_secs(1));
+        let held = pool.acquire().await.unwrap();
+        let provider = AdmissionControlledProvider::new(
+            Box::new(ConcurrencyProbe {
+                active: Arc::new(AtomicUsize::new(0)),
+                max_observed: Arc::new(AtomicUsize::new(0)),
+            }),
+            pool.clone(),
+            1,
+        );
+        let request = ChatRequest {
+            messages: &[],
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let (tx, mut rx) = mpsc::channel(8);
+        let mut call = Box::pin(provider.chat_stream(request, "test", 0.0, tx));
+        assert!(futures_util::poll!(call.as_mut()).is_pending());
+        assert!(matches!(
+            rx.try_recv().unwrap(),
+            nenjo_models::ProviderStreamEvent::CapacityWaiting { .. }
+        ));
+        drop(rx);
+        assert!(call.await.is_err());
+        drop(held);
+        pool.acquire().await.unwrap();
+    }
+
+    #[tokio::test]
     async fn caps_parallel_physical_provider_calls() {
         let active = Arc::new(AtomicUsize::new(0));
         let max_observed = Arc::new(AtomicUsize::new(0));
@@ -189,7 +257,7 @@ mod tests {
                 active: Arc::clone(&active),
                 max_observed: Arc::clone(&max_observed),
             }),
-            Arc::new(Semaphore::new(1)),
+            AdmissionPool::new("test", 1, 8, std::time::Duration::from_secs(5)),
             1,
         ));
         let messages = Vec::new();

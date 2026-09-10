@@ -76,6 +76,11 @@ impl ProviderMemory for builder::NoMemory {
 ///   configured without an agent already present in the provider manifest.
 #[async_trait::async_trait]
 pub trait ProviderRuntime: Clone + Send + Sync + 'static {
+    /// Optional admission shared by all root executions created by this provider.
+    fn root_admission(&self) -> Option<crate::concurrency::AdmissionPool> {
+        None
+    }
+
     /// Model provider type created for an agent model manifest.
     type Model<'a>: nenjo_models::ModelProvider + Send + Sync + ?Sized + 'a
     where

@@ -685,6 +685,8 @@ pub fn transcript_payloads_from_turn_event(
         nenjo::TurnEvent::ModelRequestStarted { .. }
         | nenjo::TurnEvent::AssistantTextDelta { .. }
         | nenjo::TurnEvent::AssistantReasoningDelta { .. }
+        | nenjo::TurnEvent::ResourceCapacityWaiting { .. }
+        | nenjo::TurnEvent::ResourceCapacityAcquired { .. }
         | nenjo::TurnEvent::ModelCapacityWaiting { .. }
         | nenjo::TurnEvent::ModelCapacityAcquired { .. }
         | nenjo::TurnEvent::ProviderRetryScheduled { .. }
@@ -764,6 +766,8 @@ pub fn trace_events_from_turn_event(
         nenjo::TurnEvent::ModelRequestStarted { .. }
         | nenjo::TurnEvent::AssistantTextDelta { .. }
         | nenjo::TurnEvent::AssistantReasoningDelta { .. }
+        | nenjo::TurnEvent::ResourceCapacityWaiting { .. }
+        | nenjo::TurnEvent::ResourceCapacityAcquired { .. }
         | nenjo::TurnEvent::ModelCapacityWaiting { .. }
         | nenjo::TurnEvent::ModelCapacityAcquired { .. }
         | nenjo::TurnEvent::ProviderRetryScheduled { .. }

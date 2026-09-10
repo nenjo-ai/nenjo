@@ -315,6 +315,12 @@ fn json_object_or_none(object: Map<String, Value>) -> Option<Value> {
 }
 
 impl OpenAiProvider {
+    /// Replace the HTTP client to customize timeouts, proxies, or connection settings.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     pub fn new(api_key: Option<&str>) -> Self {
         Self {
             api_key: api_key.map(ToString::to_string),

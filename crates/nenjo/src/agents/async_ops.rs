@@ -34,7 +34,7 @@ const TERMINAL_OPERATION_CAP: usize = 128;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 #[error(
-    "nested run capacity reached (limit {limit}); wait for or stop an active ability, delegation, or sub-agent before retrying"
+    "unfinished nested operation capacity reached (limit {limit}); wait for or stop an ability, delegation, or sub-agent before retrying"
 )]
 pub struct AsyncOpStartError {
     limit: usize,
@@ -581,6 +581,14 @@ impl AsyncOpManager {
 
     pub(crate) fn with_cancel(cancel: CancellationToken) -> Self {
         Self::with_cancel_and_nested_limit(cancel, crate::config::DEFAULT_MAX_ACTIVE_NESTED_RUNS)
+    }
+
+    pub(crate) fn with_cancel_and_nested_queue(
+        cancel: CancellationToken,
+        active: usize,
+        pending: usize,
+    ) -> Self {
+        Self::with_cancel_and_nested_limit(cancel, active.saturating_add(pending))
     }
 
     pub(crate) fn with_cancel_and_nested_limit(

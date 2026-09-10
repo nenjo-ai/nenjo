@@ -55,6 +55,12 @@ pub struct VllmProvider {
 }
 
 impl VllmProvider {
+    /// Replace the HTTP client to customize timeouts, proxies, or connection settings.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.compatible = self.compatible.with_http_client(client);
+        self
+    }
+
     pub fn new(base_url: Option<&str>, api_key: Option<&str>) -> Self {
         Self::with_streaming(base_url, api_key, VllmStreaming::Enabled)
     }

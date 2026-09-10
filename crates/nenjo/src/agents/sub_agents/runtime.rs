@@ -254,7 +254,9 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
         let completion_format = result_format.clone();
         let cancel = run.cancel.clone();
 
-        let join = tokio::spawn(async move {
+        let execution_scope =
+            crate::concurrency::ExecutionContext::current().map(|context| context.child());
+        let join = tokio::spawn(crate::concurrency::in_scope(execution_scope, async move {
             let result = run_child_agent(ChildAgentRun {
                 provider,
                 agent: child_agent,
@@ -294,7 +296,7 @@ impl<P: ProviderRuntime> SubAgentHandle<P> {
                         .await;
                 }
             }
-        });
+        }));
         *run.abort.lock().await = Some(join.abort_handle());
         started
             .handle
@@ -617,6 +619,8 @@ async fn bridge_transcript<P: ProviderRuntime>(child: &ChildRuntimeHandle<P>, ev
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
         | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ResourceCapacityWaiting { .. }
+        | TurnEvent::ResourceCapacityAcquired { .. }
         | TurnEvent::ModelCapacityWaiting { .. }
         | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::ProviderRetryScheduled { .. }

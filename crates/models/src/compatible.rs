@@ -57,6 +57,12 @@ pub enum AuthStyle {
 }
 
 impl OpenAiCompatibleProvider {
+    /// Replace the HTTP client to customize timeouts, proxies, or connection settings.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     pub fn new(name: &str, base_url: &str, api_key: Option<&str>, auth_style: AuthStyle) -> Self {
         Self::new_with_dialect(
             name,
@@ -82,7 +88,7 @@ impl OpenAiCompatibleProvider {
             supports_responses_fallback: true,
             artifact_dialect,
             client: Client::builder()
-                .read_timeout(std::time::Duration::from_secs(120))
+                .read_timeout(std::time::Duration::from_secs(300))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),
@@ -105,7 +111,7 @@ impl OpenAiCompatibleProvider {
             supports_responses_fallback: false,
             artifact_dialect: ChatArtifactDialect::OpenAi,
             client: Client::builder()
-                .read_timeout(std::time::Duration::from_secs(120))
+                .read_timeout(std::time::Duration::from_secs(300))
                 .connect_timeout(std::time::Duration::from_secs(10))
                 .build()
                 .unwrap_or_else(|_| Client::new()),

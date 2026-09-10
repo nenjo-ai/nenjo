@@ -76,6 +76,12 @@ struct ResponseMessage {
 }
 
 impl OllamaProvider {
+    /// Replace the HTTP client to customize timeouts, proxies, or connection settings.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     pub fn new(base_url: Option<&str>) -> Self {
         Self {
             base_url: base_url

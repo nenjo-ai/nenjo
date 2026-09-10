@@ -1,3 +1,7 @@
+mod concurrency;
+pub use concurrency::{
+    ExecutionConfig, ModelRuntimeConfig, ProviderPoolBinding, ProviderPoolConfig, ShellConfig,
+};
 mod schema;
 
 pub use schema::{

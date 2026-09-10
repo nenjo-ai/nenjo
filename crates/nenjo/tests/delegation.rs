@@ -1261,6 +1261,13 @@ async fn delegated_child_can_invoke_assigned_ability_and_wait_for_it() {
     };
 
     let provider = Provider::builder()
+        .with_agent_config(nenjo::AgentConfig {
+            max_active_descendants: 1,
+            max_active_nested_runs: 1,
+            max_sub_agents_per_spawn: 1,
+            nested_queue_timeout_secs: 1,
+            ..nenjo::AgentConfig::default()
+        })
         .with_manifest(manifest)
         .with_model_factory(NestedAbilityDelegateFactory::new(captured.clone()))
         .with_tool_factory(PlatformToolFactory)

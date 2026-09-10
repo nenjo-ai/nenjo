@@ -29,9 +29,28 @@ pub struct AgentConfig {
     /// Maximum ability, delegation, and sub-agent runs active for one agent.
     #[serde(default = "default_max_active_nested_runs")]
     pub max_active_nested_runs: usize,
+    /// Runnable descendants shared across every level of one root execution.
+    #[serde(default = "default_max_active_descendants")]
+    pub max_active_descendants: usize,
+    /// Additional unfinished children accepted by each parent.
+    #[serde(default = "default_max_pending_nested_runs")]
+    pub max_pending_nested_runs: usize,
+    /// Maximum wait for a runnable descendant slot.
+    #[serde(default = "default_nested_queue_timeout_secs")]
+    pub nested_queue_timeout_secs: u64,
     /// Maximum child requests accepted by one `spawn_sub_agents` call.
     #[serde(default = "default_max_sub_agents_per_spawn")]
     pub max_sub_agents_per_spawn: usize,
+}
+
+fn default_max_active_descendants() -> usize {
+    6
+}
+fn default_max_pending_nested_runs() -> usize {
+    32
+}
+fn default_nested_queue_timeout_secs() -> u64 {
+    300
 }
 
 fn default_max_delegation_depth() -> u32 {
@@ -82,6 +101,9 @@ impl Default for AgentConfig {
             tool_dispatcher: default_agent_tool_dispatcher(),
             max_delegation_depth: default_max_delegation_depth(),
             max_active_nested_runs: default_max_active_nested_runs(),
+            max_active_descendants: default_max_active_descendants(),
+            max_pending_nested_runs: default_max_pending_nested_runs(),
+            nested_queue_timeout_secs: default_nested_queue_timeout_secs(),
             max_sub_agents_per_spawn: default_max_sub_agents_per_spawn(),
         }
     }

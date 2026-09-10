@@ -405,7 +405,9 @@ where
     let join_operation_id = operation_id.to_string();
     let target_agent_slug = target_slug.to_string();
     let join_events_tx = parent_events_tx.clone();
-    let join = tokio::spawn(async move {
+    let execution_scope =
+        crate::concurrency::ExecutionContext::current().map(|context| context.child());
+    let join = tokio::spawn(crate::concurrency::in_scope(execution_scope, async move {
         run_delegation_operation(DelegationOperation {
             provider,
             target_slug,
@@ -419,7 +421,7 @@ where
             parent_events_tx,
         })
         .await;
-    });
+    }));
     started.handle.attach_join(join, join_events_tx).await;
 
     Ok(ok(serde_json::to_value(DelegationOperationStarted {
@@ -630,6 +632,8 @@ where
         }
         TurnEvent::AbilityStarted { .. }
         | TurnEvent::AbilityCompleted { .. }
+        | TurnEvent::ResourceCapacityWaiting { .. }
+        | TurnEvent::ResourceCapacityAcquired { .. }
         | TurnEvent::ModelCapacityWaiting { .. }
         | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::ProviderRetryScheduled { .. }
@@ -721,6 +725,8 @@ async fn bridge_delegation_transcript(
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
         | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ResourceCapacityWaiting { .. }
+        | TurnEvent::ResourceCapacityAcquired { .. }
         | TurnEvent::ModelCapacityWaiting { .. }
         | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::ProviderRetryScheduled { .. }
