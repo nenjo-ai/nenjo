@@ -88,11 +88,16 @@ RUN useradd --create-home --home-dir /home/nenjo --shell /bin/bash --uid 10001 n
 ENV HOME=/home/nenjo \
     NENJO_DIR=/home/nenjo/.nenjo \
     NENJO_NO_UPDATE_CHECK=1 \
-    PATH=/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+    XDG_CACHE_HOME=/home/nenjo/.cache \
+    PIP_CACHE_DIR=/home/nenjo/.cache/pip \
+    VIRTUAL_ENV=/home/nenjo/.venv \
+    PATH=/home/nenjo/.venv/bin:/home/nenjo/.local/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
 
 USER nenjo
 
-RUN git lfs install --skip-repo
+RUN mkdir -p /home/nenjo/.local/bin "$PIP_CACHE_DIR" \
+    && python3 -m venv "$VIRTUAL_ENV" \
+    && git lfs install --skip-repo
 
 WORKDIR /home/nenjo/.nenjo/workspace
 
@@ -106,9 +111,11 @@ USER root
 LABEL org.opencontainers.image.title="Nenjo Worker Dev" \
       org.opencontainers.image.description="Developer toolbox image for the Nenjo platform worker"
 
-ENV RUSTUP_HOME=/usr/local/rustup \
+ENV RUSTUP_HOME=/home/nenjo/.rustup \
     CARGO_HOME=/home/nenjo/.cargo \
-    PATH=/usr/local/cargo/bin:/home/nenjo/.cargo/bin:/usr/local/bin:/usr/local/sbin:/usr/sbin:/usr/bin:/sbin:/bin
+    NPM_CONFIG_CACHE=/home/nenjo/.npm \
+    NPM_CONFIG_PREFIX=/home/nenjo/.local \
+    PATH=/home/nenjo/.cargo/bin:${PATH}
 
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
@@ -128,18 +135,23 @@ RUN apt-get update \
         vim-tiny \
     && rm -rf /var/lib/apt/lists/*
 
-COPY --from=builder --chown=nenjo:nenjo /usr/local/cargo /usr/local/cargo
-COPY --from=builder --chown=nenjo:nenjo /usr/local/rustup /usr/local/rustup
+RUN install -d -m 0755 -o nenjo -g nenjo "$CARGO_HOME"
+
+COPY --from=builder --chown=nenjo:nenjo /usr/local/cargo/bin /home/nenjo/.cargo/bin
+COPY --from=builder --chown=nenjo:nenjo /usr/local/rustup /home/nenjo/.rustup
 COPY --from=node-runtime /usr/local/bin/node /usr/local/bin/node
 COPY --from=node-runtime /usr/local/lib/node_modules /usr/local/lib/node_modules
 
-RUN mkdir -p /home/nenjo/.cargo \
-    && chown -R nenjo:nenjo /home/nenjo/.cargo \
-    && ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
+RUN ln -s /usr/local/lib/node_modules/npm/bin/npm-cli.js /usr/local/bin/npm \
     && ln -s /usr/local/lib/node_modules/npm/bin/npx-cli.js /usr/local/bin/npx \
     && if command -v corepack >/dev/null 2>&1; then corepack enable; fi
 
 USER nenjo
+
+RUN mkdir -p "$NPM_CONFIG_CACHE" "$CARGO_HOME/registry" "$CARGO_HOME/git" \
+    # Shell tools filter environment variables, so persist the npm prefix too.
+    && npm config set prefix "$NPM_CONFIG_PREFIX" --location=user \
+    && npm cache verify
 
 FROM dev AS heavy
 
@@ -155,15 +167,16 @@ RUN apt-get update \
         chromium \
     && rm -rf /var/lib/apt/lists/*
 
+USER nenjo
+
 RUN npm install --global "agent-browser@${AGENT_BROWSER_VERSION}" \
     && npm cache clean --force \
     && agent-browser --version
 
 ENV AGENT_BROWSER_EXECUTABLE_PATH=/usr/bin/chromium
 
-RUN install -d -m 0700 -o nenjo -g nenjo /home/nenjo/.nenjo/browser-state \
+RUN install -d -m 0700 /home/nenjo/.nenjo/browser-state \
     && ln -s /home/nenjo/.nenjo/browser-state /home/nenjo/.agent-browser
 
-USER nenjo
-
-RUN agent-browser doctor --offline --quick --json
+RUN npm cache verify \
+    && agent-browser doctor --offline --quick --json

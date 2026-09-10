@@ -48,9 +48,9 @@ jobs:
       matrix:
         include:
           - target: x86_64-unknown-linux-gnu
-            os: blacksmith-4vcpu-ubuntu-2404
+            os: blacksmith-8vcpu-ubuntu-2404
           - target: aarch64-apple-darwin
-            os: macos-latest
+            os: blacksmith-6vcpu-macos-latest
     steps:
       - uses: actions/checkout@v4
         with:
@@ -119,7 +119,7 @@ jobs:
 
   publish-images:
     name: Publish Docker images
-    runs-on: blacksmith-4vcpu-ubuntu-2404
+    runs-on: blacksmith-8vcpu-ubuntu-2404
     needs: release
     if: ${{ github.repository_owner == 'nenjo-ai' }}
     env:
