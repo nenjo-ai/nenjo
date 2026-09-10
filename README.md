@@ -62,6 +62,13 @@ Three image variants are published:
 | `ghcr.io/nenjo-ai/nenjo-worker:<version>-dev` / `dev` | Larger toolbox image with compilers, Rust, Node 24/npm, GitHub CLI, Docker CLI, editors, and debugging utilities |
 | `ghcr.io/nenjo-ai/nenjo-worker:<version>-heavy` / `heavy` | Dev toolbox plus pinned `agent-browser` and Chromium for browser automation |
 
+All variants run as `nenjo` (UID 10001). Python uses a user-owned virtual
+environment at `~/.venv`, so `pip install` works directly. The dev and heavy
+images keep npm's cache at `~/.npm`, global npm packages in `~/.local`, and
+Rust tooling in `~/.cargo` and `~/.rustup`. Package installations run as `nenjo`,
+and their executable directories are on `PATH`. These tool directories are
+outside the `~/.nenjo` data volume and are recreated when the container is replaced.
+
 Open an interactive shell in the dev image with:
 
 ```bash
@@ -193,8 +200,9 @@ The worker is resilient to service outages. Startup and the event loop use expon
 
 The first-class vLLM provider requests streamed Chat Completions by default. This
 keeps long local generations active as long as response data continues to
-arrive and surfaces text deltas to the live session UI. Disable streaming when
-testing an endpoint that requires one buffered JSON response:
+arrive. Interactive chat forwards text deltas to the live session UI; callers
+with a buffered public API accumulate the same SSE response internally. Disable
+streaming when testing an endpoint that requires one buffered JSON response:
 
 ```toml
 [vllm]
@@ -203,6 +211,9 @@ streaming = true
 
 `NENJO_VLLM_STREAMING` overrides the TOML value and accepts
 `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off`.
+
+A host-only vLLM base URL is normalized to the standard `/v1` API root. An
+explicit path is preserved for deployments mounted below a custom API prefix.
 
 ### Model concurrency and nested runs
 
