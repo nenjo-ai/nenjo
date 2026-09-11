@@ -406,6 +406,7 @@ impl ModelProvider for GeminiProvider {
             .map(|u| TokenUsage {
                 input_tokens: u.prompt_token_count,
                 output_tokens: u.candidates_token_count,
+                ..TokenUsage::default()
             })
             .unwrap_or_default();
 

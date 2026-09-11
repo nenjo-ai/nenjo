@@ -1,8 +1,11 @@
+//! Physical provider admission beneath retries, including stream queue notifications.
+
 use anyhow::Context;
+use tokio::sync::mpsc;
+
 use nenjo::concurrency::{AdmissionError, AdmissionPermit, AdmissionPool};
 use nenjo_models::reliable::ProviderAdmissionError;
 use nenjo_models::{ArtifactInputTransport, MediaType, ModelProvider, ProviderMediaCapabilities};
-use tokio::sync::mpsc;
 
 /// Applies a configured provider’s physical request budget beneath retries.
 ///
@@ -12,18 +15,15 @@ use tokio::sync::mpsc;
 pub(super) struct AdmissionControlledProvider {
     inner: Box<dyn ModelProvider>,
     permits: AdmissionPool,
-    limit: usize,
 }
 
 impl AdmissionControlledProvider {
-    pub(super) fn new(inner: Box<dyn ModelProvider>, permits: AdmissionPool, limit: usize) -> Self {
-        Self {
-            inner,
-            permits,
-            limit,
-        }
+    /// Wrap one physical endpoint using the shared pool as the source of its limit.
+    pub(super) fn new(inner: Box<dyn ModelProvider>, permits: AdmissionPool) -> Self {
+        Self { inner, permits }
     }
 
+    /// Preserve typed admission errors so reliability wrappers do not retry queue failures.
     async fn acquire(&self) -> anyhow::Result<AdmissionPermit> {
         self.permits.acquire().await.map_err(|error| match error {
             AdmissionError::QueueFull { pool, limit } => {
@@ -35,6 +35,10 @@ impl AdmissionControlledProvider {
         })
     }
 
+    /// Emit capacity events only for queued calls and cancel admission on disconnect.
+    ///
+    /// The acquisition future owns its ticket throughout event-channel backpressure;
+    /// cancelling it or failing delivery releases queued or newly granted capacity.
     async fn acquire_for_stream(
         &self,
         events: &mpsc::Sender<nenjo_models::ProviderStreamEvent>,
@@ -45,7 +49,9 @@ impl AdmissionControlledProvider {
             return result;
         }
         events
-            .send(nenjo_models::ProviderStreamEvent::CapacityWaiting { limit: self.limit })
+            .send(nenjo_models::ProviderStreamEvent::CapacityWaiting {
+                limit: self.permits.limit(),
+            })
             .await
             .context("provider stream consumer closed while waiting for capacity")?;
         let permit = tokio::select! {
@@ -138,14 +144,29 @@ mod tests {
         Arc,
         atomic::{AtomicUsize, Ordering},
     };
+    use std::time::Duration;
 
-    use nenjo_models::{ChatRequest, ChatResponse, FinishReason, TokenUsage};
+    use nenjo_models::{ChatRequest, ChatResponse, FinishReason, ProviderStreamEvent, TokenUsage};
 
     use super::*;
 
     struct ConcurrencyProbe {
         active: Arc<AtomicUsize>,
         max_observed: Arc<AtomicUsize>,
+    }
+
+    struct FailingProvider;
+
+    #[async_trait::async_trait]
+    impl ModelProvider for FailingProvider {
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            anyhow::bail!("test provider failed")
+        }
     }
 
     #[async_trait::async_trait]
@@ -186,7 +207,6 @@ mod tests {
                             max_observed: max_observed.clone(),
                         }),
                         pool,
-                        1,
                     )),
                 ),
                 (
@@ -227,7 +247,6 @@ mod tests {
                 max_observed: Arc::new(AtomicUsize::new(0)),
             }),
             pool.clone(),
-            1,
         );
         let request = ChatRequest {
             messages: &[],
@@ -258,7 +277,6 @@ mod tests {
                 max_observed: Arc::clone(&max_observed),
             }),
             AdmissionPool::new("test", 1, 8, std::time::Duration::from_secs(5)),
-            1,
         ));
         let messages = Vec::new();
         let request = ChatRequest {
@@ -276,5 +294,67 @@ mod tests {
         first.unwrap();
         second.unwrap();
         assert_eq!(max_observed.load(Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn failed_provider_calls_release_physical_capacity() {
+        let pool = AdmissionPool::new("test", 1, 0, Duration::from_secs(1));
+        let provider = AdmissionControlledProvider::new(Box::new(FailingProvider), pool.clone());
+        let request = ChatRequest {
+            messages: &[],
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let error = provider.chat(request, "test", 0.0).await.unwrap_err();
+        assert!(error.to_string().contains("test provider failed"));
+        pool.acquire().await.unwrap();
+        let (events, _received) = mpsc::channel(1);
+        let error = provider
+            .chat_stream(request, "test", 0.0, events)
+            .await
+            .unwrap_err();
+        assert!(error.to_string().contains("test provider failed"));
+        pool.acquire().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn disconnect_during_acquired_event_backpressure_releases_the_grant() {
+        let pool = AdmissionPool::new("test", 1, 1, Duration::from_secs(1));
+        let provider = AdmissionControlledProvider::new(Box::new(FailingProvider), pool.clone());
+        let held = pool.acquire().await.unwrap();
+        let (events, received) = mpsc::channel(1);
+        let mut acquire = Box::pin(provider.acquire_for_stream(&events));
+        assert!(futures_util::poll!(acquire.as_mut()).is_pending());
+        drop(held);
+        // CapacityWaiting occupies the channel while CapacityAcquired awaits space.
+        assert!(futures_util::poll!(acquire.as_mut()).is_pending());
+        drop(received);
+        assert!(acquire.await.is_err());
+        pool.acquire().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn stream_queue_events_use_the_shared_pool_limit() {
+        let pool = AdmissionPool::new("test", 2, 1, Duration::from_secs(1));
+        let provider = AdmissionControlledProvider::new(Box::new(FailingProvider), pool.clone());
+        let (events, mut received) = mpsc::channel(2);
+        let first = provider.acquire_for_stream(&events).await.unwrap();
+        assert!(received.try_recv().is_err());
+        let second = pool.acquire().await.unwrap();
+        let mut queued = Box::pin(provider.acquire_for_stream(&events));
+        assert!(futures_util::poll!(queued.as_mut()).is_pending());
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            ProviderStreamEvent::CapacityWaiting { limit: 2 }
+        ));
+        drop(first);
+        queued.await.unwrap();
+        assert!(matches!(
+            received.try_recv().unwrap(),
+            ProviderStreamEvent::CapacityAcquired
+        ));
+        assert!(received.try_recv().is_err());
+        drop(second);
     }
 }

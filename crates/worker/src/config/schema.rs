@@ -142,14 +142,37 @@ pub struct MediaProviderConfig {
 /// Worker-local behavior for first-class vLLM endpoints.
 #[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 pub struct VllmConfig {
+    /// Wire API: `responses` (default) or `chat_completions`.
+    #[serde(default)]
+    pub api: nenjo_models::VllmApi,
     /// Request OpenAI-compatible SSE responses instead of one buffered response.
     #[serde(default = "default_true")]
     pub streaming: bool,
+    /// Generation defaults applied when the Responses API is selected.
+    /// Unspecified reasoning effort resolves to `max` in the vLLM adapter.
+    #[serde(default)]
+    pub responses: nenjo_models::ResponsesOptions,
 }
 
 impl Default for VllmConfig {
     fn default() -> Self {
-        Self { streaming: true }
+        Self {
+            api: nenjo_models::VllmApi::default(),
+            streaming: true,
+            responses: nenjo_models::ResponsesOptions::default(),
+        }
+    }
+}
+
+impl VllmConfig {
+    /// Reject generation controls that the selected vLLM API cannot apply.
+    pub fn validate(&self) -> Result<()> {
+        anyhow::ensure!(
+            self.api == nenjo_models::VllmApi::Responses
+                || self.responses == nenjo_models::ResponsesOptions::default(),
+            "vLLM Responses generation controls require api = responses"
+        );
+        Ok(())
     }
 }
 
@@ -1409,6 +1432,25 @@ impl Config {
             &mut self.pdf.render_queue_timeout_secs,
         )?;
         apply_bool_env("NENJO_VLLM_STREAMING", &mut self.vllm.streaming)?;
+        if let Ok(api) = std::env::var("NENJO_VLLM_API") {
+            self.vllm.api =
+                serde_json::from_value(serde_json::Value::String(api)).map_err(|error| {
+                    anyhow::anyhow!("NENJO_VLLM_API must be chat_completions or responses: {error}")
+                })?;
+        }
+        if let Ok(effort) = std::env::var("NENJO_VLLM_REASONING_EFFORT") {
+            self.vllm.responses.reasoning_effort = Some(
+                serde_json::from_value(serde_json::Value::String(effort))
+                    .context("invalid NENJO_VLLM_REASONING_EFFORT")?,
+            );
+        }
+        if let Ok(limit) = std::env::var("NENJO_VLLM_MAX_OUTPUT_TOKENS") {
+            self.vllm.responses.max_output_tokens = Some(
+                limit
+                    .parse()
+                    .context("NENJO_VLLM_MAX_OUTPUT_TOKENS must be a positive integer")?,
+            );
+        }
         Ok(())
     }
 
@@ -1432,6 +1474,7 @@ impl Config {
             );
         }
         self.validate_media_providers()?;
+        self.vllm.validate()?;
         self.model_runtime.validate()?;
         self.execution.validate()?;
         self.shell.validate()?;
@@ -1573,8 +1616,9 @@ max_gate_max_retries = 7
     }
 
     #[test]
-    fn vllm_streaming_defaults_on_and_can_be_disabled() {
+    fn vllm_defaults_to_responses_with_streaming_and_preserves_explicit_api_selection() {
         assert!(VllmConfig::default().streaming);
+        assert_eq!(VllmConfig::default().api, nenjo_models::VllmApi::Responses);
 
         let config: Config = toml::from_str(
             r#"
@@ -1584,11 +1628,30 @@ api_key = "test"
 
 [vllm]
 streaming = false
+[vllm.responses]
+reasoning_effort = "low"
+max_output_tokens = 4096
 "#,
         )
         .unwrap();
 
         assert!(!config.vllm.streaming);
+        assert_eq!(config.vllm.api, nenjo_models::VllmApi::Responses);
+        assert_eq!(
+            config.vllm.responses.reasoning_effort,
+            Some(nenjo_models::ReasoningEffort::Low)
+        );
+        assert_eq!(config.vllm.responses.max_output_tokens.unwrap().get(), 4096);
+        assert!(toml::from_str::<VllmConfig>("[responses]\nmax_output_tokens = 0").is_err());
+        assert!(toml::from_str::<VllmConfig>("api = 'unknown'").is_err());
+        config.vllm.validate().unwrap();
+        let mut incompatible = config.vllm;
+        incompatible.api = nenjo_models::VllmApi::ChatCompletions;
+        assert!(incompatible.validate().is_err());
+        VllmConfig::default().validate().unwrap();
+        let explicit: VllmConfig = toml::from_str("api = 'chat_completions'").unwrap();
+        assert_eq!(explicit.api, nenjo_models::VllmApi::ChatCompletions);
+        explicit.validate().unwrap();
     }
 
     #[test]

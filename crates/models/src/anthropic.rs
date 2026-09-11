@@ -287,6 +287,7 @@ impl AnthropicProvider {
             .map(|u| TokenUsage {
                 input_tokens: u.input_tokens,
                 output_tokens: u.output_tokens,
+                ..TokenUsage::default()
             })
             .unwrap_or_default();
 

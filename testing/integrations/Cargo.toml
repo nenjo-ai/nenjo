@@ -20,6 +20,10 @@ path = "tests/memory.rs"
 name = "routines"
 path = "tests/routines.rs"
 
+[[test]]
+name = "vllm_responses"
+path = "tests/vllm_responses.rs"
+
 [dependencies]
 nenjo-knowledge = { workspace = true }
 nenjo = { workspace = true }
@@ -27,6 +31,8 @@ nenjo-models = { workspace = true }
 anyhow = { workspace = true }
 async-trait = { workspace = true }
 serde_json = { workspace = true }
+reqwest = { workspace = true, features = ["json"] }
+sha2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tracing-subscriber = { workspace = true, features = ["env-filter"] }

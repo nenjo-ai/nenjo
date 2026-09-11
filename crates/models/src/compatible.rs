@@ -2,6 +2,8 @@
 //! Most LLM APIs follow the same `/v1/chat/completions` format.
 //! This module provides a single implementation that works for all of them.
 
+use std::time::{Duration, Instant};
+
 use crate::audio_data_uri::decode_base64_data_uri;
 use crate::native::{
     MediaCapabilitiesProvider, MediaExecutionMode, MediaInputAsset, MediaOperation,
@@ -17,6 +19,7 @@ use crate::openai_responses::{
     response_text, response_tool_calls, response_usage,
 };
 use crate::openai_tools::{ProviderToolSpec, convert_tools_checked};
+use crate::sse::{decode_event, take_frame};
 use crate::traits::{
     ChatRequest, ChatResponse, ModelProvider, ProviderStreamEvent, TokenUsage, ToolCall,
 };
@@ -28,7 +31,9 @@ use reqwest::Client;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use tracing::warn;
+use tracing::{debug, warn};
+
+mod responses;
 
 /// A provider that speaks the OpenAI-compatible chat completions API.
 /// Used by: Venice, Vercel AI Gateway, Cloudflare AI Gateway, Moonshot,
@@ -332,6 +337,7 @@ impl ChatStreamState {
             self.usage = TokenUsage {
                 input_tokens: usage.prompt_tokens,
                 output_tokens: usage.completion_tokens,
+                ..TokenUsage::default()
             };
         }
         for choice in chunk.choices {
@@ -398,51 +404,23 @@ impl ChatStreamState {
     }
 }
 
-fn take_sse_frame(buffer: &mut Vec<u8>) -> Option<Vec<u8>> {
-    let lf = buffer
-        .windows(2)
-        .position(|window| window == b"\n\n")
-        .map(|index| (index, 2));
-    let crlf = buffer
-        .windows(4)
-        .position(|window| window == b"\r\n\r\n")
-        .map(|index| (index, 4));
-    let (index, delimiter_len) = match (lf, crlf) {
-        (Some(left), Some(right)) => {
-            if left.0 <= right.0 {
-                left
-            } else {
-                right
-            }
-        }
-        (Some(found), None) | (None, Some(found)) => found,
-        (None, None) => return None,
-    };
-    let remaining = buffer.split_off(index.saturating_add(delimiter_len));
-    let mut frame = std::mem::replace(buffer, remaining);
-    frame.truncate(index);
-    Some(frame)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SseFrameStatus {
+    Continue,
+    Done,
 }
 
 async fn absorb_sse_frame(
     frame: &[u8],
     state: &mut ChatStreamState,
     events: &tokio::sync::mpsc::Sender<ProviderStreamEvent>,
-) -> anyhow::Result<()> {
-    let frame = std::str::from_utf8(frame).context("streaming response contained invalid UTF-8")?;
-    let mut data = String::new();
-    for line in frame.lines() {
-        let Some(fragment) = line.strip_prefix("data:") else {
-            continue;
-        };
-        if !data.is_empty() {
-            data.push('\n');
-        }
-        data.push_str(fragment.trim_start());
-    }
-    let data = data.trim();
-    if data.is_empty() || data == "[DONE]" {
-        return Ok(());
+) -> anyhow::Result<SseFrameStatus> {
+    let Some(event) = decode_event(frame)? else {
+        return Ok(SseFrameStatus::Continue);
+    };
+    let data = event.data.trim();
+    if data == "[DONE]" {
+        return Ok(SseFrameStatus::Done);
     }
     let chunk: ApiChatStreamChunk = serde_json::from_str(data).with_context(|| {
         format!(
@@ -450,7 +428,8 @@ async fn absorb_sse_frame(
             &data[..data.floor_char_boundary(500)]
         )
     })?;
-    state.absorb(chunk, events).await
+    state.absorb(chunk, events).await?;
+    Ok(SseFrameStatus::Continue)
 }
 
 #[derive(Debug, Serialize)]
@@ -918,6 +897,7 @@ impl ModelProvider for OpenAiCompatibleProvider {
             .map(|u| TokenUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
+                ..TokenUsage::default()
             })
             .unwrap_or_default();
 
@@ -1009,16 +989,49 @@ impl ModelProvider for OpenAiCompatibleProvider {
         let mut state = ChatStreamState::default();
         let mut buffer = Vec::new();
         let mut stream = response.bytes_stream();
+        let started = Instant::now();
+        let mut last_progress = started;
+        let mut received_bytes = 0;
+        debug!(provider = %self.name, model, "Model response stream opened");
         while let Some(chunk) = stream.next().await {
-            buffer.extend_from_slice(&chunk?);
-            while let Some(frame) = take_sse_frame(&mut buffer) {
-                absorb_sse_frame(&frame, &mut state, &events).await?;
+            let chunk = chunk?;
+            if received_bytes == 0 && !chunk.is_empty() {
+                debug!(provider = %self.name, model, "Received first model stream data");
+            }
+            received_bytes += chunk.len();
+            buffer.extend_from_slice(&chunk);
+            while let Some(frame) = take_frame(&mut buffer) {
+                if absorb_sse_frame(&frame, &mut state, &events).await? == SseFrameStatus::Done {
+                    debug!(
+                        provider = %self.name,
+                        model,
+                        elapsed_seconds = started.elapsed().as_secs(),
+                        received_bytes,
+                        "Model response stream received [DONE]"
+                    );
+                    return Ok(state.into_response());
+                }
+            }
+            if last_progress.elapsed() >= Duration::from_secs(30) {
+                debug!(
+                    provider = %self.name,
+                    model,
+                    elapsed_seconds = started.elapsed().as_secs(),
+                    received_bytes,
+                    text_bytes = state.text.len(),
+                    tool_call_count = state.tool_calls.len(),
+                    tool_argument_bytes = state.tool_calls.iter().map(|call| call.arguments.len()).sum::<usize>(),
+                    "Model response stream is receiving data"
+                );
+                last_progress = Instant::now();
             }
         }
-        if !buffer.iter().all(u8::is_ascii_whitespace) {
-            absorb_sse_frame(&buffer, &mut state, &events).await?;
+        if !buffer.iter().all(u8::is_ascii_whitespace)
+            && absorb_sse_frame(&buffer, &mut state, &events).await? == SseFrameStatus::Done
+        {
+            return Ok(state.into_response());
         }
-        Ok(state.into_response())
+        anyhow::bail!("{} response stream ended before [DONE]", self.name)
     }
 
     fn context_window(&self, model: &str) -> Option<usize> {
@@ -1930,6 +1943,51 @@ mod tests {
             events_rx.try_recv(),
             Ok(ProviderStreamEvent::TextDelta(delta)) if delta == "lo"
         ));
+    }
+
+    #[tokio::test]
+    async fn compatible_streaming_rejects_eof_before_done() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            read_raw_json_request(&mut stream).await;
+            let chunk = json!({"choices": [{"delta": {"tool_calls": [{
+                "index": 0,
+                "id": "call-1",
+                "function": {"name": "wait", "arguments": "{\"kind\":\"abili"}
+            }]}}]});
+            let body = format!("data: {chunk}\n\n");
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\n\r\n{body}",
+                body.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+        });
+        let provider = OpenAiCompatibleProvider::new_with_dialect(
+            "vllm",
+            &format!("http://{address}"),
+            Some("test-key"),
+            AuthStyle::Bearer,
+            ChatArtifactDialect::Vllm,
+        );
+        let messages = [ConversationMessage::user("Wait for the ability")];
+        let (events, _received) = tokio::sync::mpsc::channel(8);
+        let error = provider
+            .chat_stream(
+                ChatRequest {
+                    messages: &messages,
+                    tools: None,
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "test-model",
+                0.0,
+                events,
+            )
+            .await
+            .expect_err("an incomplete tool call must not become a successful response");
+        assert!(error.to_string().contains("ended before [DONE]"));
     }
 
     #[tokio::test]

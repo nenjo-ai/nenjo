@@ -25,7 +25,9 @@ mod openai_tools;
 pub mod openrouter;
 pub mod reliable;
 mod request_logging;
+pub mod responses;
 pub mod router;
+mod sse;
 pub mod traits;
 pub mod vllm;
 pub mod xai;
@@ -68,8 +70,11 @@ pub use ollama::OllamaProvider;
 pub use openai::OpenAiProvider;
 pub use openrouter::OpenRouterProvider;
 pub use reliable::ReliableProvider;
+pub use responses::{
+    ReasoningEffort, ResponseTermination, ResponseTerminationError, ResponsesOptions,
+};
 pub use router::RouterProvider;
-pub use vllm::{VLLM_DEFAULT_BASE_URL, VllmProvider, VllmStreaming};
+pub use vllm::{VLLM_DEFAULT_BASE_URL, VllmApi, VllmProvider, VllmStreaming};
 pub use xai::{XAI_DEFAULT_BASE_URL, XAiProvider};
 
 use std::sync::Arc;

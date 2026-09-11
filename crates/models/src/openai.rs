@@ -584,6 +584,7 @@ impl ModelProvider for OpenAiProvider {
             .map(|u| TokenUsage {
                 input_tokens: u.prompt_tokens,
                 output_tokens: u.completion_tokens,
+                ..TokenUsage::default()
             })
             .unwrap_or_default();
         let choice = native_response

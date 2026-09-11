@@ -51,6 +51,7 @@ impl ModelProvider for MockLlm {
             usage: TokenUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                ..TokenUsage::default()
             },
             finish_reason: nenjo_models::FinishReason::Stop,
         })
@@ -514,6 +515,7 @@ fn plain_response(text: &str) -> ChatResponse {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            ..TokenUsage::default()
         },
         finish_reason: nenjo_models::FinishReason::Stop,
     }
@@ -625,6 +627,7 @@ fn route_response(
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            ..TokenUsage::default()
         },
         finish_reason: nenjo_models::FinishReason::Stop,
     }
@@ -642,6 +645,7 @@ fn progress_tool_response(text: &str) -> ChatResponse {
         usage: TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            ..TokenUsage::default()
         },
         finish_reason: nenjo_models::FinishReason::Stop,
     }
@@ -1200,6 +1204,7 @@ async fn single_agent_step_retries_until_route_next_steps() {
             usage: TokenUsage {
                 input_tokens: 10,
                 output_tokens: 5,
+                ..TokenUsage::default()
             },
             finish_reason: nenjo_models::FinishReason::Stop,
         },
@@ -1294,6 +1299,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..TokenUsage::default()
                 },
             finish_reason: nenjo_models::FinishReason::Stop,
             },
@@ -1305,6 +1311,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..TokenUsage::default()
                 },
             finish_reason: nenjo_models::FinishReason::Stop,
             },
@@ -1315,6 +1322,7 @@ async fn agent_step_tool_progress_resets_route_next_steps_no_progress_counter() 
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..TokenUsage::default()
                 },
             finish_reason: nenjo_models::FinishReason::Stop,
             },
@@ -1800,6 +1808,7 @@ async fn agent_step_route_fail_verdict_terminates_routine() {
                 usage: TokenUsage {
                     input_tokens: 10,
                     output_tokens: 5,
+                    ..TokenUsage::default()
                 },
                 finish_reason: nenjo_models::FinishReason::Stop,
             },

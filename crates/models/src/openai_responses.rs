@@ -3,15 +3,21 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+mod content;
+pub(crate) mod diagnostics;
+pub(crate) mod stream;
+
 use crate::openai_chat::InstructionRolePolicy;
 use crate::{ChatRequest, ChatRole, ConversationMessage, TokenUsage, ToolCall, ToolSpec};
+pub(crate) use content::artifact_transport;
+use content::{ResponsesInputContent, artifact_content};
 
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(untagged)]
 pub(crate) enum ResponsesInputItem {
     Message {
         role: String,
-        content: String,
+        content: ResponsesInputContent,
     },
     FunctionCall {
         #[serde(rename = "type")]
@@ -24,7 +30,7 @@ pub(crate) enum ResponsesInputItem {
         #[serde(rename = "type")]
         kind: &'static str,
         call_id: String,
-        output: String,
+        output: ResponsesInputContent,
     },
 }
 
@@ -61,6 +67,16 @@ pub(crate) fn convert_input(
         )
     })?;
 
+    convert_input_with_artifacts(request, role_policy)
+}
+
+/// Project complete local history, resolving media only from verified ephemeral inputs.
+pub(crate) fn convert_input_with_artifacts(
+    request: &ChatRequest<'_>,
+    role_policy: InstructionRolePolicy,
+) -> anyhow::Result<Vec<ResponsesInputItem>> {
+    request.ensure_artifacts_prepared()?;
+
     let mut input = Vec::with_capacity(request.messages.len());
     for message in request.messages {
         match message {
@@ -68,7 +84,7 @@ pub(crate) fn convert_input(
                 if let Some(content) = text {
                     input.push(ResponsesInputItem::Message {
                         role: "assistant".to_string(),
-                        content: content.clone(),
+                        content: ResponsesInputContent::Text(content.clone()),
                     });
                 }
                 input.extend(
@@ -83,15 +99,22 @@ pub(crate) fn convert_input(
                 );
             }
             ConversationMessage::ToolResults(results) => {
-                input.extend(
-                    results
-                        .iter()
-                        .map(|result| ResponsesInputItem::FunctionCallOutput {
-                            kind: "function_call_output",
-                            call_id: result.tool_call_id.clone(),
-                            output: result.output.text_content(),
-                        }),
-                );
+                for result in results {
+                    input.push(ResponsesInputItem::FunctionCallOutput {
+                        kind: "function_call_output",
+                        call_id: result.tool_call_id.clone(),
+                        output: artifact_content(
+                            &result.output.text_content(),
+                            result.output.parts().iter().filter_map(|part| match part {
+                                crate::ToolOutputPart::Artifact(reference) => {
+                                    Some((reference, None))
+                                }
+                                crate::ToolOutputPart::Text(_) => None,
+                            }),
+                            request.prepared_artifacts,
+                        )?,
+                    });
+                }
             }
             ConversationMessage::Chat(message) => {
                 let role = match (role_policy, message.role) {
@@ -103,13 +126,22 @@ pub(crate) fn convert_input(
                 };
                 input.push(ResponsesInputItem::Message {
                     role: role.to_string(),
-                    content: message.content.clone(),
+                    content: artifact_content(
+                        &message.content,
+                        message.artifacts.iter().map(|input| {
+                            (
+                                input.artifact(),
+                                input.instruction().map(|value| value.as_str()),
+                            )
+                        }),
+                        request.prepared_artifacts,
+                    )?,
                 });
             }
             ConversationMessage::ArtifactAnalysis(analysis) => {
                 input.push(ResponsesInputItem::Message {
                     role: "user".to_string(),
-                    content: analysis.model_context(),
+                    content: ResponsesInputContent::Text(analysis.model_context()),
                 });
             }
             ConversationMessage::RuntimeContext(context) => {
@@ -119,7 +151,7 @@ pub(crate) fn convert_input(
                 };
                 input.push(ResponsesInputItem::Message {
                     role: role.to_string(),
-                    content: context.content().to_string(),
+                    content: ResponsesInputContent::Text(context.content().to_string()),
                 });
             }
         }
@@ -141,8 +173,7 @@ fn coalesce_adjacent_user_messages(input: &mut Vec<ResponsesInputItem>) {
                 }) = normalized.last_mut()
                     && previous_role == "user"
                 {
-                    previous_content.push_str("\n\n");
-                    previous_content.push_str(&content);
+                    previous_content.append(content);
                 } else {
                     normalized.push(ResponsesInputItem::Message { role, content });
                 }
@@ -215,27 +246,55 @@ pub(crate) struct ResponsesUsage {
     pub(crate) input_tokens: u64,
     #[serde(default, alias = "completion_tokens")]
     pub(crate) output_tokens: u64,
+    #[serde(default)]
+    input_tokens_details: Option<ResponsesInputTokensDetails>,
+    #[serde(default)]
+    output_tokens_details: Option<ResponsesOutputTokensDetails>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResponsesInputTokensDetails {
+    #[serde(default)]
+    cached_tokens: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+struct ResponsesOutputTokensDetails {
+    #[serde(default)]
+    reasoning_tokens: Option<u64>,
+}
+
+impl ResponsesUsage {
+    /// Preserve optional breakdowns without adding them to totals a second time.
+    pub(crate) fn token_usage(&self) -> TokenUsage {
+        TokenUsage {
+            input_tokens: self.input_tokens,
+            output_tokens: self.output_tokens,
+            cached_input_tokens: self
+                .input_tokens_details
+                .as_ref()
+                .and_then(|v| v.cached_tokens),
+            reasoning_tokens: self
+                .output_tokens_details
+                .as_ref()
+                .and_then(|v| v.reasoning_tokens),
+        }
+    }
 }
 
 pub(crate) fn response_text(response: &ResponsesResponse) -> Option<String> {
     if let Some(text) = nonempty(response.output_text.as_deref()) {
         return Some(text);
     }
-    for output in &response.output {
-        for content in &output.content {
-            if content.kind.as_deref() == Some("output_text")
-                && let Some(text) = nonempty(content.text.as_deref())
-            {
-                return Some(text);
-            }
-        }
-    }
-    response.output.iter().find_map(|output| {
-        output
-            .content
-            .iter()
-            .find_map(|content| nonempty(content.text.as_deref()))
-    })
+    let text: String = response
+        .output
+        .iter()
+        .filter(|output| output.kind.as_deref().is_none_or(|kind| kind == "message"))
+        .flat_map(|output| &output.content)
+        .filter(|content| matches!(content.kind.as_deref(), Some("output_text" | "message")))
+        .filter_map(|content| content.text.as_deref())
+        .collect();
+    (!text.is_empty()).then_some(text)
 }
 
 pub(crate) fn response_tool_calls(response: &ResponsesResponse) -> Vec<ToolCall> {
@@ -267,10 +326,7 @@ pub(crate) fn response_usage(response: &ResponsesResponse) -> TokenUsage {
     response
         .usage
         .as_ref()
-        .map(|usage| TokenUsage {
-            input_tokens: usage.input_tokens,
-            output_tokens: usage.output_tokens,
-        })
+        .map(ResponsesUsage::token_usage)
         .unwrap_or_default()
 }
 

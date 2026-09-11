@@ -205,7 +205,10 @@ impl ModelProvider for ReliableProvider {
                             return Ok(resp);
                         }
                         Err(e) => {
-                            if e.downcast_ref::<ProviderAdmissionError>().is_some() {
+                            if e.downcast_ref::<ProviderAdmissionError>().is_some()
+                                || e.downcast_ref::<crate::ResponseTerminationError>()
+                                    .is_some()
+                            {
                                 return Err(e);
                             }
                             let non_retryable = is_non_retryable(&e);
@@ -331,7 +334,10 @@ impl ModelProvider for ReliableProvider {
                             return Ok(resp);
                         }
                         Err(e) => {
-                            if e.downcast_ref::<ProviderAdmissionError>().is_some() {
+                            if e.downcast_ref::<ProviderAdmissionError>().is_some()
+                                || e.downcast_ref::<crate::ResponseTerminationError>()
+                                    .is_some()
+                            {
                                 return Err(e);
                             }
                             let non_retryable = is_non_retryable(&e);
@@ -621,6 +627,94 @@ mod tests {
         fail_until_attempt: usize,
         response: &'static str,
         error: &'static str,
+    }
+
+    struct TerminalProvider {
+        calls: Arc<AtomicUsize>,
+        reason: crate::ResponseTermination,
+    }
+
+    #[async_trait::async_trait]
+    impl ModelProvider for TerminalProvider {
+        async fn chat(
+            &self,
+            _request: ChatRequest<'_>,
+            _model: &str,
+            _temperature: f64,
+        ) -> anyhow::Result<ChatResponse> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Err(crate::ResponseTerminationError {
+                reason: self.reason,
+                response_id: Some("resp-terminal".into()),
+                usage: TokenUsage {
+                    output_tokens: 12,
+                    ..Default::default()
+                },
+                message: "generation stopped".into(),
+            }
+            .into())
+        }
+    }
+
+    #[tokio::test]
+    async fn terminal_generation_errors_never_retry_or_fall_back_even_without_deltas() {
+        for streaming in [false, true] {
+            for reason in [
+                crate::ResponseTermination::OutputLimit,
+                crate::ResponseTermination::ContentFilter,
+                crate::ResponseTermination::Cancelled,
+                crate::ResponseTermination::Failed,
+                crate::ResponseTermination::Incomplete,
+            ] {
+                let calls = Arc::new(AtomicUsize::new(0));
+                let fallback_calls = Arc::new(AtomicUsize::new(0));
+                let provider = ReliableProvider::new(
+                    vec![
+                        (
+                            "primary".into(),
+                            Box::new(TerminalProvider {
+                                calls: calls.clone(),
+                                reason,
+                            }),
+                        ),
+                        (
+                            "fallback".into(),
+                            Box::new(MockProvider {
+                                calls: fallback_calls.clone(),
+                                fail_until_attempt: 0,
+                                response: "unexpected",
+                                error: "unused",
+                            }),
+                        ),
+                    ],
+                    3,
+                    1,
+                )
+                .with_model_fallbacks(HashMap::from([("test".into(), vec!["other-model".into()])]));
+                let messages = [ConversationMessage::user("hello")];
+                let request = ChatRequest {
+                    messages: &messages,
+                    tools: None,
+                    native_tools: None,
+                    prepared_artifacts: None,
+                };
+                let result = if streaming {
+                    let (tx, _rx) = tokio::sync::mpsc::channel(8);
+                    provider.chat_stream(request, "test", 0.0, tx).await
+                } else {
+                    provider.chat(request, "test", 0.0).await
+                };
+                let error = result
+                    .unwrap_err()
+                    .downcast::<crate::ResponseTerminationError>()
+                    .unwrap();
+                assert_eq!(error.reason, reason);
+                assert_eq!(error.response_id.as_deref(), Some("resp-terminal"));
+                assert_eq!(error.usage.output_tokens, 12);
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+                assert_eq!(fallback_calls.load(Ordering::SeqCst), 0);
+            }
+        }
     }
 
     #[async_trait]

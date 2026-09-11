@@ -10,7 +10,7 @@ use reqwest::Client;
 use reqwest::multipart::{Form, Part};
 use serde::{Deserialize, Serialize};
 use serde_json::{Map, Value, json};
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 
 use crate::audio_data_uri::decode_base64_data_uri;
 use crate::compatible::{AuthStyle, OpenAiCompatibleProvider};
@@ -27,6 +27,7 @@ use crate::openai_responses::{
     ResponsesInputItem, ResponsesOutput, ResponsesResponse, ResponsesTool, convert_input,
     convert_local_tools, response_text, response_tool_calls, response_usage,
 };
+use crate::sse::{decode_event, take_frame};
 use crate::traits::{
     ChatRequest, ChatResponse, ModelProvider, ProviderStreamEvent, ProviderToolTrace,
 };
@@ -698,20 +699,15 @@ fn responses_provider_tool_traces(response: &ResponsesResponse) -> Vec<ProviderT
 
 #[derive(Default)]
 struct ResponsesStreamState {
-    text: String,
-    output: HashMap<String, ResponsesOutput>,
     final_response: Option<ResponsesResponse>,
     started_provider_tools: HashSet<String>,
     completed_provider_tools: HashSet<String>,
 }
 
 impl ResponsesStreamState {
-    fn into_response(self) -> ResponsesResponse {
-        self.final_response.unwrap_or_else(|| ResponsesResponse {
-            output: self.output.into_values().collect(),
-            output_text: (!self.text.is_empty()).then_some(self.text),
-            usage: None,
-        })
+    fn into_response(self) -> anyhow::Result<ResponsesResponse> {
+        self.final_response
+            .context("xAI Responses stream ended before response.completed")
     }
 }
 
@@ -727,15 +723,23 @@ fn stream_text_delta(value: &Value) -> Option<&str> {
     None
 }
 
-fn stream_response(value: &Value) -> Option<ResponsesResponse> {
+fn stream_response(value: &Value) -> anyhow::Result<Option<ResponsesResponse>> {
     let kind = stream_event_type(value).unwrap_or_default();
-    if !(kind.ends_with(".completed") || kind == "response.completed") {
-        return None;
+    if kind != "response.completed" {
+        return Ok(None);
     }
-    value
+    let response = value
         .get("response")
         .cloned()
-        .and_then(|response| serde_json::from_value(response).ok())
+        .context("xAI response.completed event omitted its response")?;
+    if let Some(status) = response.get("status").and_then(Value::as_str)
+        && status != "completed"
+    {
+        anyhow::bail!("xAI response.completed contained response status {status}");
+    }
+    Ok(Some(
+        serde_json::from_value(response).context("invalid xAI completed response")?,
+    ))
 }
 
 fn stream_output_item(value: &Value) -> Option<ResponsesOutput> {
@@ -841,15 +845,27 @@ async fn handle_responses_stream_value(
     state: &mut ResponsesStreamState,
     events: &tokio::sync::mpsc::Sender<ProviderStreamEvent>,
 ) -> anyhow::Result<()> {
+    if let Some(
+        kind @ ("response.failed" | "response.incomplete" | "response.cancelled" | "error"),
+    ) = stream_event_type(&value)
+    {
+        let message = value
+            .pointer("/response/error/message")
+            .or_else(|| value.pointer("/response/incomplete_details/reason"))
+            .or_else(|| value.pointer("/error/message"))
+            .or_else(|| value.get("message"))
+            .and_then(Value::as_str)
+            .unwrap_or("generation did not complete");
+        anyhow::bail!("xAI Responses stream {kind}: {message}");
+    }
     if let Some(delta) = stream_text_delta(&value)
         && !delta.is_empty()
     {
-        state.text.push_str(delta);
         send_provider_stream_event(events, ProviderStreamEvent::TextDelta(delta.to_string()))
             .await?;
     }
 
-    if let Some(response) = stream_response(&value) {
+    if let Some(response) = stream_response(&value)? {
         state.final_response = Some(response);
     }
 
@@ -857,7 +873,6 @@ async fn handle_responses_stream_value(
         && let Some(trace) = provider_tool_trace_from_responses_output(&output)
     {
         let phase = stream_tool_phase(&value, &output);
-        state.output.insert(trace.id.clone(), output);
         match phase {
             Some("started") => {
                 if state.started_provider_tools.insert(trace.id.clone()) {
@@ -920,6 +935,42 @@ async fn handle_responses_stream_value(
         }
     }
     Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ResponsesStreamStatus {
+    Continue,
+    Complete,
+}
+
+async fn absorb_responses_frame(
+    frame: &[u8],
+    state: &mut ResponsesStreamState,
+    events: &tokio::sync::mpsc::Sender<ProviderStreamEvent>,
+) -> anyhow::Result<ResponsesStreamStatus> {
+    let Some(event) = decode_event(frame)? else {
+        return Ok(ResponsesStreamStatus::Continue);
+    };
+    if event.data.trim() == "[DONE]" {
+        state
+            .final_response
+            .as_ref()
+            .context("xAI Responses stream received [DONE] before response.completed")?;
+        return Ok(ResponsesStreamStatus::Complete);
+    }
+    let mut value: Value =
+        serde_json::from_str(&event.data).context("invalid xAI Responses stream event JSON")?;
+    if value.get("type").is_none()
+        && let (Some(name), Some(object)) = (event.name, value.as_object_mut())
+    {
+        object.insert("type".into(), Value::String(name));
+    }
+    handle_responses_stream_value(value, state, events).await?;
+    Ok(if state.final_response.is_some() {
+        ResponsesStreamStatus::Complete
+    } else {
+        ResponsesStreamStatus::Continue
+    })
 }
 
 impl XAiProvider {
@@ -1058,50 +1109,25 @@ impl XAiProvider {
 
         let mut state = ResponsesStreamState::default();
         let mut stream = response.bytes_stream();
-        let mut buffer = String::new();
+        let mut buffer = Vec::new();
 
-        while let Some(chunk) = stream.next().await {
+        'response: while let Some(chunk) = stream.next().await {
             let chunk = chunk?;
-            buffer.push_str(&String::from_utf8_lossy(&chunk));
-            if buffer.contains("\r\n") {
-                buffer = buffer.replace("\r\n", "\n");
-            }
-
-            while let Some(split_at) = buffer.find("\n\n") {
-                let frame = buffer[..split_at].to_string();
-                buffer = buffer[split_at + 2..].to_string();
-
-                for line in frame.lines() {
-                    let Some(data) = line.strip_prefix("data:") else {
-                        continue;
-                    };
-                    let data = data.trim();
-                    if data.is_empty() || data == "[DONE]" {
-                        continue;
-                    }
-                    if let Ok(value) = serde_json::from_str::<Value>(data) {
-                        handle_responses_stream_value(value, &mut state, &events).await?;
-                    }
+            buffer.extend_from_slice(&chunk);
+            while let Some(frame) = take_frame(&mut buffer) {
+                if absorb_responses_frame(&frame, &mut state, &events).await?
+                    == ResponsesStreamStatus::Complete
+                {
+                    break 'response;
                 }
             }
         }
 
-        if !buffer.trim().is_empty() {
-            for line in buffer.lines() {
-                let Some(data) = line.strip_prefix("data:") else {
-                    continue;
-                };
-                let data = data.trim();
-                if data.is_empty() || data == "[DONE]" {
-                    continue;
-                }
-                if let Ok(value) = serde_json::from_str::<Value>(data) {
-                    handle_responses_stream_value(value, &mut state, &events).await?;
-                }
-            }
+        if state.final_response.is_none() && !buffer.iter().all(u8::is_ascii_whitespace) {
+            absorb_responses_frame(&buffer, &mut state, &events).await?;
         }
 
-        let response = state.into_response();
+        let response = state.into_response()?;
         let usage = response_usage(&response);
         let text = response_text(&response);
         let tool_calls = response_tool_calls(&response);
@@ -1670,9 +1696,194 @@ impl MediaCapabilitiesProvider for XAiProvider {
 
 #[cfg(test)]
 mod tests {
+    use std::time::Duration;
+
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
     use super::*;
     use crate::test_support::{assert_serialized_equal, assert_serialized_prefix};
     use crate::{ConversationMessage, ToolCall, ToolOutput, ToolResultMessage, ToolSpec};
+
+    async fn serve_responses_stream(frames: &str) -> (String, tokio::sync::oneshot::Sender<()>) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let frames = frames.to_string();
+        let (close_body, body_closed) = tokio::sync::oneshot::channel();
+        tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            loop {
+                let mut chunk = [0_u8; 4096];
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert!(read > 0);
+                request.extend_from_slice(&chunk[..read]);
+                if let Some(index) = request.windows(4).position(|part| part == b"\r\n\r\n") {
+                    let header_end = index + 4;
+                    let headers = std::str::from_utf8(&request[..header_end]).unwrap();
+                    assert!(headers.starts_with("POST /responses "));
+                    let content_length = headers
+                        .lines()
+                        .find_map(|line| {
+                            let (name, value) = line.split_once(':')?;
+                            name.eq_ignore_ascii_case("content-length")
+                                .then(|| value.trim().parse::<usize>().unwrap())
+                        })
+                        .unwrap();
+                    if request.len() >= header_end + content_length {
+                        let body: Value = serde_json::from_slice(
+                            &request[header_end..header_end + content_length],
+                        )
+                        .unwrap();
+                        assert_eq!(body["stream"], true);
+                        break;
+                    }
+                }
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n{:x}\r\n{frames}\r\n",
+                frames.len()
+            );
+            stream.write_all(response.as_bytes()).await.unwrap();
+            let _ = body_closed.await;
+            let _ = stream.write_all(b"0\r\n\r\n").await;
+        });
+        (format!("http://{address}"), close_body)
+    }
+
+    #[tokio::test]
+    async fn responses_completed_finishes_before_http_body_closes_and_preserves_final_usage() {
+        let frames = concat!(
+            "data: {\"type\":\"response.web_search_call.completed\",\"item_id\":\"search-1\"}\r\n\r\n",
+            "data: {\"type\":\"response.output_text.delta\",\"delta\":\"caf\u{e9}\"}\r\n\r\n",
+            "data: {\"type\":\"response.output_text.done\",\"text\":\"caf\u{e9}\"}\r\n\r\n",
+            "data: {\"type\":\"response.completed\",\"response\":{\"status\":\"completed\",\"output_text\":\"caf\u{e9}\",\"usage\":{\"input_tokens\":7,\"output_tokens\":3}}}\r\n\r\n"
+        );
+        let (base_url, close_body) = serve_responses_stream(frames).await;
+        let provider = XAiProvider::with_base_url(Some("test-key"), &base_url);
+        let messages = [ConversationMessage::user("Find a cafe")];
+        let native_tools = [NativeModelToolId::from("web_search")];
+        let (events, mut received) = tokio::sync::mpsc::channel(8);
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            provider.chat_stream(
+                ChatRequest {
+                    messages: &messages,
+                    tools: None,
+                    native_tools: Some(&native_tools),
+                    prepared_artifacts: None,
+                },
+                "grok",
+                0.0,
+                events,
+            ),
+        )
+        .await
+        .expect("response.completed must finish without HTTP EOF")
+        .unwrap();
+        let _ = close_body.send(());
+        assert_eq!(response.text.as_deref(), Some("caf\u{e9}"));
+        assert_eq!(response.usage.input_tokens, 7);
+        assert_eq!(response.usage.output_tokens, 3);
+        let deltas: Vec<_> = std::iter::from_fn(|| received.try_recv().ok())
+            .filter_map(|event| {
+                if let ProviderStreamEvent::TextDelta(text) = event {
+                    Some(text)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(deltas, ["caf\u{e9}"]);
+    }
+
+    #[tokio::test]
+    async fn responses_terminal_errors_are_not_successful_partial_responses() {
+        for kind in [
+            "response.failed",
+            "response.incomplete",
+            "response.cancelled",
+            "error",
+        ] {
+            let mut state = ResponsesStreamState::default();
+            let (events, _received) = tokio::sync::mpsc::channel(8);
+            let result = handle_responses_stream_value(
+                json!({"type": kind, "message": "generation failed", "response": {"error": {"message": "generation failed"}}}),
+                &mut state, &events,
+            ).await;
+            assert!(
+                result.is_err(),
+                "accepted {kind} as a successful stream event"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn responses_failed_or_truncated_http_streams_return_errors() {
+        let cases = [
+            (
+                "event: error\ndata: {\"message\":\"generation failed\"}\n\n",
+                false,
+                "generation failed",
+            ),
+            (
+                "data: {\"type\":\"response.output_text.delta\",\"delta\":\"partial\"}\n\n",
+                true,
+                "ended before response.completed",
+            ),
+            (
+                "data: [DONE]\n\n",
+                false,
+                "received [DONE] before response.completed",
+            ),
+            (
+                "data: {\"type\":\"response.completed\"}\n\n",
+                false,
+                "omitted its response",
+            ),
+            (
+                "data: {invalid json}\n\n",
+                false,
+                "invalid xAI Responses stream event JSON",
+            ),
+        ];
+        for (frames, close_before_read, expected_error) in cases {
+            let (base_url, close_body) = serve_responses_stream(frames).await;
+            let provider = XAiProvider::with_base_url(Some("test-key"), &base_url);
+            let messages = [ConversationMessage::user("Find a cafe")];
+            let native_tools = [NativeModelToolId::from("web_search")];
+            let (events, _received) = tokio::sync::mpsc::channel(8);
+            let close_body = if close_before_read {
+                let _ = close_body.send(());
+                None
+            } else {
+                Some(close_body)
+            };
+            let error = tokio::time::timeout(
+                Duration::from_secs(1),
+                provider.chat_stream(
+                    ChatRequest {
+                        messages: &messages,
+                        tools: None,
+                        native_tools: Some(&native_tools),
+                        prepared_artifacts: None,
+                    },
+                    "grok",
+                    0.0,
+                    events,
+                ),
+            )
+            .await
+            .expect("failed streams must not wait for HTTP EOF")
+            .unwrap_err();
+            if let Some(close_body) = close_body {
+                let _ = close_body.send(());
+            }
+            assert!(
+                error.to_string().contains(expected_error),
+                "expected {expected_error}, got {error}"
+            );
+        }
+    }
 
     #[test]
     fn xai_native_responses_prefix_tools_and_streaming_projection_are_byte_stable() {
