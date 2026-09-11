@@ -1,4 +1,5 @@
 //! AgentRunner — executes agent tasks through the turn loop.
+use crate::concurrency::ExecutionContext;
 pub mod chat;
 pub(crate) mod compaction;
 mod tool_calls;
@@ -677,7 +678,35 @@ impl<P: ProviderRuntime> AgentRunner<P> {
 
         let cancel = inst.runtime.execution_cancel.clone();
         let timezone = run.execution.timezone;
-        let join = tokio::spawn(async move {
+        let inherited = ExecutionContext::current();
+        let root_pool = if inherited.is_none() {
+            inst.runtime
+                .provider_runtime
+                .as_ref()
+                .and_then(ProviderRuntime::root_admission)
+        } else {
+            None
+        };
+        let context = inherited.unwrap_or_else(|| {
+            ExecutionContext::root(
+                inst.runtime.config.max_active_descendants.max(1),
+                inst.runtime.config.max_active_nested_runs.max(1),
+                inst.runtime.config.max_pending_nested_runs,
+                std::time::Duration::from_secs(
+                    inst.runtime.config.nested_queue_timeout_secs.max(1),
+                ),
+            )
+        });
+        let context = context.with_events(events_tx.clone());
+        let join = tokio::spawn(crate::concurrency::in_scope(Some(context), async move {
+            let _root_permit = if let Some(pool) = root_pool {
+                Some(tokio::select! {
+                    _ = inst.runtime.execution_cancel.cancelled() => anyhow::bail!("execution cancelled while queued"),
+                    permit = pool.acquire() => permit?,
+                })
+            } else {
+                None
+            };
             let completion = turn_loop::TurnCompletion::Natural;
             let mut output = turn_loop::scope_current_execution_timezone(
                 timezone,
@@ -694,7 +723,7 @@ impl<P: ProviderRuntime> AgentRunner<P> {
             .await?;
             output.task_id = task_id;
             Ok(output)
-        });
+        }));
 
         Ok(ExecutionHandle {
             events_rx,

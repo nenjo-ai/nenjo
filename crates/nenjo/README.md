@@ -51,3 +51,18 @@ let output = handle.output().await?;
 ## License
 
 Licensed under the Apache License, Version 2.0. See [LICENSE](../../LICENSE) for details.
+
+## Execution admission
+
+`ProviderBuilder::with_root_admission(AdmissionPool)` shares a bounded root
+execution gate across chats and tasks. SDK callers can opt in; workers configure
+this through `[execution]`. `AgentConfig` controls runnable immediate children,
+a shared root-tree descendant budget, pending children, and admission deadlines.
+Nested work inherits its root identity across abilities, delegation, and spawned
+agents. Harness wait controls hold no runnable descendant permit.
+
+`nenjo::concurrency::AdmissionPool` provides cancellation-safe bounded queues,
+queue deadlines, round-robin service among root executions, and RAII capacity
+permits. Worker model transports, PDF rendering, and shell execution use this
+primitive. `ResourceCapacityWaiting` and `ResourceCapacityAcquired` turn events
+make scheduling waits observable without treating them as model failures.

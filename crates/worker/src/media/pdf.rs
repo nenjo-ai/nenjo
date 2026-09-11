@@ -1,8 +1,10 @@
 //! Deterministic, bounded local PDF derivation for providers without native PDF input.
 
+use nenjo::concurrency::{AdmissionError, AdmissionPool};
 use std::num::NonZeroUsize;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use hayro::hayro_interpret::InterpreterSettings;
 use hayro::hayro_syntax::Pdf;
@@ -63,6 +65,7 @@ pub struct PdfDocumentDerivatives {
 pub struct PdfDerivativeCache {
     entries: dashmap::DashMap<String, Arc<PdfDerivativeCacheEntry>>,
     access_clock: AtomicU64,
+    render_pool: OnceLock<AdmissionPool>,
 }
 
 #[derive(Debug)]
@@ -105,7 +108,12 @@ impl PdfDerivativeCache {
         entry.last_access.store(access, Ordering::Relaxed);
         let derivatives = match entry
             .derivatives
-            .get_or_try_init(|| async { derive_pdf(bytes, config).await.map(Arc::new) })
+            .get_or_try_init(|| async {
+                let pool = self.render_pool.get_or_init(|| render_pool(config));
+                derive_pdf_with_pool(bytes, config, pool)
+                    .await
+                    .map(Arc::new)
+            })
             .await
         {
             Ok(derivatives) => derivatives,
@@ -196,6 +204,8 @@ impl PdfDocumentDerivatives {
 /// A local PDF cannot safely be converted into bounded model-facing derivatives.
 #[derive(Debug, thiserror::Error)]
 pub enum PdfDerivationError {
+    #[error(transparent)]
+    Admission(#[from] AdmissionError),
     #[error("PDF input has {actual} bytes; maximum is {maximum} bytes")]
     InputTooLarge { actual: u64, maximum: u64 },
     #[error("PDF is encrypted or password-protected")]
@@ -231,6 +241,23 @@ pub async fn derive_pdf(
     bytes: Arc<[u8]>,
     config: &PdfConfig,
 ) -> Result<PdfDocumentDerivatives, PdfDerivationError> {
+    derive_pdf_with_pool(bytes, config, &render_pool(config)).await
+}
+
+fn render_pool(config: &PdfConfig) -> AdmissionPool {
+    AdmissionPool::new(
+        "PDF rendering",
+        config.render_concurrency,
+        config.render_max_queued,
+        Duration::from_secs(config.render_queue_timeout_secs),
+    )
+}
+
+async fn derive_pdf_with_pool(
+    bytes: Arc<[u8]>,
+    config: &PdfConfig,
+    pool: &AdmissionPool,
+) -> Result<PdfDocumentDerivatives, PdfDerivationError> {
     let byte_len = u64::try_from(bytes.len()).unwrap_or(u64::MAX);
     if byte_len > MAX_PDF_INPUT_BYTES {
         return Err(PdfDerivationError::InputTooLarge {
@@ -252,7 +279,7 @@ pub async fn derive_pdf(
 
     let text_bytes = Arc::clone(&bytes);
     let text_task = tokio::task::spawn_blocking(move || extract_page_text(&text_bytes, page_count));
-    let rendered_pages = render_all_pages(bytes, page_count, config).await;
+    let rendered_pages = render_all_pages(bytes, page_count, config, pool).await;
     let text_pages = text_task.await.map_err(render_join_error)?;
 
     Ok(PdfDocumentDerivatives {
@@ -305,6 +332,7 @@ async fn render_all_pages(
     bytes: Arc<[u8]>,
     page_count: usize,
     config: &PdfConfig,
+    pool: &AdmissionPool,
 ) -> Result<Vec<RenderedPdfPage>, PdfDerivationError> {
     let worker_count = config.render_concurrency.min(page_count);
     let pixels = Arc::new(AtomicU64::new(0));
@@ -319,7 +347,10 @@ async fn render_all_pages(
         let task_pixels = Arc::clone(&pixels);
         let task_rendered_bytes = Arc::clone(&rendered_bytes);
         let task_config = config.clone();
+        let permit = pool.acquire().await?;
         tasks.push(tokio::task::spawn_blocking(move || {
+            // Blocking work outlives an aborted caller; retain capacity until it actually stops.
+            let _permit = permit;
             render_page_partition(
                 task_bytes.as_ref(),
                 &page_indexes,
@@ -582,6 +613,36 @@ mod tests {
                 maximum: 2
             }
         ));
+    }
+
+    #[tokio::test]
+    async fn separate_documents_use_the_same_render_pool() {
+        let cache = PdfDerivativeCache::default();
+        let config = PdfConfig {
+            render_concurrency: 1,
+            render_max_queued: 0,
+            ..compact_config()
+        };
+        let pool = render_pool(&config);
+        cache.render_pool.set(pool.clone()).unwrap();
+        let held = pool.acquire().await.unwrap();
+        for label in ["first document", "second document"] {
+            let bytes = test_pdf(1, Some(label));
+            let error = cache
+                .get_or_derive(&reference(&bytes), bytes, &config)
+                .await
+                .unwrap_err();
+            assert!(matches!(
+                error,
+                PdfDerivationError::Admission(AdmissionError::QueueFull { .. })
+            ));
+        }
+        drop(held);
+        let bytes = test_pdf(1, Some("recovered"));
+        cache
+            .get_or_derive(&reference(&bytes), bytes, &config)
+            .await
+            .unwrap();
     }
 
     #[tokio::test]

@@ -374,9 +374,10 @@ impl<P: ProviderRuntime> AgentBuilder<P> {
         let provider_runtime = self.provider_runtime.clone();
 
         let execution_cancel = tokio_util::sync::CancellationToken::new();
-        let async_ops = AsyncOpManager::with_cancel_and_nested_limit(
+        let async_ops = AsyncOpManager::with_cancel_and_nested_queue(
             execution_cancel.clone(),
             self.agent_config.max_active_nested_runs,
+            self.agent_config.max_pending_nested_runs,
         );
         let instance = AgentInstance {
             manifest: agent,

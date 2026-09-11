@@ -923,6 +923,12 @@ async fn handle_responses_stream_value(
 }
 
 impl XAiProvider {
+    /// Replace the HTTP client to customize timeouts, proxies, or connection settings.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     pub fn new(api_key: Option<&str>) -> Self {
         Self::with_base_url(api_key, XAI_DEFAULT_BASE_URL)
     }

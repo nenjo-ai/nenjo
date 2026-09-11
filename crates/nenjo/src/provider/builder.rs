@@ -54,6 +54,7 @@ pub struct ProviderBuilder<
     tool_factory: ToolFactoryImpl,
     memory: Option<Mem>,
     agent_config: AgentConfig,
+    root_admission: Option<crate::concurrency::AdmissionPool>,
     routine_execution_config: RoutineExecutionConfig,
     render_ctx_extra: RenderContextVars,
     argument_bindings: Vec<ResolvedArgumentBinding>,
@@ -118,6 +119,7 @@ impl ProviderBuilder<(), MissingModelProviderFactory, NoopToolFactory, NoMemory>
             tool_factory: NoopToolFactory,
             memory: None,
             agent_config: AgentConfig::default(),
+            root_admission: None,
             routine_execution_config: RoutineExecutionConfig::default(),
             render_ctx_extra: RenderContextVars::default(),
             argument_bindings: Vec::new(),
@@ -165,6 +167,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: self.tool_factory,
             memory: self.memory,
             agent_config: self.agent_config,
+            root_admission: self.root_admission,
             routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
@@ -192,6 +195,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: self.tool_factory,
             memory: self.memory,
             agent_config: self.agent_config,
+            root_admission: self.root_admission,
             routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
@@ -218,6 +222,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: factory,
             memory: self.memory,
             agent_config: self.agent_config,
+            root_admission: self.root_admission,
             routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
@@ -245,6 +250,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: self.tool_factory,
             memory: Some(memory),
             agent_config: self.agent_config,
+            root_admission: self.root_admission,
             routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
@@ -254,10 +260,13 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
         }
     }
 
-    /// Set the agent configuration applied to all agents.
-    ///
-    /// Controls turn loop behavior: max iterations, parallel tools,
-    /// context token budget, etc. Defaults to [`AgentConfig::default()`].
+    /// Share a bounded admission pool across root chats and tasks; descendants bypass it.
+    pub fn with_root_admission(mut self, pool: crate::concurrency::AdmissionPool) -> Self {
+        self.root_admission = Some(pool);
+        self
+    }
+
+    /// Set agent execution and fan-out limits.
     pub fn with_agent_config(mut self, config: AgentConfig) -> Self {
         self.agent_config = config;
         self
@@ -328,6 +337,7 @@ impl<Loaders, ModelFactory, ToolFactoryImpl, Mem, ArtifactPreparer>
             tool_factory: self.tool_factory,
             memory: self.memory,
             agent_config: self.agent_config,
+            root_admission: self.root_admission,
             routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra,
             argument_bindings: self.argument_bindings,
@@ -408,6 +418,7 @@ where
                 tool_factory: Arc::new(self.tool_factory),
                 memory: self.memory.map(Arc::new),
                 agent_config: self.agent_config,
+                root_admission: self.root_admission,
                 routine_execution_config: self.routine_execution_config,
                 render_ctx_extra,
                 argument_bindings: self.argument_bindings,
@@ -452,6 +463,7 @@ where
                     .memory
                     .map(|memory| Arc::new(memory) as Arc<dyn Memory>),
                 agent_config: self.agent_config,
+                root_admission: self.root_admission,
                 routine_execution_config: self.routine_execution_config,
                 render_ctx_extra,
                 argument_bindings: self.argument_bindings,

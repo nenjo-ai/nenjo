@@ -98,3 +98,6 @@ pub use nenjo_xml as xml;
 
 // Re-export routine types.
 pub use routines::{RoutineEvent, RoutineExecutionHandle, RoutineInput, StepResult};
+
+/// Resource admission and execution-tree scheduling.
+pub mod concurrency;

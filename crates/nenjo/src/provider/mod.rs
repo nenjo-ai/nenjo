@@ -629,6 +629,7 @@ pub(crate) struct ProviderServices<
     pub(crate) tool_factory: Arc<ToolFactoryImpl>,
     pub(crate) memory: Option<Arc<Mem>>,
     pub(crate) agent_config: AgentConfig,
+    pub(crate) root_admission: Option<crate::concurrency::AdmissionPool>,
     pub(crate) routine_execution_config: RoutineExecutionConfig,
     pub(crate) render_ctx_extra: RenderContextVars,
     pub(crate) argument_bindings: Vec<ResolvedArgumentBinding>,
@@ -645,6 +646,7 @@ impl<ModelFactory: ?Sized, ToolFactoryImpl: ?Sized, Mem: ?Sized, ArtifactPrepare
             tool_factory: self.tool_factory.clone(),
             memory: self.memory.clone(),
             agent_config: self.agent_config.clone(),
+            root_admission: self.root_admission.clone(),
             routine_execution_config: self.routine_execution_config,
             render_ctx_extra: self.render_ctx_extra.clone(),
             argument_bindings: self.argument_bindings.clone(),
@@ -1069,6 +1071,10 @@ where
 
     fn with_argument_bindings(&self, bindings: Vec<ResolvedArgumentBinding>) -> Self {
         Provider::with_argument_bindings(self, bindings)
+    }
+
+    fn root_admission(&self) -> Option<crate::concurrency::AdmissionPool> {
+        self.inner.services.root_admission.clone()
     }
 
     fn tool_factory(&self) -> &Self::ToolFactory<'_> {

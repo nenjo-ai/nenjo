@@ -215,31 +215,149 @@ streaming = true
 A host-only vLLM base URL is normalized to the standard `/v1` API root. An
 explicit path is preserved for deployments mounted below a custom API prefix.
 
-### Model concurrency and nested runs
+### Concurrency, queues, and provider timeouts
 
-All physical model requests share one worker-wide admission gate, including
-chat, task, ability, delegated-agent, retry, and media-analysis calls. This is
-intentionally below the task inbox so nested work cannot bypass it:
+Provider capacity, root executions, descendant work, and expensive tools have
+separate budgets. Configure them in `~/.nenjo/config.toml` and restart the worker.
+This example assigns independent limits to a local server and OpenAI:
 
 ```toml
 [model_runtime]
-max_concurrent_requests = 3
+# Defaults for providers without an explicit pool binding.
+max_concurrent_requests = 6
+max_queued_requests = 64
+queue_timeout_secs = 300
+
+[model_runtime.pools.local_vllm]
+max_concurrent_requests = 1
+max_queued_requests = 32
+queue_timeout_secs = 300
+request_timeout_secs = 0
+read_timeout_secs = 600
+connect_timeout_secs = 10
+
+[model_runtime.pools.openai]
+max_concurrent_requests = 10
+max_queued_requests = 64
+queue_timeout_secs = 120
+
+[[model_runtime.bindings]]
+provider = "vllm"
+pool = "local_vllm"
+
+[[model_runtime.bindings]]
+provider = "openai-compatible:local"
+pool = "local_vllm"
+
+[[model_runtime.bindings]]
+provider = "openai"
+pool = "openai"
+
+[execution]
+max_active_roots = 5
+max_queued_roots = 64
+queue_timeout_secs = 300
+
+[task_inbox]
+max_concurrency = 5
 
 [agent]
-max_delegation_depth = 3
+max_active_descendants = 6
 max_active_nested_runs = 3
+max_pending_nested_runs = 32
+nested_queue_timeout_secs = 300
 max_sub_agents_per_spawn = 3
+max_delegation_depth = 3
+parallel_tools = true
+
+[pdf]
+render_concurrency = 4
+render_max_queued = 64
+render_queue_timeout_secs = 300
+
+[shell]
+max_concurrent_processes = 4
+max_queued_processes = 64
+queue_timeout_secs = 300
 ```
 
-For a local vLLM server configured with `MAX_NUM_SEQS=4`, the default worker
-limit of `3` leaves one scheduler slot for decode/prefill overlap and direct
-health or administrative requests. Override these values with
-`NENJO_MODEL_MAX_CONCURRENT_REQUESTS` and
-`NENJO_AGENT_MAX_DELEGATION_DEPTH`. Nested ability, delegation, and sub-agent
-runs share the `max_active_nested_runs` budget; one `spawn_sub_agents` call is
-also bounded by `max_sub_agents_per_spawn`. Override those with
-`NENJO_AGENT_MAX_ACTIVE_NESTED_RUNS` and
-`NENJO_AGENT_MAX_SUB_AGENTS_PER_SPAWN`.
+A named provider pool is a physical resource budget. All bindings to that name
+share capacity, even across different provider tags or URLs. A binding without
+`base_url` matches every URL for that provider/tag. Add `base_url = "http://host:8000/v1"`
+to select one exact configured URL; an exact match takes precedence. Bindings do
+not change request routing or credentials. Unknown pools and duplicate bindings
+are configuration errors. Unbound providers retain separate pools keyed by their
+provider name/tag and configured URL.
+
+Model requests queue before HTTP starts, including retries, fallback attempts,
+and media calls. Pending requests receive slots in round-robin order by root
+execution, with FIFO ordering within each root. Cancellation removes the queued
+request. A full queue or expired queue deadline returns a local admission error;
+`ReliableProvider` does not retry or fail over that error. HTTP failures retain
+normal retry/fallback behavior, releasing provider capacity during backoff.
+
+`execution` limits root chats and tasks sharing the worker's SDK provider.
+`task_inbox.max_concurrency` remains an additional limit for durable manual and
+scheduled tasks; it does not restrict chats or child agents. The durable inbox
+can retain submissions before they reach execution admission. Roots hold their
+root slots until completion or cancellation; descendants bypass that root gate.
+
+`max_active_descendants` is shared across the entire execution tree.
+`max_active_nested_runs` bounds runnable immediate children per parent. A runnable
+phase is a model call or ordinary tool execution; parallel tools in the same
+agent share one slot. Waiting for children, user input through harness controls,
+or the next turn holds no descendant slot. Parents can therefore wait for children
+with a one-slot tree budget without blocking them. Provider queue waits within a
+model phase still count as runnable descendant work.
+
+Each parent may track at most `max_active_nested_runs + max_pending_nested_runs`
+unfinished children. Accepted children can wait for runnable capacity; exceeding
+this bounded outstanding-operation budget is rejected. A spawn batch exceeding
+`max_sub_agents_per_spawn` is rejected before launching children. The batch limit
+must fit the active-plus-pending child capacity and cannot exceed 64. Depth is checked independently; zero
+disables delegation/spawning. Descendant admission queues use
+`nested_queue_timeout_secs`; deadlines apply separately to each resource wait.
+
+PDF render partitions share one pool across documents prepared by the worker.
+Shell tools share one process pool, including background commands. Rendering
+permits remain held inside blocking jobs if their caller is cancelled. Shell
+permits follow the process lifetime. These limits cover managed rendering and
+shell work; they do not control subprocesses created outside those tools.
+
+Waiting/acquired resource events identify the pool and are forwarded as worker
+progress updates. Debug logs include the root identity and queue duration.
+Separate worker processes have separate resource pools.
+
+### HTTP timeouts and environment overrides
+
+Pool-specific HTTP timeouts override `[reliability]` timeout values. Omitted
+values preserve the existing provider defaults: 120 seconds total for hosted
+providers, 300 seconds total for Ollama, and 120 seconds idle with no total
+deadline for vLLM/OpenAI-compatible providers. Connections default to ten seconds.
+
+`request_timeout_secs` bounds the entire HTTP attempt. `read_timeout_secs` bounds
+waiting for response headers or between reads, resetting when data arrives.
+`connect_timeout_secs` bounds connection establishment. Zero disables an HTTP
+deadline. Queue deadlines must be positive; zero queue capacity allows immediate
+admission only.
+
+The local pool above lets an active stream continue indefinitely while detecting
+ten minutes without data. Keep vLLM streaming enabled for incremental output;
+non-streaming responses must finish their silent processing within the read
+limit. These settings do not change vLLM server-side limits.
+
+Existing environment overrides remain available:
+`NENJO_MODEL_MAX_CONCURRENT_REQUESTS`, `NENJO_AGENT_MAX_ACTIVE_NESTED_RUNS`,
+`NENJO_AGENT_MAX_SUB_AGENTS_PER_SPAWN`, `NENJO_AGENT_MAX_DELEGATION_DEPTH`, and
+`NENJO_RELIABILITY_{REQUEST,READ,CONNECT}_TIMEOUT_SECS`.
+
+Queue and tree overrides are `NENJO_MODEL_MAX_QUEUED_REQUESTS`,
+`NENJO_MODEL_QUEUE_TIMEOUT_SECS`, `NENJO_EXECUTION_MAX_ACTIVE_ROOTS`,
+`NENJO_EXECUTION_MAX_QUEUED_ROOTS`, `NENJO_EXECUTION_QUEUE_TIMEOUT_SECS`,
+`NENJO_AGENT_MAX_ACTIVE_DESCENDANTS`, `NENJO_AGENT_MAX_PENDING_NESTED_RUNS`,
+`NENJO_AGENT_NESTED_QUEUE_TIMEOUT_SECS`, `NENJO_PDF_RENDER_MAX_QUEUED`, and
+`NENJO_PDF_RENDER_QUEUE_TIMEOUT_SECS`. Named pools and bindings are configured
+in TOML. Explicit pool settings take precedence over the global defaults.
 
 ### Routine gate retries
 

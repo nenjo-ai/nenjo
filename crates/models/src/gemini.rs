@@ -134,6 +134,12 @@ struct GeminiCliOAuthCreds {
 }
 
 impl GeminiProvider {
+    /// Replace the HTTP client to customize timeouts, proxies, or connection settings.
+    pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
+        self.client = client;
+        self
+    }
+
     fn convert_messages(messages: &[ConversationMessage]) -> (Option<Content>, Vec<Content>) {
         let mut system_instruction: Option<Content> = None;
         let mut contents = Vec::new();

@@ -302,6 +302,12 @@ pub(crate) async fn build_provider(
         .with_tool_factory(tool_factory)
         .with_memory(mem)
         .with_agent_config(config.agent.clone())
+        .with_root_admission(nenjo::concurrency::AdmissionPool::new(
+            "root executions",
+            config.execution.max_active_roots,
+            config.execution.max_queued_roots,
+            std::time::Duration::from_secs(config.execution.queue_timeout_secs),
+        ))
         .with_routine_execution_config(config.routines.execution_config()?)
         .with_argument_bindings(argument_bindings)
         .with_live_manifest_reader(live_manifest_reader)

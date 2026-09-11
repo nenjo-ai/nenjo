@@ -692,7 +692,9 @@ where
     let join_events_tx = parent_events_tx.clone();
     let join_instance = instance.clone();
     let call_id = operation_id.to_string();
-    let join = tokio::spawn(async move {
+    let execution_scope =
+        crate::concurrency::ExecutionContext::current().map(|context| context.child());
+    let join = tokio::spawn(crate::concurrency::in_scope(execution_scope, async move {
         run_ability_operation(AbilityOperation {
             instance: join_instance,
             ability,
@@ -705,7 +707,7 @@ where
             parent_events_tx: join_events_tx,
         })
         .await;
-    });
+    }));
     started.handle.attach_join(join, parent_events_tx).await;
 
     Ok(json_tool(serde_json::to_value(AbilityOperationStarted {
@@ -749,7 +751,11 @@ where
     let mut sub_instance = build_ability_instance(&instance, &ability).await;
     let cancel_token = op_handle.cancel_token();
     sub_instance.runtime.execution_cancel = cancel_token.clone();
-    sub_instance.runtime.async_ops = AsyncOpManager::with_cancel(cancel_token.clone());
+    sub_instance.runtime.async_ops = AsyncOpManager::with_cancel_and_nested_queue(
+        cancel_token.clone(),
+        sub_instance.runtime.config.max_active_nested_runs,
+        sub_instance.runtime.config.max_pending_nested_runs,
+    );
     sub_instance
         .runtime
         .tools
@@ -1153,6 +1159,8 @@ async fn bridge_ability_transcript(
         | TurnEvent::ModelRequestStarted { .. }
         | TurnEvent::AssistantTextDelta { .. }
         | TurnEvent::AssistantReasoningDelta { .. }
+        | TurnEvent::ResourceCapacityWaiting { .. }
+        | TurnEvent::ResourceCapacityAcquired { .. }
         | TurnEvent::ModelCapacityWaiting { .. }
         | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::ProviderRetryScheduled { .. }
@@ -1604,6 +1612,7 @@ mod tests {
                 tool_factory: Arc::new(TestToolFactory),
                 memory: None,
                 agent_config: AgentConfig::default(),
+                root_admission: None,
                 render_ctx_extra: Default::default(),
                 argument_bindings: Default::default(),
                 knowledge: Default::default(),

@@ -368,27 +368,34 @@ async fn chat_with_provider<P>(
 where
     P: ModelProvider + ?Sized,
 {
-    match execution.delivery {
-        ProviderResponseDelivery::Buffered => {
-            request.ensure_artifacts_prepared()?;
-            let response = tokio::select! {
-                _ = execution.cancel.cancelled() => anyhow::bail!("execution cancelled"),
-                response = provider.chat(request, model, temperature) => response?,
-            };
-            Ok((response, HashSet::new(), HashSet::new(), false))
+    let cancel = execution.cancel.clone();
+    let run = crate::concurrency::runnable(async {
+        match execution.delivery {
+            ProviderResponseDelivery::Buffered => {
+                request.ensure_artifacts_prepared()?;
+                let response = tokio::select! {
+                    _ = execution.cancel.cancelled() => anyhow::bail!("execution cancelled"),
+                    response = provider.chat(request, model, temperature) => response?,
+                };
+                Ok((response, HashSet::new(), HashSet::new(), false))
+            }
+            ProviderResponseDelivery::Streaming => {
+                chat_with_provider_stream(
+                    provider,
+                    request,
+                    model,
+                    temperature,
+                    execution.request_id,
+                    execution.events_tx,
+                    execution.cancel,
+                )
+                .await
+            }
         }
-        ProviderResponseDelivery::Streaming => {
-            chat_with_provider_stream(
-                provider,
-                request,
-                model,
-                temperature,
-                execution.request_id,
-                execution.events_tx,
-                execution.cancel,
-            )
-            .await
-        }
+    });
+    tokio::select! {
+        _ = cancel.cancelled() => anyhow::bail!("execution cancelled while queued"),
+        result = run => result?,
     }
 }
 
@@ -1425,6 +1432,22 @@ async fn execute_tool(
                 output: String::new().into(),
                 error: Some(format!("Tool execution error: {e}")),
             },
+        }
+    };
+
+    let execute = async {
+        // Harness controls may wait for children or input; they never hold runnable slots.
+        if tool.origin() == crate::tools::ToolOrigin::Harness {
+            execute.await
+        } else {
+            match crate::concurrency::runnable(execute).await {
+                Ok(result) => result,
+                Err(error) => ToolResult {
+                    success: false,
+                    output: String::new().into(),
+                    error: Some(error.to_string()),
+                },
+            }
         }
     };
 

@@ -1400,3 +1400,99 @@ async fn domain_expansion_tracks_active_domain_without_available_context() {
         .map(|domain| domain.manifest.name.as_str());
     assert_eq!(active_domain, Some("github"));
 }
+
+#[tokio::test]
+async fn roots_share_admission_across_chat_and_task_runners() {
+    let pool =
+        nenjo::concurrency::AdmissionPool::new("roots", 1, 0, std::time::Duration::from_secs(1));
+    let held = pool.acquire().await.unwrap();
+    let provider = Provider::builder()
+        .with_root_admission(pool)
+        .with_manifest(test_manifest())
+        .with_model_factory(MockModelProviderFactory::new("done"))
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let chat = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let task = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    for error in [
+        chat.run(nenjo::AgentRun::chat(ChatInput::new("hello")))
+            .await
+            .unwrap_err(),
+        task.task(nenjo::TaskInput::new("task", "work"))
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(matches!(
+            error.downcast_ref::<nenjo::concurrency::AdmissionError>(),
+            Some(nenjo::concurrency::AdmissionError::QueueFull { .. })
+        ));
+    }
+    drop(held);
+    assert_eq!(
+        task.task(nenjo::TaskInput::new("task", "work"))
+            .await
+            .unwrap()
+            .text,
+        "done"
+    );
+}
+
+#[tokio::test]
+async fn queued_root_reports_capacity_and_cancellation_removes_its_ticket() {
+    let pool =
+        nenjo::concurrency::AdmissionPool::new("roots", 1, 1, std::time::Duration::from_secs(1));
+    let held = pool.acquire().await.unwrap();
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(MockModelProviderFactory::new("done"))
+        .with_root_admission(pool.clone())
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+    let mut handle = runner
+        .task_stream(nenjo::TaskInput::new("queued", "work"))
+        .await
+        .unwrap();
+    loop {
+        match handle.recv().await {
+            Some(nenjo::TurnEvent::ResourceCapacityWaiting { pool, limit }) => {
+                assert_eq!((pool.as_str(), limit), ("roots", 1));
+                break;
+            }
+            Some(nenjo::TurnEvent::TranscriptMessage { .. }) => {}
+            event => panic!("expected root admission event, got {event:?}"),
+        }
+    }
+    handle.cancel();
+    assert!(
+        handle
+            .output()
+            .await
+            .unwrap_err()
+            .to_string()
+            .contains("cancelled while queued")
+    );
+    drop(held);
+    pool.acquire().await.unwrap();
+}

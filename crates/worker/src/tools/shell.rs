@@ -5,6 +5,7 @@ use crate::tools::security::SecurityPolicy;
 use crate::tools::{Tool, ToolCategory, ToolResult};
 use anyhow::Context;
 use async_trait::async_trait;
+use nenjo::concurrency::{AdmissionPermit, AdmissionPool};
 use nenjo::skills::SkillRuntimeState;
 use nenjo::{
     AsyncControl, AsyncControls, AsyncOperationHandle, AsyncOperationStartReceipt,
@@ -196,6 +197,7 @@ struct RunningShell {
     output: ShellOutputSink,
     stdout_reader: Option<JoinHandle<io::Result<()>>>,
     stderr_reader: Option<JoinHandle<io::Result<()>>>,
+    _admission: Option<AdmissionPermit>,
 }
 
 enum ShellWait {
@@ -231,6 +233,7 @@ impl RunningShell {
             output.clone(),
         ));
         Ok(Self {
+            _admission: None,
             child,
             output,
             stdout_reader: Some(stdout_reader),
@@ -336,6 +339,7 @@ where
     skill_runtime: Arc<SkillRuntimeState>,
     description: String,
     initial_wait: Duration,
+    admission: Option<AdmissionPool>,
 }
 
 impl<R> ShellTool<R>
@@ -358,7 +362,14 @@ where
             skill_runtime,
             description,
             initial_wait: SHELL_INITIAL_WAIT,
+            admission: None,
         }
+    }
+
+    /// Share process capacity across all shell tools assembled by one worker.
+    pub fn with_admission_pool(mut self, pool: AdmissionPool) -> Self {
+        self.admission = Some(pool);
+        self
     }
 
     #[cfg(test)]
@@ -501,10 +512,19 @@ where
             cmd.env(key, val);
         }
 
+        let admission = if let Some(pool) = &self.admission {
+            match pool.acquire().await {
+                Ok(permit) => Some(permit),
+                Err(error) => return Ok(shell_execution_error(error)),
+            }
+        } else {
+            None
+        };
         let mut process = match RunningShell::spawn(cmd) {
             Ok(process) => process,
             Err(error) => return Ok(shell_execution_error(error)),
         };
+        process._admission = admission;
         let started_at = Instant::now();
         let timeout_deadline = started_at + Duration::from_secs(SHELL_TIMEOUT_SECS);
         let async_runtime = self
@@ -773,6 +793,51 @@ mod tests {
                 .contains(&json!("command"))
         );
         assert!(schema["properties"].get("approved").is_none());
+    }
+
+    #[tokio::test]
+    async fn shell_tools_share_process_capacity_and_recover_after_release() {
+        let pool = AdmissionPool::new("shell", 1, 0, Duration::from_secs(1));
+        let first = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime())
+            .with_admission_pool(pool.clone());
+        let second = ShellTool::new(test_security(AutonomyLevel::Supervised), test_runtime())
+            .with_admission_pool(pool.clone());
+        let held = pool.acquire().await.unwrap();
+        for tool in [&first, &second] {
+            let result = tool
+                .execute(json!({"command": "echo admitted"}))
+                .await
+                .unwrap();
+            assert!(!result.success);
+            assert!(result.error.unwrap().contains("queue is full"));
+        }
+        drop(held);
+        assert!(
+            second
+                .execute(json!({"command": "echo admitted"}))
+                .await
+                .unwrap()
+                .success
+        );
+    }
+
+    #[tokio::test]
+    async fn process_retains_admission_after_its_initial_wait() {
+        let pool = AdmissionPool::new("shell", 1, 0, Duration::from_secs(1));
+        let mut command = tokio::process::Command::new("sh");
+        command.arg("-c").arg("sleep 0.2");
+        let mut process = RunningShell::spawn(command).unwrap();
+        process._admission = Some(pool.acquire().await.unwrap());
+        assert!(matches!(
+            process
+                .wait_until(Instant::now() + Duration::from_millis(5))
+                .await
+                .unwrap(),
+            ShellWait::DeadlineReached
+        ));
+        assert!(pool.acquire().await.is_err());
+        process.terminate().await.unwrap();
+        pool.acquire().await.unwrap();
     }
 
     #[tokio::test]

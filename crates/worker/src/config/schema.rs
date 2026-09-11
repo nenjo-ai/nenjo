@@ -1,3 +1,4 @@
+use super::{ExecutionConfig, ModelRuntimeConfig, ShellConfig};
 use crate::providers::ModelProviders;
 use anyhow::{Context, Result};
 use directories::UserDirs;
@@ -59,6 +60,10 @@ pub struct Config {
     /// delegated agents, and media analyzers.
     #[serde(default)]
     pub model_runtime: ModelRuntimeConfig,
+    #[serde(default)]
+    pub execution: ExecutionConfig,
+    #[serde(default)]
+    pub shell: ShellConfig,
 
     #[serde(default)]
     pub routines: RoutineConfig,
@@ -145,27 +150,6 @@ pub struct VllmConfig {
 impl Default for VllmConfig {
     fn default() -> Self {
         Self { streaming: true }
-    }
-}
-
-// ── Model runtime admission control ─────────────────────────────
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
-pub struct ModelRuntimeConfig {
-    /// Maximum physical provider requests in flight across the worker.
-    #[serde(default = "default_model_max_concurrent_requests")]
-    pub max_concurrent_requests: usize,
-}
-
-fn default_model_max_concurrent_requests() -> usize {
-    3
-}
-
-impl Default for ModelRuntimeConfig {
-    fn default() -> Self {
-        Self {
-            max_concurrent_requests: default_model_max_concurrent_requests(),
-        }
     }
 }
 
@@ -604,6 +588,15 @@ impl Default for AutonomyConfig {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ReliabilityConfig {
+    /// Total HTTP attempt deadline in seconds; omitted preserves provider defaults, zero disables.
+    #[serde(default)]
+    pub request_timeout_secs: Option<u64>,
+    /// Maximum idle time between HTTP reads; omitted preserves provider defaults, zero disables.
+    #[serde(default)]
+    pub read_timeout_secs: Option<u64>,
+    /// Connection establishment deadline; omitted uses ten seconds, zero disables.
+    #[serde(default)]
+    pub connect_timeout_secs: Option<u64>,
     #[serde(default = "default_max_retries")]
     pub max_retries: u32,
     #[serde(default = "default_backoff_ms")]
@@ -625,6 +618,9 @@ fn default_backoff_ms() -> u64 {
 impl Default for ReliabilityConfig {
     fn default() -> Self {
         Self {
+            request_timeout_secs: None,
+            read_timeout_secs: None,
+            connect_timeout_secs: None,
             max_retries: default_max_retries(),
             backoff_ms: default_backoff_ms(),
             fallback_providers: Vec::new(),
@@ -680,6 +676,11 @@ pub struct PdfConfig {
     /// Maximum number of blocking page-render workers used for one PDF.
     #[serde(default = "default_pdf_render_concurrency")]
     pub render_concurrency: usize,
+    /// Waiting render partitions across all PDFs in the worker.
+    #[serde(default = "default_pdf_render_max_queued")]
+    pub render_max_queued: usize,
+    #[serde(default = "default_pdf_render_queue_timeout_secs")]
+    pub render_queue_timeout_secs: u64,
     /// Pages sent together to an assigned image-analysis model.
     #[serde(default = "default_pdf_vision_batch_pages")]
     pub vision_batch_pages: usize,
@@ -696,6 +697,13 @@ pub struct PdfConfig {
 
 fn default_pdf_max_pages() -> usize {
     50
+}
+
+fn default_pdf_render_max_queued() -> usize {
+    64
+}
+fn default_pdf_render_queue_timeout_secs() -> u64 {
+    300
 }
 
 fn default_pdf_render_concurrency() -> usize {
@@ -723,6 +731,11 @@ impl PdfConfig {
         if !(1..=200).contains(&self.max_pages) {
             anyhow::bail!("pdf.max_pages must be between 1 and 200");
         }
+        if self.render_max_queued > 4096 || !(1..=86400).contains(&self.render_queue_timeout_secs) {
+            anyhow::bail!(
+                "pdf render queue must have at most 4096 entries and a deadline between 1 and 86400 seconds"
+            );
+        }
         if !(1..=16).contains(&self.render_concurrency) {
             anyhow::bail!("pdf.render_concurrency must be between 1 and 16");
         }
@@ -747,6 +760,8 @@ impl Default for PdfConfig {
         Self {
             max_pages: default_pdf_max_pages(),
             render_concurrency: default_pdf_render_concurrency(),
+            render_max_queued: default_pdf_render_max_queued(),
+            render_queue_timeout_secs: default_pdf_render_queue_timeout_secs(),
             vision_batch_pages: default_pdf_vision_batch_pages(),
             render_max_edge: default_pdf_render_max_edge(),
             max_total_pixels: default_pdf_max_total_pixels(),
@@ -1123,6 +1138,8 @@ impl Default for Config {
             autonomy: AutonomyConfig::default(),
             reliability: ReliabilityConfig::default(),
             model_runtime: ModelRuntimeConfig::default(),
+            execution: ExecutionConfig::default(),
+            shell: ShellConfig::default(),
             routines: RoutineConfig::default(),
             vllm: VllmConfig::default(),
             pdf: PdfConfig::default(),
@@ -1290,6 +1307,28 @@ impl Config {
             }
         }
 
+        for (name, target) in [
+            (
+                "NENJO_RELIABILITY_REQUEST_TIMEOUT_SECS",
+                &mut self.reliability.request_timeout_secs,
+            ),
+            (
+                "NENJO_RELIABILITY_READ_TIMEOUT_SECS",
+                &mut self.reliability.read_timeout_secs,
+            ),
+            (
+                "NENJO_RELIABILITY_CONNECT_TIMEOUT_SECS",
+                &mut self.reliability.connect_timeout_secs,
+            ),
+        ] {
+            if let Ok(value) = std::env::var(name) {
+                *target =
+                    Some(value.trim().parse().with_context(|| {
+                        format!("Invalid {name}: expected nonnegative seconds")
+                    })?);
+            }
+        }
+
         apply_numeric_env("NENJO_PDF_MAX_PAGES", &mut self.pdf.max_pages)?;
         apply_numeric_env(
             "NENJO_ROUTINES_DEFAULT_GATE_MAX_RETRIES",
@@ -1329,6 +1368,46 @@ impl Config {
             "NENJO_AGENT_MAX_SUB_AGENTS_PER_SPAWN",
             &mut self.agent.max_sub_agents_per_spawn,
         )?;
+        apply_numeric_env(
+            "NENJO_MODEL_MAX_QUEUED_REQUESTS",
+            &mut self.model_runtime.max_queued_requests,
+        )?;
+        apply_numeric_env(
+            "NENJO_MODEL_QUEUE_TIMEOUT_SECS",
+            &mut self.model_runtime.queue_timeout_secs,
+        )?;
+        apply_numeric_env(
+            "NENJO_EXECUTION_MAX_ACTIVE_ROOTS",
+            &mut self.execution.max_active_roots,
+        )?;
+        apply_numeric_env(
+            "NENJO_EXECUTION_MAX_QUEUED_ROOTS",
+            &mut self.execution.max_queued_roots,
+        )?;
+        apply_numeric_env(
+            "NENJO_EXECUTION_QUEUE_TIMEOUT_SECS",
+            &mut self.execution.queue_timeout_secs,
+        )?;
+        apply_numeric_env(
+            "NENJO_AGENT_MAX_ACTIVE_DESCENDANTS",
+            &mut self.agent.max_active_descendants,
+        )?;
+        apply_numeric_env(
+            "NENJO_AGENT_MAX_PENDING_NESTED_RUNS",
+            &mut self.agent.max_pending_nested_runs,
+        )?;
+        apply_numeric_env(
+            "NENJO_AGENT_NESTED_QUEUE_TIMEOUT_SECS",
+            &mut self.agent.nested_queue_timeout_secs,
+        )?;
+        apply_numeric_env(
+            "NENJO_PDF_RENDER_MAX_QUEUED",
+            &mut self.pdf.render_max_queued,
+        )?;
+        apply_numeric_env(
+            "NENJO_PDF_RENDER_QUEUE_TIMEOUT_SECS",
+            &mut self.pdf.render_queue_timeout_secs,
+        )?;
         apply_bool_env("NENJO_VLLM_STREAMING", &mut self.vllm.streaming)?;
         Ok(())
     }
@@ -1353,8 +1432,19 @@ impl Config {
             );
         }
         self.validate_media_providers()?;
+        self.model_runtime.validate()?;
+        self.execution.validate()?;
+        self.shell.validate()?;
         if !(1..=64).contains(&self.model_runtime.max_concurrent_requests) {
             anyhow::bail!("model_runtime.max_concurrent_requests must be between 1 and 64");
+        }
+        if !(1..=64).contains(&self.agent.max_active_descendants)
+            || self.agent.max_pending_nested_runs > 4096
+            || !(1..=86400).contains(&self.agent.nested_queue_timeout_secs)
+        {
+            anyhow::bail!(
+                "agent descendant concurrency must be 1..=64, pending capacity <=4096, and queue deadline 1..=86400 seconds"
+            );
         }
         if self.agent.max_delegation_depth > 16 {
             anyhow::bail!("agent.max_delegation_depth must be between 0 and 16");
@@ -1362,9 +1452,12 @@ impl Config {
         if !(1..=64).contains(&self.agent.max_active_nested_runs) {
             anyhow::bail!("agent.max_active_nested_runs must be between 1 and 64");
         }
-        if !(1..=self.agent.max_active_nested_runs).contains(&self.agent.max_sub_agents_per_spawn) {
+        let child_capacity = self.agent.max_active_nested_runs + self.agent.max_pending_nested_runs;
+        if !(1..=64).contains(&self.agent.max_sub_agents_per_spawn)
+            || self.agent.max_sub_agents_per_spawn > child_capacity
+        {
             anyhow::bail!(
-                "agent.max_sub_agents_per_spawn must be between 1 and agent.max_active_nested_runs"
+                "agent.max_sub_agents_per_spawn must be 1..=64 and fit active plus pending child capacity"
             );
         }
         self.pdf.validate()?;
@@ -1499,13 +1592,14 @@ streaming = false
     }
 
     #[test]
-    fn model_runtime_defaults_to_three_physical_provider_requests() {
-        assert_eq!(ModelRuntimeConfig::default().max_concurrent_requests, 3);
+    fn model_runtime_defaults_to_six_physical_provider_requests() {
+        assert_eq!(ModelRuntimeConfig::default().max_concurrent_requests, 6);
 
         let config = Config {
             api_key: "test".into(),
             model_runtime: ModelRuntimeConfig {
                 max_concurrent_requests: 0,
+                ..ModelRuntimeConfig::default()
             },
             ..Default::default()
         };
@@ -1522,12 +1616,16 @@ streaming = false
             api_key: "test".into(),
             agent: AgentConfig {
                 max_active_nested_runs: 2,
+                max_pending_nested_runs: 0,
                 max_sub_agents_per_spawn: 3,
                 ..Default::default()
             },
             ..Default::default()
         };
         assert!(too_wide.validate().is_err());
+        let mut queued_batch = too_wide;
+        queued_batch.agent.max_pending_nested_runs = 1;
+        assert!(queued_batch.validate().is_ok());
     }
 
     #[test]

@@ -99,6 +99,10 @@ pub type SubAgentTranscriptEvent = AsyncOperationTranscriptEvent;
 /// assistant delta payloads impossible to construct in that mode.
 #[derive(Debug, Clone)]
 pub enum TurnEvent<Delta = String> {
+    /// A root, descendant, or tool operation is waiting in a named resource queue.
+    ResourceCapacityWaiting { pool: String, limit: usize },
+    /// A queued operation acquired its resource slot.
+    ResourceCapacityAcquired { pool: String },
     /// A model provider request started.
     ModelRequestStarted {
         request_id: String,
@@ -110,7 +114,7 @@ pub enum TurnEvent<Delta = String> {
     AssistantTextDelta { request_id: String, delta: Delta },
     /// Provider reasoning was produced and policy permits displaying it.
     AssistantReasoningDelta { request_id: String, delta: Delta },
-    /// The request is queued behind the worker-wide physical provider limit.
+    /// The request is queued behind its provider pool’s physical request limit.
     ModelCapacityWaiting { request_id: String, limit: usize },
     /// A queued request acquired provider capacity and is starting.
     ModelCapacityAcquired { request_id: String },
@@ -249,6 +253,10 @@ impl<Delta> TurnEvent<Delta> {
         mut map_delta: impl FnMut(Delta) -> Option<Mapped>,
     ) -> Option<TurnEvent<Mapped>> {
         Some(match self {
+            Self::ResourceCapacityWaiting { pool, limit } => {
+                TurnEvent::ResourceCapacityWaiting { pool, limit }
+            }
+            Self::ResourceCapacityAcquired { pool } => TurnEvent::ResourceCapacityAcquired { pool },
             Self::ModelRequestStarted {
                 request_id,
                 parent_call_id,

@@ -20,6 +20,23 @@ Wrap any provider with `ReliableProvider` for automatic:
 - Provider fallback chains
 - Per-model fallback configurations
 
+OpenAI-compatible providers, including vLLM, default to a 10-second connection
+timeout and a 300-second idle read timeout, with no total request deadline.
+
+Every HTTP provider exposes `with_http_client` for SDK callers to configure
+transport timeouts before wrapping it in `ReliableProvider`. For local inference:
+
+```rust,ignore
+let client = reqwest::Client::builder()
+    .connect_timeout(std::time::Duration::from_secs(10))
+    .read_timeout(std::time::Duration::from_secs(600))
+    .build()?;
+let provider = nenjo_models::OllamaProvider::new(None).with_http_client(client);
+```
+
+This client has no total request deadline; the idle read deadline still detects
+stalls. The worker exposes these settings through `[reliability]` in its config.
+
 ## Usage
 
 ```rust,ignore
