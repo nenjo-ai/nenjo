@@ -346,6 +346,10 @@ impl RuntimeContextMessage {
 pub struct TokenUsage {
     pub input_tokens: u64,
     pub output_tokens: u64,
+    /// Cached input tokens, already included in `input_tokens`; absent when unreported.
+    pub cached_input_tokens: Option<u64>,
+    /// Reasoning tokens, already included in `output_tokens`; absent when unreported.
+    pub reasoning_tokens: Option<u64>,
 }
 
 /// A provider-executed tool call observed inside a model response.

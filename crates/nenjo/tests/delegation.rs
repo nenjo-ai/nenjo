@@ -170,6 +170,7 @@ impl ModelProvider for FixedLlm {
         response.usage = TokenUsage {
             input_tokens: 10,
             output_tokens: 5,
+            ..TokenUsage::default()
         };
         Ok(response)
     }

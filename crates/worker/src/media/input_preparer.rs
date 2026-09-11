@@ -1045,6 +1045,7 @@ mod tests {
         let analyzer_usage = TokenUsage {
             input_tokens: 40,
             output_tokens: 12,
+            ..TokenUsage::default()
         };
         let messages = vec![ConversationMessage::chat(
             ChatMessage::user("inspect").with_artifacts(vec![ArtifactInput::new(
@@ -1293,6 +1294,7 @@ mod tests {
         let per_batch_usage = TokenUsage {
             input_tokens: 7,
             output_tokens: 3,
+            ..TokenUsage::default()
         };
         let preparer = ArtifactInputPreparerCore::new(
             Uuid::new_v4(),
@@ -1324,6 +1326,7 @@ mod tests {
             TokenUsage {
                 input_tokens: 14,
                 output_tokens: 6,
+                ..TokenUsage::default()
             }
         );
         assert!(prepared.request_messages.iter().any(|message| {

@@ -18,8 +18,9 @@ use nenjo_models::{
 use tracing::{debug, info, trace};
 use uuid::Uuid;
 
-use super::abilities::{build_ability_tools, build_async_operation_tools, is_ability_tool};
+use super::abilities::{build_ability_tools, is_ability_tool};
 use super::async_ops::AsyncOpChildHandle;
+use super::async_ops::build_async_operation_tools;
 use super::delegation::{DELEGATE_TO_TOOL_NAME, build_delegation_tools, delegation_child_tools};
 use super::sub_agents::{
     ChildRuntimeHandle, PARENT_TOOL_NAMES, SubAgentLimits, SubAgentRuntime, SubAgentRuntimeOptions,

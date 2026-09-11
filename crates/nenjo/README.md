@@ -66,3 +66,35 @@ queue deadlines, round-robin service among root executions, and RAII capacity
 permits. Worker model transports, PDF rendering, and shell execution use this
 primitive. `ResourceCapacityWaiting` and `ResourceCapacityAcquired` turn events
 make scheduling waits observable without treating them as model failures.
+
+Implementation boundaries:
+
+- [`concurrency/admission.rs`](src/concurrency/admission.rs) owns fair queue
+  rotation, queue deadlines, and permit cleanup, including cancellation after a
+  ticket has been granted but before its future resumes.
+- [`concurrency/execution.rs`](src/concurrency/execution.rs) carries root identity
+  across task spawns and shares one runnable lease among parallel phases of the
+  same child. The final phase releases the lease; harness waits bypass it.
+- The worker's provider admission wrapper acquires physical request capacity
+  inside retry handling, so completed attempts release capacity before backoff.
+
+## Ability execution internals
+
+The public `agents::abilities` path retains the discovery and invocation tools.
+Its private modules separate assignment lookup (`registry`), tool dispatch
+(`broker`), child construction (`instance`), child communication (`child_tools`),
+operation execution (`execution`), and transcript/event forwarding (`events`).
+Generic `inspect`, `send_input`, `stop`, and `wait` tools belong to the shared
+[`async_ops/controls.rs`](src/agents/async_ops/controls.rs) runtime.
+
+An ability receives its own task input, developer prompt, and tool assignments.
+Caller history is attached to its start event as trace evidence. Only a valid
+`finish` result completes the child turn; ordinary prose does not. Prompt errors,
+execution errors, and explicit finish outcomes share one completion path that
+updates operation state and the parent event. Nested tool errors remain
+recoverable and do not finish the ability.
+
+Ability tests are grouped by setup, broker behavior, completion, execution, and
+shared controls under `agents/abilities/tests`. Admission and execution-scope
+tests remain beside their implementations and cover cancellation, queue bounds,
+fairness, and permit lifetimes.

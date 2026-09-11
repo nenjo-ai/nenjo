@@ -28,21 +28,21 @@ use tracing::debug;
 
 use nenjo::ModelProviderFactory;
 use nenjo_models::{ArtifactInputTransport, MediaType, ModelProvider, ProviderMediaCapabilities};
-use nenjo_models::{ReliableProvider, VllmStreaming};
+use nenjo_models::{ReliableProvider, ResponsesOptions, VllmApi, VllmStreaming};
 
 use super::ModelProviders;
 use super::admission::AdmissionControlledProvider;
 use crate::config::{
-    Config as WorkerConfig, ModelRuntimeConfig, ProviderPoolConfig, ReliabilityConfig,
+    Config as WorkerConfig, ModelRuntimeConfig, ProviderPoolConfig, ReliabilityConfig, VllmConfig,
 };
 use crate::media::{ArtifactTransportResolver, ArtifactTransportTarget, MediaCapabilitySource};
 
 /// Complete configuration required to construct a model provider registry.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub struct ModelProviderRegistryConfig {
     api_keys: HashMap<String, String>,
     reliability: ReliabilityConfig,
-    vllm_streaming: VllmStreaming,
+    vllm: VllmConfig,
     runtime: ModelRuntimeConfig,
 }
 
@@ -66,7 +66,19 @@ impl ModelProviderRegistryConfig {
     }
 
     pub fn with_vllm_streaming(mut self, streaming: VllmStreaming) -> Self {
-        self.vllm_streaming = streaming;
+        self.vllm.streaming = streaming == VllmStreaming::Enabled;
+        self
+    }
+
+    /// Select the wire API for first-class vLLM endpoints.
+    pub fn with_vllm_api(mut self, api: VllmApi) -> Self {
+        self.vllm.api = api;
+        self
+    }
+
+    /// Set generation defaults for vLLM Responses requests.
+    pub fn with_vllm_responses_options(mut self, options: ResponsesOptions) -> Self {
+        self.vllm.responses = options;
         self
     }
 
@@ -82,23 +94,14 @@ impl ModelProviderRegistryConfig {
     }
 }
 
-impl Default for ModelProviderRegistryConfig {
-    fn default() -> Self {
-        Self {
-            api_keys: HashMap::new(),
-            reliability: ReliabilityConfig::default(),
-            vllm_streaming: VllmStreaming::Enabled,
-            runtime: ModelRuntimeConfig::default(),
-        }
-    }
-}
-
 impl From<&WorkerConfig> for ModelProviderRegistryConfig {
     fn from(config: &WorkerConfig) -> Self {
         Self::default()
             .with_api_keys(&config.model_provider_api_keys)
             .with_reliability(config.reliability.clone())
             .with_vllm_streaming(config.vllm.streaming.into())
+            .with_vllm_api(config.vllm.api)
+            .with_vllm_responses_options(config.vllm.responses)
             .with_runtime(config.model_runtime.clone())
     }
 }
@@ -111,7 +114,7 @@ impl From<&WorkerConfig> for ModelProviderRegistryConfig {
 pub struct ModelProviderRegistry {
     api_keys: HashMap<String, String>,
     reliability: ReliabilityConfig,
-    vllm_streaming: VllmStreaming,
+    vllm: VllmConfig,
     model_admission: Mutex<HashMap<AdmissionKey, AdmissionPool>>,
     runtime: ModelRuntimeConfig,
     cache: Mutex<HashMap<ProviderCacheKey, Arc<dyn ModelProvider>>>,
@@ -149,7 +152,7 @@ impl ModelProviderRegistry {
         Self {
             api_keys: config.api_keys,
             reliability: config.reliability,
-            vllm_streaming: config.vllm_streaming,
+            vllm: config.vllm,
             model_admission: Mutex::new(HashMap::new()),
             runtime: config.runtime,
             cache: Mutex::new(HashMap::new()),
@@ -182,7 +185,7 @@ impl ModelProviderRegistry {
         let bare_name = provider_name
             .strip_prefix("openai-compatible:")
             .map_or(provider_name, |_| "openai-compatible");
-        Self::create_bare(bare_name, "", None, VllmStreaming::Enabled).media_capabilities()
+        Self::create_bare(bare_name, "", None, VllmConfig::default()).media_capabilities()
     }
 
     /// Candidate env var names for a provider, used as a runtime fallback when
@@ -208,16 +211,16 @@ impl ModelProviderRegistry {
         provider_name: &str,
         api_key: &str,
         base_url: Option<&str>,
-        vllm_streaming: VllmStreaming,
+        vllm: VllmConfig,
     ) -> Box<dyn ModelProvider> {
-        Self::create_bare_with_client(provider_name, api_key, base_url, vllm_streaming, None)
+        Self::create_bare_with_client(provider_name, api_key, base_url, vllm, None)
     }
 
     fn create_bare_with_client(
         provider_name: &str,
         api_key: &str,
         base_url: Option<&str>,
-        vllm_streaming: VllmStreaming,
+        vllm: VllmConfig,
         client: Option<reqwest::Client>,
     ) -> Box<dyn ModelProvider> {
         macro_rules! configured {
@@ -249,11 +252,11 @@ impl ModelProviderRegistry {
                 ))
             }
             "ollama" => configured!(nenjo_models::OllamaProvider::new(base_url)),
-            "vllm" => configured!(nenjo_models::VllmProvider::with_streaming(
-                base_url,
-                key,
-                vllm_streaming,
-            )),
+            "vllm" => configured!(
+                nenjo_models::VllmProvider::with_streaming(base_url, key, vllm.streaming.into(),)
+                    .with_api(vllm.api)
+                    .with_responses_options(vllm.responses)
+            ),
             "openai-compatible" => {
                 let url = base_url.unwrap_or("http://localhost:8000/v1");
                 configured!(nenjo_models::OpenAiCompatibleProvider::new(
@@ -403,11 +406,10 @@ impl ModelProviderRegistry {
                     bare_name,
                     api_key,
                     base_url,
-                    self.vllm_streaming,
+                    self.vllm,
                     self.http_client(provider_name, base_url)?,
                 ),
                 self.admission_for(provider_name, base_url),
-                self.admission_for(provider_name, base_url).limit(),
             )),
         )];
 
@@ -423,11 +425,10 @@ impl ModelProviderRegistry {
                             fallback_name,
                             fallback_key,
                             None,
-                            self.vllm_streaming,
+                            self.vllm,
                             self.http_client(fallback_name, None)?,
                         ),
                         self.admission_for(fallback_name, None),
-                        self.admission_for(fallback_name, None).limit(),
                     )),
                 ));
             }
@@ -506,8 +507,11 @@ impl ArtifactTransportResolver for ModelProviderRegistry {
             .provider
             .strip_prefix("openai-compatible:")
             .map_or(target.provider, |_| "openai-compatible");
-        Self::create_bare(bare_name, "", target.base_url, self.vllm_streaming)
-            .artifact_input_transport(target.model, target.capability, media_type)
+        Self::create_bare(bare_name, "", target.base_url, self.vllm).artifact_input_transport(
+            target.model,
+            target.capability,
+            media_type,
+        )
     }
 }
 
@@ -820,13 +824,18 @@ pool = "remote"
             .insert(ModelProviders::OpenAI, "configured-key".to_string());
         worker.reliability.max_retries = 7;
         worker.vllm.streaming = false;
+        worker.vllm.api = VllmApi::Responses;
+        worker.vllm.responses.reasoning_effort = Some(nenjo_models::ReasoningEffort::Low);
+        worker.vllm.responses.max_output_tokens = std::num::NonZeroU32::new(2048);
         worker.model_runtime.max_concurrent_requests = 3;
 
         let config = ModelProviderRegistryConfig::from(&worker);
 
         assert_eq!(config.api_keys["openai"], "configured-key");
         assert_eq!(config.reliability.max_retries, 7);
-        assert_eq!(config.vllm_streaming, VllmStreaming::Disabled);
+        assert!(!config.vllm.streaming);
+        assert_eq!(config.vllm.api, VllmApi::Responses);
+        assert_eq!(config.vllm.responses, worker.vllm.responses);
         assert_eq!(config.runtime.max_concurrent_requests, 3);
     }
 
@@ -856,7 +865,9 @@ pool = "remote"
 
     #[test]
     fn artifact_transport_discovery_does_not_require_provider_credentials() {
-        let registry = ModelProviderRegistry::new(ModelProviderRegistryConfig::default());
+        let registry = ModelProviderRegistry::new(
+            ModelProviderRegistryConfig::default().with_vllm_api(VllmApi::ChatCompletions),
+        );
 
         assert!(matches!(
             registry.resolve_transport(
@@ -930,6 +941,39 @@ pool = "remote"
             ),
             ArtifactInputTransport::Unsupported
         );
+    }
+
+    #[test]
+    fn vllm_responses_default_reaches_provider_and_artifact_routing() {
+        let registry = ModelProviderRegistry::new(ModelProviderRegistryConfig::default());
+        let provider = registry
+            .create_with_base_url("vllm", Some("http://localhost:8000/v1"))
+            .unwrap();
+        for (media_type, supported) in [
+            ("image/png", true),
+            ("text/plain", true),
+            ("video/mp4", false),
+            ("audio/wav", false),
+            ("application/pdf", false),
+        ] {
+            let media_type = MediaType::parse(media_type).unwrap();
+            let runtime = provider.artifact_input_transport(
+                "test",
+                nenjo_models::ModelCapabilityId::Chat,
+                &media_type,
+            );
+            let routed = registry.resolve_transport(
+                ArtifactTransportTarget {
+                    provider: "vllm",
+                    model: "test",
+                    base_url: Some("http://localhost:8000/v1"),
+                    capability: nenjo_models::ModelCapabilityId::Chat,
+                },
+                &media_type,
+            );
+            assert_eq!(runtime, routed);
+            assert_eq!(runtime != ArtifactInputTransport::Unsupported, supported);
+        }
     }
 
     #[test]

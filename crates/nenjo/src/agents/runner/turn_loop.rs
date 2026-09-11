@@ -8,14 +8,14 @@ use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result};
 use nenjo_models::ModelProvider;
 use regex::Regex;
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
-use tracing::{debug, info, warn};
+use tracing::{Instrument, debug, info, warn};
 use uuid::Uuid;
 
 use super::chat::ProviderResponseDelivery;
@@ -373,9 +373,24 @@ where
         match execution.delivery {
             ProviderResponseDelivery::Buffered => {
                 request.ensure_artifacts_prepared()?;
-                let response = tokio::select! {
-                    _ = execution.cancel.cancelled() => anyhow::bail!("execution cancelled"),
-                    response = provider.chat(request, model, temperature) => response?,
+                let response = provider.chat(request, model, temperature);
+                tokio::pin!(response);
+                let started = Instant::now();
+                let progress_interval = Duration::from_secs(30);
+                let mut progress = tokio::time::interval_at(
+                    tokio::time::Instant::now() + progress_interval,
+                    progress_interval,
+                );
+                progress.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                let response = loop {
+                    tokio::select! {
+                        _ = execution.cancel.cancelled() => anyhow::bail!("execution cancelled"),
+                        response = &mut response => break response?,
+                        _ = progress.tick() => debug!(
+                            elapsed_seconds = started.elapsed().as_secs(),
+                            "Buffered model request still pending (including provider admission and retries)"
+                        ),
+                    }
                 };
                 Ok((response, HashSet::new(), HashSet::new(), false))
             }
@@ -877,18 +892,39 @@ where
                     streamed_provider_tool_completed_ids,
                     streamed_text_delta,
                 ) =
-                    chat_with_provider(
-                        model_provider,
-                        request,
+                    async {
+                        let started = Instant::now();
+                        debug!(
+                            delivery = ?response_delivery,
+                            messages_count = request_messages.len(),
+                            "Model request started"
+                        );
+                        let result = chat_with_provider(
+                            model_provider,
+                            request,
+                            model,
+                            temperature,
+                            ProviderChatExecution {
+                                request_id: &model_request_id,
+                                events_tx: events_tx.as_ref(),
+                                cancel: &cancel,
+                                delivery: response_delivery,
+                            },
+                        )
+                        .await;
+                        debug!(
+                            duration_ms = started.elapsed().as_millis(),
+                            success = result.is_ok(),
+                            "Model request finished"
+                        );
+                        result
+                    }
+                    .instrument(tracing::debug_span!(
+                        "model_request",
+                        request_id = %model_request_id,
+                        agent = agent_name,
                         model,
-                        temperature,
-                        ProviderChatExecution {
-                            request_id: &model_request_id,
-                            events_tx: events_tx.as_ref(),
-                            cancel: &cancel,
-                            delivery: response_delivery,
-                        },
-                    )
+                    ))
                     .await?;
                 for tool_call in &mut response.tool_calls {
                     let normalized_fields = normalize_tool_call_arguments(tools, tool_call);
@@ -967,6 +1003,8 @@ where
                     text_len = response.text.as_deref().map(str::len).unwrap_or(0),
                     input_tokens = response.usage.input_tokens,
                     output_tokens = response.usage.output_tokens,
+                    cached_input_tokens = response.usage.cached_input_tokens,
+                    reasoning_tokens = response.usage.reasoning_tokens,
                     "LLM response received"
                 );
 

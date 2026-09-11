@@ -932,6 +932,7 @@ mod tests {
             TokenUsage {
                 input_tokens: 20,
                 output_tokens: 5,
+                ..TokenUsage::default()
             },
             Duration::from_millis(40),
         );

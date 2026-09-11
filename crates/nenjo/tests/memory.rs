@@ -43,6 +43,7 @@ impl ModelProvider for MockProvider {
             usage: TokenUsage {
                 input_tokens: 100,
                 output_tokens: 50,
+                ..TokenUsage::default()
             },
             finish_reason: nenjo_models::FinishReason::Stop,
         })

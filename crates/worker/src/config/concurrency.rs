@@ -78,6 +78,7 @@ impl Default for ModelRuntimeConfig {
 }
 
 impl ModelRuntimeConfig {
+    /// Validate queue bounds and require unambiguous bindings to existing named pools.
     pub(crate) fn validate(&self) -> Result<()> {
         validate_limits(
             "model_runtime",
@@ -136,6 +137,7 @@ impl Default for ExecutionConfig {
 }
 
 impl ExecutionConfig {
+    /// Validate the worker-wide root execution gate before building admission pools.
     pub(crate) fn validate(&self) -> Result<()> {
         validate_limits(
             "execution",
@@ -146,6 +148,7 @@ impl ExecutionConfig {
     }
 }
 
+/// Apply the worker's supported bounds without forbidding immediate-only admission.
 fn validate_limits(name: &str, active: usize, queued: usize, seconds: u64) -> Result<()> {
     if !(1..=64).contains(&active) {
         bail!("{name}: concurrency must be between 1 and 64");
@@ -182,6 +185,7 @@ impl Default for ShellConfig {
 }
 
 impl ShellConfig {
+    /// Validate process admission independently from agent and model limits.
     pub(crate) fn validate(&self) -> Result<()> {
         validate_limits(
             "shell",

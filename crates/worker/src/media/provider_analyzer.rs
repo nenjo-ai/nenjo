@@ -255,6 +255,7 @@ mod tests {
                 usage: TokenUsage {
                     input_tokens: 15,
                     output_tokens: 4,
+                    ..TokenUsage::default()
                 },
                 finish_reason: nenjo_models::FinishReason::Stop,
             })

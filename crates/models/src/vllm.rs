@@ -6,13 +6,14 @@
 
 use async_trait::async_trait;
 use futures_util::future;
+use serde::{Deserialize, Serialize};
 
 use crate::compatible::{AuthStyle, OpenAiCompatibleProvider};
 use crate::openai_multimodal::{ChatArtifactDialect, chat_artifact_transport};
 use crate::{
     ArtifactInputTransport, ChatRequest, ChatResponse, MediaType, ModelCapabilityId, ModelProvider,
     NativeMediaJob, NativeMediaRequest, NativeMediaResponse, ProviderMediaCapabilities,
-    ProviderStreamEvent,
+    ProviderStreamEvent, ReasoningEffort, ResponsesOptions,
 };
 
 pub const VLLM_DEFAULT_BASE_URL: &str = "http://localhost:8000/v1";
@@ -31,7 +32,18 @@ fn normalized_vllm_base_url(base_url: Option<&str>) -> String {
     }
 }
 
-/// Response delivery mode requested from the vLLM Chat Completions API.
+/// vLLM API used for chat and artifact analysis.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VllmApi {
+    /// Broadest modality support, including vLLM audio and video extensions.
+    ChatCompletions,
+    /// Typed Responses events with text and image artifact inputs.
+    #[default]
+    Responses,
+}
+
+/// Response delivery mode requested from the selected vLLM API.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum VllmStreaming {
     Enabled,
@@ -52,9 +64,25 @@ impl From<bool> for VllmStreaming {
 pub struct VllmProvider {
     compatible: OpenAiCompatibleProvider,
     streaming: VllmStreaming,
+    api: VllmApi,
+    responses_options: ResponsesOptions,
 }
 
 impl VllmProvider {
+    /// Configure reasoning and generation limits for `VllmApi::Responses`.
+    /// An unspecified reasoning effort inherits vLLM's `max` default.
+    /// Non-default controls are rejected when Chat Completions is selected.
+    pub fn with_responses_options(mut self, options: ResponsesOptions) -> Self {
+        self.responses_options = options;
+        self
+    }
+
+    /// Select the wire API explicitly. Responses is the default.
+    pub fn with_api(mut self, api: VllmApi) -> Self {
+        self.api = api;
+        self
+    }
+
     /// Replace the HTTP client to customize timeouts, proxies, or connection settings.
     pub fn with_http_client(mut self, client: reqwest::Client) -> Self {
         self.compatible = self.compatible.with_http_client(client);
@@ -80,6 +108,8 @@ impl VllmProvider {
                 ChatArtifactDialect::Vllm,
             ),
             streaming,
+            api: VllmApi::default(),
+            responses_options: ResponsesOptions::default(),
         }
     }
 
@@ -97,6 +127,27 @@ impl VllmProvider {
         let (result, ()) = future::join(response, discard).await;
         result
     }
+
+    /// Avoid silently ignoring controls if the worker selected the wrong wire API.
+    fn ensure_responses_options_unused(&self) -> anyhow::Result<()> {
+        anyhow::ensure!(
+            self.responses_options == ResponsesOptions::default(),
+            "vLLM Responses generation controls require api = responses"
+        );
+        Ok(())
+    }
+
+    /// Apply vLLM's default at dispatch, preserving explicit efforts including `none`.
+    fn resolved_responses_options(&self) -> ResponsesOptions {
+        ResponsesOptions {
+            reasoning_effort: Some(
+                self.responses_options
+                    .reasoning_effort
+                    .unwrap_or(ReasoningEffort::Max),
+            ),
+            ..self.responses_options
+        }
+    }
 }
 
 #[async_trait]
@@ -107,6 +158,20 @@ impl ModelProvider for VllmProvider {
         model: &str,
         temperature: f64,
     ) -> anyhow::Result<ChatResponse> {
+        if self.api == VllmApi::Responses {
+            return self
+                .compatible
+                .chat_responses(
+                    request,
+                    model,
+                    temperature,
+                    self.streaming == VllmStreaming::Enabled,
+                    None,
+                    self.resolved_responses_options(),
+                )
+                .await;
+        }
+        self.ensure_responses_options_unused()?;
         match self.streaming {
             VllmStreaming::Enabled => self.chat_over_stream(request, model, temperature).await,
             VllmStreaming::Disabled => self.compatible.chat(request, model, temperature).await,
@@ -120,6 +185,20 @@ impl ModelProvider for VllmProvider {
         temperature: f64,
         events: tokio::sync::mpsc::Sender<ProviderStreamEvent>,
     ) -> anyhow::Result<ChatResponse> {
+        if self.api == VllmApi::Responses {
+            return self
+                .compatible
+                .chat_responses(
+                    request,
+                    model,
+                    temperature,
+                    self.streaming == VllmStreaming::Enabled,
+                    Some(&events),
+                    self.resolved_responses_options(),
+                )
+                .await;
+        }
+        self.ensure_responses_options_unused()?;
         match self.streaming {
             VllmStreaming::Enabled => {
                 self.compatible
@@ -152,9 +231,14 @@ impl ModelProvider for VllmProvider {
             ModelCapabilityId::Chat
             | ModelCapabilityId::AnalyzeImage
             | ModelCapabilityId::AnalyzeVideo
-            | ModelCapabilityId::AnalyzeDocument => {
-                chat_artifact_transport(ChatArtifactDialect::Vllm, media_type.essence_str())
-            }
+            | ModelCapabilityId::AnalyzeDocument => match self.api {
+                VllmApi::ChatCompletions => {
+                    chat_artifact_transport(ChatArtifactDialect::Vllm, media_type.essence_str())
+                }
+                VllmApi::Responses => {
+                    crate::openai_responses::artifact_transport(media_type.essence_str())
+                }
+            },
             ModelCapabilityId::TranscribeAudio => self.compatible.artifact_input_transport(
                 model,
                 ModelCapabilityId::TranscribeAudio,
@@ -188,8 +272,12 @@ impl ModelProvider for VllmProvider {
 }
 
 #[cfg(test)]
+mod responses_tests;
+
+#[cfg(test)]
 mod tests {
     use std::sync::Arc;
+    use std::time::Duration;
 
     use nenjo_tool_api::{ArtifactId, ArtifactRef, ArtifactSize, MediaType, Sha256Digest};
     use sha2::{Digest, Sha256};
@@ -211,12 +299,14 @@ mod tests {
     async fn capture_streaming_request() -> (
         String,
         tokio::sync::oneshot::Receiver<(String, serde_json::Value)>,
+        tokio::sync::oneshot::Sender<()>,
     ) {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
             .await
             .expect("bind mock vLLM endpoint");
         let address = listener.local_addr().expect("mock endpoint address");
         let (sender, receiver) = tokio::sync::oneshot::channel();
+        let (close_body, body_closed) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
             let (mut stream, _) = listener.accept().await.expect("accept provider request");
             let mut request = Vec::new();
@@ -256,30 +346,36 @@ mod tests {
 
             let response = concat!(
                 "data: {\"choices\":[{\"delta\":{\"content\":\"ok\"}}]}\n\n",
+                "data: {\"choices\":[{\"delta\":{},\"finish_reason\":\"stop\"}]}\n\n",
+                "data: {\"choices\":[],\"usage\":{\"prompt_tokens\":7,\"completion_tokens\":2}}\n\n",
                 "data: [DONE]\n\n"
             );
             stream
                 .write_all(
                     format!(
-                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ncontent-length: {}\r\nconnection: close\r\n\r\n{response}",
+                        "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\ntransfer-encoding: chunked\r\n\r\n{:x}\r\n{response}\r\n",
                         response.len()
                     )
                     .as_bytes(),
                 )
                 .await
                 .expect("write streaming provider response");
+            let _ = body_closed.await;
+            let _ = stream.write_all(b"0\r\n\r\n").await;
         });
-        (format!("http://{address}"), receiver)
+        (format!("http://{address}"), receiver, close_body)
     }
 
     #[tokio::test]
-    async fn enabled_streaming_normalizes_host_url_and_uses_sse_for_buffered_callers() {
-        let (base_url, captured) = capture_streaming_request().await;
-        let provider = VllmProvider::with_streaming(Some(&base_url), None, VllmStreaming::Enabled);
+    async fn buffered_vllm_call_finishes_on_done_before_http_body_closes() {
+        let (base_url, captured, close_body) = capture_streaming_request().await;
+        let provider = VllmProvider::with_streaming(Some(&base_url), None, VllmStreaming::Enabled)
+            .with_api(VllmApi::ChatCompletions);
         let messages = [ConversationMessage::user("hello")];
 
-        let response = provider
-            .chat(
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            provider.chat(
                 ChatRequest {
                     messages: &messages,
                     tools: None,
@@ -288,15 +384,54 @@ mod tests {
                 },
                 "test-model",
                 0.7,
-            )
-            .await
-            .expect("buffered caller receives an accumulated response");
+            ),
+        )
+        .await
+        .expect("[DONE] must finish the buffered call without waiting for HTTP EOF")
+        .expect("buffered caller receives an accumulated response");
+        let _ = close_body.send(());
         let (request_line, body) = captured.await.expect("captured vLLM request");
 
         assert_eq!(request_line, "POST /v1/chat/completions HTTP/1.1");
         assert_eq!(body["stream"], true);
         assert_eq!(body["stream_options"]["include_usage"], true);
         assert_eq!(response.text.as_deref(), Some("ok"));
+        assert_eq!(response.usage.input_tokens, 7);
+        assert_eq!(response.usage.output_tokens, 2);
+    }
+
+    #[tokio::test]
+    async fn streaming_vllm_call_finishes_on_done_before_http_body_closes() {
+        let (base_url, captured, close_body) = capture_streaming_request().await;
+        let provider = VllmProvider::new(Some(&base_url), None).with_api(VllmApi::ChatCompletions);
+        let messages = [ConversationMessage::user("hello")];
+        let (events_tx, mut events_rx) = tokio::sync::mpsc::channel(8);
+        let response = tokio::time::timeout(
+            Duration::from_secs(1),
+            provider.chat_stream(
+                ChatRequest {
+                    messages: &messages,
+                    tools: None,
+                    native_tools: None,
+                    prepared_artifacts: None,
+                },
+                "test-model",
+                0.7,
+                events_tx,
+            ),
+        )
+        .await
+        .expect("[DONE] must finish the streaming call without waiting for HTTP EOF")
+        .expect("streaming caller receives the completed response");
+        let _ = close_body.send(());
+        assert!(captured.await.unwrap().1["stream"].as_bool().unwrap());
+        assert_eq!(response.text.as_deref(), Some("ok"));
+        assert_eq!(response.usage.input_tokens, 7);
+        assert_eq!(response.usage.output_tokens, 2);
+        assert!(matches!(
+            events_rx.try_recv().unwrap(),
+            ProviderStreamEvent::TextDelta(text) if text == "ok"
+        ));
     }
 
     #[test]
@@ -309,7 +444,7 @@ mod tests {
         );
     }
 
-    fn prepared_artifact(
+    pub(super) fn prepared_artifact(
         media_type: &str,
         bytes: &'static [u8],
     ) -> (ArtifactRef, PreparedArtifactInputs) {
@@ -325,8 +460,8 @@ mod tests {
     }
 
     #[test]
-    fn vllm_transport_supports_text_and_media_but_not_document_file_parts() {
-        let provider = VllmProvider::new(None, None);
+    fn explicit_chat_completions_supports_text_and_media_but_not_document_file_parts() {
+        let provider = VllmProvider::new(None, None).with_api(VllmApi::ChatCompletions);
 
         for media_type in ["text/markdown", "image/png", "audio/wav", "video/mp4"] {
             assert_ne!(
@@ -358,7 +493,8 @@ mod tests {
 
     #[tokio::test]
     async fn vllm_rejects_pdf_before_making_an_http_request() {
-        let provider = VllmProvider::new(Some("http://127.0.0.1:9/v1"), None);
+        let provider = VllmProvider::new(Some("http://127.0.0.1:9/v1"), None)
+            .with_api(VllmApi::ChatCompletions);
         let (reference, prepared) = prepared_artifact("application/pdf", b"pdf");
         let messages = [ConversationMessage::chat(
             ChatMessage::user("Read this document").with_artifacts(vec![ArtifactInput::new(

@@ -196,21 +196,87 @@ nenjo update
 
 The worker is resilient to service outages. Startup and the event loop use exponential backoff so the process can recover when platform services or NATS become available again.
 
+### Diagnosing stalled abilities
+
+Enable request and capacity diagnostics through the worker environment:
+
+```bash
+RUST_LOG=info,nenjo::agents::runner=debug,nenjo::concurrency=debug,nenjo_models::compatible=debug
+```
+
+Model request logs carry the agent name and request ID, including for child
+abilities. Buffered calls report that they are still pending every 30 seconds.
+Capacity logs identify queue waits and admissions; vLLM stream logs identify the
+first response data, periodic byte counts while data arrives, and the `[DONE]`
+marker. Provider retry warnings share the same request ID. These diagnostics
+do not enable the full prompt or wire-payload log targets.
+
+An ability may receive vLLM stream data internally while exposing no new
+transcript entries until its model call completes. `wait` returning
+`"status": "applied", "rejected": []` means the wait succeeded and no operation
+was rejected. An empty `transcript_delta` alone does not establish a deadlock.
+
 ### vLLM response streaming
 
-The first-class vLLM provider requests streamed Chat Completions by default. This
+The first-class vLLM provider requests streamed Responses by default. This
 keeps long local generations active as long as response data continues to
 arrive. Interactive chat forwards text deltas to the live session UI; callers
-with a buffered public API accumulate the same SSE response internally. Disable
-streaming when testing an endpoint that requires one buffered JSON response:
+with a buffered public API accumulate the same SSE response internally. The
+defaults and optional generation settings are:
 
 ```toml
 [vllm]
 streaming = true
+# /v1/responses is the default when api is omitted.
+api = "responses"
+
+# Optional worker defaults, applied only to vLLM Responses requests.
+[vllm.responses]
+reasoning_effort = "max" # Default when omitted.
+max_output_tokens = 4096
 ```
 
 `NENJO_VLLM_STREAMING` overrides the TOML value and accepts
 `true`/`false`, `1`/`0`, `yes`/`no`, or `on`/`off`.
+`NENJO_VLLM_API` overrides the API selection (`responses` or `chat_completions`).
+Set `api = "chat_completions"` or `NENJO_VLLM_API=chat_completions` to explicitly
+use the Chat Completions endpoint, including its audio/video input extensions.
+`NENJO_VLLM_REASONING_EFFORT` and `NENJO_VLLM_MAX_OUTPUT_TOKENS` override the
+generation settings. Unspecified effort defaults to `max`; explicit efforts,
+including `none`, override it. An omitted output cap preserves the server default.
+The cap must be a positive integer and includes reasoning tokens. Configuring
+these controls with Chat Completions selected is an error.
+
+Effort values are `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, and `max`,
+subject to the served model's template. Mia's GLM 5.3 template gives distinct
+enabled levels to `low`, `high`, and `max`; other enabled values map to `max`.
+Use `none` to disable thinking on the tested vLLM revision. This controls generation,
+not just visibility of reasoning text.
+
+Responses mode streams text and reasoning, preserves function-call IDs and final
+usage, and finishes on `response.completed`. Both buffered SDK calls and live
+chat use this transport when streaming is enabled. Setting `streaming = false`
+uses the same Responses endpoint with a buffered JSON reply. Nenjo sends full
+local history with `store = false`; it does not depend on server-side history.
+Output-limit, content-filter, cancellation, and other unsuccessful terminal
+responses return typed errors and bypass retries and fallback. Partial function
+calls are never executed. Transport failures still use the configured retry policy.
+
+Set `RUST_LOG=info,nenjo_models::responses=debug` for generation settings, provider response
+IDs, HTTP request IDs when supplied, first-event/first-delta timing, total duration,
+and cached/reasoning token counts. These diagnostic events do not contain prompt
+or generated text. Cache/reasoning counts are breakdowns of the existing totals,
+not additional tokens. Missing breakdowns stay unknown.
+The tested Mia build reports zero reasoning tokens even when it emits reasoning
+deltas; Nenjo preserves that reported value, so zero alone does not mean thinking
+was disabled.
+
+Responses supports image and UTF-8 text artifacts in user attachments and tool
+results. Model input modalities must also allow those artifacts. Video/audio
+parts remain available through Chat Completions; raw PDF/document inputs require
+the existing extraction or analysis route. Responses errors are surfaced without
+silently switching APIs. Live regression instructions are in
+[testing/integrations/README.md](testing/integrations/README.md).
 
 A host-only vLLM base URL is normalized to the standard `/v1` API root. An
 explicit path is preserved for deployments mounted below a custom API prefix.
@@ -332,7 +398,7 @@ Separate worker processes have separate resource pools.
 
 Pool-specific HTTP timeouts override `[reliability]` timeout values. Omitted
 values preserve the existing provider defaults: 120 seconds total for hosted
-providers, 300 seconds total for Ollama, and 120 seconds idle with no total
+providers, 300 seconds total for Ollama, and 300 seconds idle with no total
 deadline for vLLM/OpenAI-compatible providers. Connections default to ten seconds.
 
 `request_timeout_secs` bounds the entire HTTP attempt. `read_timeout_secs` bounds

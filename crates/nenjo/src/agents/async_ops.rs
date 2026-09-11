@@ -1,5 +1,8 @@
 //! Shared runtime for long-running agent operations.
 
+mod controls;
+pub(crate) use controls::build_async_operation_tools;
+
 use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::future::Future;
