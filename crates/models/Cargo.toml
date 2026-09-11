@@ -22,7 +22,7 @@ anyhow = { workspace = true }
 futures-util = { workspace = true }
 directories = { workspace = true }
 base64 = { workspace = true }
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["macros", "sync", "time"] }
 uuid = { workspace = true, features = ["v4"] }
 chrono = { workspace = true }
 sha2 = { workspace = true }

@@ -48,6 +48,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - name: Build
         run: cargo build --workspace
+      # A separate invocation catches features masked by workspace/dev dependencies.
+      - name: Check standalone model documentation
+        run: cargo doc --locked --no-deps -p nenjo-models
 
   audit:
     name: Audit Dependencies
