@@ -13,9 +13,12 @@ use tokio::sync::RwLock;
 use uuid::Uuid;
 use x25519_dalek::StaticSecret;
 
+mod pairing;
 mod storage;
 mod types;
 mod wrap;
+
+pub use pairing::token_is_plausible;
 
 pub use types::{
     ContentKey, ContentScope, EnrollmentStatus, StoredWorkerEnrollment, WorkerCertificate,
@@ -35,6 +38,11 @@ use self::wrap::{unwrap_ack, unwrap_ock};
 struct EnrollmentState {
     stored: StoredWorkerEnrollments,
 }
+
+/// Ensures the pending-approval announcement is logged at most once per
+/// process, keeping the terminal quiet after the pairing notice.
+static PENDING_ANNOUNCEMENT_MADE: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
 
 impl EnrollmentState {
     fn active_enrollment(&self) -> Option<&StoredWorkerEnrollment> {
@@ -163,6 +171,25 @@ impl WorkerAuthProvider {
         generate_verification_code()
     }
 
+    /// Persist the pairing link presented for the active enrollment so it can
+    /// be re-shown after a restart without the platform re-minting a token.
+    async fn store_presented_pairing_link(&self, link: &str) -> Result<()> {
+        let mut state = self.enrollments.write().await;
+        let binding = state.active_binding()?;
+        let enrollment = state.stored.get_or_insert_mut(binding);
+        enrollment.presented_pairing_link = Some(link.to_string());
+        persist_enrollments(&self.root, &state.stored)
+    }
+
+    /// Return the previously presented pairing link for the active enrollment.
+    async fn presented_pairing_link(&self) -> Option<String> {
+        self.enrollments
+            .read()
+            .await
+            .active_enrollment()
+            .and_then(|enrollment| enrollment.presented_pairing_link.clone())
+    }
+
     /// Return the current persisted enrollment snapshot.
     pub async fn enrollment(&self) -> StoredWorkerEnrollment {
         self.enrollments
@@ -243,6 +270,7 @@ impl WorkerAuthProvider {
         enrollment.wrapped_ock = None;
         enrollment.user_wrapped_acks.clear();
         enrollment.enrolled_at = None;
+        enrollment.presented_pairing_link = None;
         persist_enrollments(&self.root, &state.stored)?;
         let is_active = state.stored.selected() == Some(binding);
         drop(state);
@@ -384,6 +412,9 @@ impl WorkerAuthProvider {
         } else {
             None
         };
+        if !enrollment.user_wrapped_acks.is_empty() {
+            enrollment.presented_pairing_link = None;
+        }
         persist_enrollments(&self.root, &state.stored)?;
         drop(state);
         self.clear_active_key_cache().await;
@@ -404,25 +435,76 @@ impl WorkerAuthProvider {
         let enrollment_request = self.api_enrollment_request_async(binding, metadata).await?;
         let verification_code = enrollment_request.verification_code.clone();
 
+        let mut minted_pairing_token: Option<String> = None;
+        let mut status_expires_at: Option<chrono::DateTime<chrono::Utc>> = None;
         match api.register_worker_enrollment(&enrollment_request).await {
             Ok(status) => {
+                minted_pairing_token = status.pairing_token.clone();
+                status_expires_at = status.pairing_expires_at;
                 self.apply_backend_enrollment(&status, binding).await?;
             }
             Err(e) => {
-                tracing::warn!(
+                // Benign: the local pending state (and any presented pairing
+                // link) stays valid; the next sync retries. Logged at debug so
+                // a refresh failure never reads as "onboarding failed" while
+                // the harness is legitimately waiting for approval.
+                tracing::debug!(
                     error = %e,
                     %api_key_id,
-                    "Worker enrollment registration failed; continuing with local pending state"
+                    "Worker enrollment registration refresh failed; keeping local pending state"
                 );
             }
         }
 
         if matches!(self.enrollment_status().await, EnrollmentStatus::Pending) {
-            tracing::info!(
-                %api_key_id,
-                verification_code = %verification_code,
-                "Harness pending approval; match this code on a trusted device before approving"
-            );
+            // Announce pending approval once per process; repeated
+            // registrations must not spam the terminal after the pairing
+            // notice.
+            if !PENDING_ANNOUNCEMENT_MADE.swap(true, std::sync::atomic::Ordering::Relaxed) {
+                tracing::info!(
+                    %api_key_id,
+                    verification_code = %verification_code,
+                    "Harness pending approval; match this code on a trusted device before approving"
+                );
+            }
+            // One-time pairing link: when the platform minted a
+            // pairing token at registration (the user's browser has an
+            // outstanding onboarding attempt), present it once, clearly, on
+            // stdout — not through tracing, so it stays clickable in the
+            // terminal. The token itself is never logged.
+            //
+            // The platform mints at most one token per onboarding attempt, so
+            // the link never changes while the attempt is live. If this is a
+            // later registration (token already minted), re-present the link
+            // persisted from the first presentation — same link, suppressed
+            // repeats come from the once-per-token guard.
+            let link: Option<String> = match minted_pairing_token
+                .as_deref()
+                .map(str::trim)
+                .filter(|t| token_is_plausible(t))
+            {
+                Some(token) => {
+                    let origin = pairing::dashboard_origin(api.base_url());
+                    let link = pairing::pairing_link(&origin, token);
+                    if let Err(e) = self.store_presented_pairing_link(&link).await {
+                        tracing::debug!(error = %e, "Failed to persist presented pairing link");
+                    }
+                    Some(link)
+                }
+                None => match self.presented_pairing_link().await {
+                    Some(link)
+                        if token_is_plausible(link.rsplit("#pair=").next().unwrap_or("")) =>
+                    {
+                        Some(link)
+                    }
+                    _ => None,
+                },
+            };
+            if let Some(link) = link {
+                let expires_at = status_expires_at
+                    .unwrap_or_else(|| chrono::Utc::now() + chrono::Duration::minutes(10));
+                pairing::print_pairing_notice(&link, &verification_code, expires_at);
+            }
         }
 
         Ok(())
@@ -711,6 +793,8 @@ mod tests {
                     user_wrapped_acks: HashMap::new(),
                     wrapped_ock: None,
                     metadata: None,
+                    pairing_token: None,
+                    pairing_expires_at: None,
                 },
                 binding,
             )
@@ -835,6 +919,8 @@ mod tests {
                     user_wrapped_acks: HashMap::new(),
                     wrapped_ock: None,
                     metadata: None,
+                    pairing_token: None,
+                    pairing_expires_at: None,
                 },
                 revoked_binding,
             )
@@ -883,6 +969,7 @@ mod tests {
             user_wrapped_acks: HashMap::from([(actor_user_id, wrapped_ack)]),
             enrolled_at: Some(Utc::now()),
             pending_verification_code: None,
+            presented_pairing_link: None,
         };
         std::fs::write(
             dir.path().join("enrollment.json"),
@@ -927,6 +1014,8 @@ mod tests {
             user_wrapped_acks: HashMap::new(),
             wrapped_ock: None,
             metadata: None,
+            pairing_token: None,
+            pairing_expires_at: None,
         };
 
         let error = state

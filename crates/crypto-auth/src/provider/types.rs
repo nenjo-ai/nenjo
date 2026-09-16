@@ -91,6 +91,10 @@ pub struct StoredWorkerEnrollment {
     pub user_wrapped_acks: HashMap<Uuid, WrappedAccountContentKey>,
     pub enrolled_at: Option<DateTime<Utc>>,
     pub pending_verification_code: Option<String>,
+    /// Last pairing link presented for this enrollment (server-minted token).
+    /// Reused across restarts so the same link is shown without re-minting.
+    #[serde(default)]
+    pub presented_pairing_link: Option<String>,
 }
 
 /// One persisted enrollment together with the authenticated platform binding
