@@ -194,6 +194,7 @@ pub fn turn_event_to_stream_events(
             ability_tool_name,
             ability_name,
             task_input,
+            parent_operation_id,
             ..
         } => vec![StreamEvent::AsyncOperationEvent {
             operation_id: call_id.clone(),
@@ -202,7 +203,7 @@ pub fn turn_event_to_stream_events(
             status: "running".to_string(),
             signal: "started".to_string(),
             model_visible: true,
-            parent_operation_id: None,
+            parent_operation_id: parent_operation_id.clone(),
             parent_tool_name: Some(ability_tool_name.clone()),
             summary: Some(event_text_preview(task_input)),
             payload: Some(serde_json::json!({
@@ -319,6 +320,7 @@ pub fn turn_event_to_stream_events(
             ability_name,
             success,
             final_output,
+            parent_operation_id,
         } => vec![StreamEvent::AsyncOperationEvent {
             operation_id: call_id.clone(),
             kind: "ability".to_string(),
@@ -334,7 +336,7 @@ pub fn turn_event_to_stream_events(
                 "failed".to_string()
             },
             model_visible: true,
-            parent_operation_id: None,
+            parent_operation_id: parent_operation_id.clone(),
             parent_tool_name: Some(ability_tool_name.clone()),
             summary: Some(event_text_preview(final_output)),
             payload: Some(serde_json::json!({
@@ -478,6 +480,7 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             ability_name,
             task_input,
             caller_history,
+            ..
         } => format!(
             "ability_started(call={call_id}, tool={ability_tool_name}, ability={ability_name}, task_len={}, caller_messages={})",
             task_input.len(),
@@ -522,6 +525,7 @@ pub fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             ability_name,
             success,
             final_output,
+            ..
         } => format!(
             "ability_completed(call={call_id}, tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
             final_output.len()
@@ -2174,6 +2178,7 @@ mod tests {
             ability_name: "Review".to_string(),
             task_input: "inspect".to_string(),
             caller_history: Vec::new(),
+            parent_operation_id: None,
         };
 
         let routine = turn_event_to_workflow_step_response(

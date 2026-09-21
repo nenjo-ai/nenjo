@@ -59,6 +59,7 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             ability_name,
             task_input,
             caller_history,
+            ..
         } => format!(
             "ability_started(call={call_id}, tool={ability_tool_name}, ability={ability_name}, task_len={}, caller_messages={})",
             task_input.len(),
@@ -103,6 +104,7 @@ pub(crate) fn summarize_turn_event(event: &nenjo::TurnEvent) -> String {
             ability_name,
             success,
             final_output,
+            ..
         } => format!(
             "ability_completed(call={call_id}, tool={ability_tool_name}, ability={ability_name}, success={success}, output_len={})",
             final_output.len()

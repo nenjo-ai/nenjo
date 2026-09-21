@@ -630,9 +630,13 @@ where
                 event,
             });
         }
-        TurnEvent::AbilityStarted { .. }
-        | TurnEvent::AbilityCompleted { .. }
-        | TurnEvent::ResourceCapacityWaiting { .. }
+        // Ability operations keep the trace hierarchy intact: without a parent
+        // they would render at the root of the parent agent's activity view
+        // instead of under this delegation.
+        TurnEvent::AbilityStarted { .. } | TurnEvent::AbilityCompleted { .. } => {
+            let _ = parent_tx.send(under_delegation_operation(event, &operation.operation_id));
+        }
+        TurnEvent::ResourceCapacityWaiting { .. }
         | TurnEvent::ResourceCapacityAcquired { .. }
         | TurnEvent::ModelCapacityWaiting { .. }
         | TurnEvent::ModelCapacityAcquired { .. }
@@ -652,6 +656,46 @@ where
         // completed TurnOutput. Keep provider token deltas inside that child boundary.
         TurnEvent::AssistantTextDelta { .. } | TurnEvent::AssistantReasoningDelta { .. } => {}
         TurnEvent::TranscriptMessage { .. } => {}
+    }
+}
+
+/// Nest a delegated agent's ability operation under this delegation's async
+/// operation unless it already carries a more specific parent. Mirrors the
+/// reparenting applied to the delegated agent's model, tool, and async
+/// operation events so its ability traces do not strand at the trace root.
+fn under_delegation_operation(event: TurnEvent, operation_id: &str) -> TurnEvent {
+    match event {
+        TurnEvent::AbilityStarted {
+            call_id,
+            ability_tool_name,
+            ability_name,
+            task_input,
+            caller_history,
+            parent_operation_id,
+        } => TurnEvent::AbilityStarted {
+            parent_operation_id: parent_operation_id.or_else(|| Some(operation_id.to_string())),
+            call_id,
+            ability_tool_name,
+            ability_name,
+            task_input,
+            caller_history,
+        },
+        TurnEvent::AbilityCompleted {
+            call_id,
+            ability_tool_name,
+            ability_name,
+            success,
+            final_output,
+            parent_operation_id,
+        } => TurnEvent::AbilityCompleted {
+            parent_operation_id: parent_operation_id.or_else(|| Some(operation_id.to_string())),
+            call_id,
+            ability_tool_name,
+            ability_name,
+            success,
+            final_output,
+        },
+        other => other,
     }
 }
 
@@ -778,5 +822,67 @@ fn error(message: impl Into<String>) -> ToolResult {
         success: false,
         output: String::new().into(),
         error: Some(message.into()),
+    }
+}
+
+#[cfg(test)]
+mod ability_parenting_tests {
+    use super::*;
+
+    #[test]
+    fn delegated_ability_events_nest_under_the_delegation_operation() {
+        let started = TurnEvent::AbilityStarted {
+            call_id: "ability-op-1".into(),
+            ability_tool_name: "use_ability".into(),
+            ability_name: "research".into(),
+            task_input: "inspect".into(),
+            caller_history: Vec::new(),
+            parent_operation_id: None,
+        };
+        let TurnEvent::AbilityStarted {
+            parent_operation_id,
+            ..
+        } = under_delegation_operation(started, "delegation_op")
+        else {
+            panic!("expected an ability started event")
+        };
+        assert_eq!(parent_operation_id.as_deref(), Some("delegation_op"));
+
+        let completed = TurnEvent::AbilityCompleted {
+            call_id: "ability-op-1".into(),
+            ability_tool_name: "use_ability".into(),
+            ability_name: "research".into(),
+            success: true,
+            final_output: "done".into(),
+            parent_operation_id: None,
+        };
+        let TurnEvent::AbilityCompleted {
+            parent_operation_id,
+            ..
+        } = under_delegation_operation(completed, "delegation_op")
+        else {
+            panic!("expected an ability completed event")
+        };
+        assert_eq!(parent_operation_id.as_deref(), Some("delegation_op"));
+    }
+
+    #[test]
+    fn explicit_ability_parents_are_preserved() {
+        let started = TurnEvent::AbilityStarted {
+            call_id: "ability-op-2".into(),
+            ability_tool_name: "use_ability".into(),
+            ability_name: "research".into(),
+            task_input: "inspect".into(),
+            caller_history: Vec::new(),
+            parent_operation_id: Some("outer_op".into()),
+        };
+        let TurnEvent::AbilityStarted {
+            parent_operation_id,
+            ..
+        } = under_delegation_operation(started, "delegation_op")
+        else {
+            panic!("expected an ability started event")
+        };
+        assert_eq!(parent_operation_id.as_deref(), Some("outer_op"));
     }
 }

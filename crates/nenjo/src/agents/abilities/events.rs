@@ -43,9 +43,19 @@ fn parent_event(mut event: TurnEvent, call_id: &str) -> Option<TurnEvent> {
         | TurnEvent::ModelRequestCompleted { parent_call_id, .. } => {
             parent_call_id.get_or_insert_with(|| call_id.to_string());
         }
-        TurnEvent::AbilityStarted { .. }
-        | TurnEvent::AbilityCompleted { .. }
-        | TurnEvent::MessageCompacted { .. }
+        TurnEvent::AbilityStarted {
+            parent_operation_id,
+            ..
+        }
+        | TurnEvent::AbilityCompleted {
+            parent_operation_id,
+            ..
+        } => {
+            // A nested ability belongs under the enclosing ability operation,
+            // matching how every other nested event is reparented here.
+            parent_operation_id.get_or_insert_with(|| call_id.to_string());
+        }
+        TurnEvent::MessageCompacted { .. }
         | TurnEvent::ModelCapacityWaiting { .. }
         | TurnEvent::ModelCapacityAcquired { .. }
         | TurnEvent::AsyncOperationEvent { .. }
