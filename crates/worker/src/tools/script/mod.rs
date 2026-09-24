@@ -2,63 +2,139 @@
 //! dispatches its available tools directly from the script.
 //!
 //! Every tool the agent could call directly is exposed as a method on a
-//! context namespace (`ctx.mcp.<tool>()` in phase 1, `ctx.runtime`/`ctx.harness`
-//! later). Dispatches re-enter the normal tool pipeline, so scripts gain
-//! control flow — fan-out, branching, aggregation — never privileges.
+//! context namespace: `ctx.mcp.<tool>()` for MCP tools, `ctx.runtime.<tool>()`
+//! for host tools, and `ctx.harness` for session/project identity. Dispatches
+//! re-enter the normal tool pipeline, so scripts gain control flow — fan-out,
+//! branching, aggregation — never privileges.
+//!
+//! Scripts that outlive `initial_wait` are promoted to an async operation
+//! (`AsyncOperationKind::Script`) with inspect/stop/wait controls, mirroring
+//! the shell tool's behavior.
 //!
 //! See BOO-61.
 
 pub mod engine;
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use async_trait::async_trait;
+use nenjo::current_async_operation_runtime;
+use nenjo::tools::{AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationStartReceipt};
+use nenjo::{
+    AsyncOperationHandle, AsyncOperationTranscriptEvent, StartAsyncOperation,
+    scope_async_operation_runtime,
+};
 use nenjo_tool_api::{Tool, ToolCategory, ToolOrigin, ToolResult};
+use serde::Serialize;
 use serde_json::json;
+use tokio_util::sync::CancellationToken;
 
-use self::engine::{ScriptLimits, ScriptNamespaces, ScriptOutcome};
+pub use self::engine::ScriptHarnessContext;
+use self::engine::{LogBuffer, ScriptLimits, ScriptNamespaces, ScriptOutcome};
 
 pub const SCRIPT_TOOL_NAME: &str = "script";
+/// How long a script runs synchronously before promotion to an async operation.
+const INITIAL_WAIT: Duration = Duration::from_secs(2);
+/// Poll interval for streaming `ctx.log` lines into the operation transcript.
+const LOG_STREAM_INTERVAL: Duration = Duration::from_millis(300);
+
+static SCRIPT_OPERATION_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// Tool implementation wrapping the QuickJS engine.
 pub struct ScriptTool {
-    /// Tools dispatchable from the script's `ctx.mcp` namespace.
+    /// Tools dispatchable from `ctx.mcp`.
     mcp_tools: Vec<Arc<dyn Tool>>,
+    /// Tools dispatchable from `ctx.runtime`.
+    runtime_tools: Vec<Arc<dyn Tool>>,
+    /// Identity exposed via `ctx.harness`.
+    harness: Option<ScriptHarnessContext>,
     limits: ScriptLimits,
+    initial_wait: Duration,
     description: String,
 }
 
 impl ScriptTool {
-    /// Build a script tool exposing the agent's MCP tools under `ctx.mcp`.
-    pub fn mcp(mcp_tools: Vec<Arc<dyn Tool>>) -> Self {
-        let tool_names = mcp_tools
-            .iter()
-            .map(|tool| tool.name())
-            .collect::<Vec<_>>()
-            .join(", ");
+    /// Build a script tool exposing MCP and host tools as context namespaces.
+    pub fn new(
+        mcp_tools: Vec<Arc<dyn Tool>>,
+        runtime_tools: Vec<Arc<dyn Tool>>,
+        harness: Option<ScriptHarnessContext>,
+    ) -> Self {
+        let mut sections = Vec::new();
+        if !mcp_tools.is_empty() {
+            sections.push(format!(
+                "`ctx.mcp.<toolName>({{...args}})` for MCP tools: {}",
+                tool_name_list(&mcp_tools)
+            ));
+        }
+        if !runtime_tools.is_empty() {
+            sections.push(format!(
+                "`ctx.runtime.<toolName>({{...args}})` for host tools: {}",
+                tool_name_list(&runtime_tools)
+            ));
+        }
+        if harness.is_some() {
+            sections.push(
+                "`ctx.harness` for session/project identity (`sessionId`, `project`)".to_string(),
+            );
+        }
+        let dispatch_sections = if sections.is_empty() {
+            "none are granted to this agent".to_string()
+        } else {
+            sections.join("; ")
+        };
         let description = format!(
             "Run a short JavaScript (QuickJS) program to orchestrate multiple tool calls in one \
-             step. All MCP tools are available as async methods on the `ctx.mcp` namespace: \
-             `await ctx.mcp.<toolName>({{...args}})` returns `{{ok, content, error}}`; \
-             `ctx.mcp.list()` returns the callable tools with their schemas; `ctx.log(...)` \
-             streams progress notes. Fan out with `Promise.all`, branch on results, and `return` \
-             a JSON-serializable summary object — the return value is the tool result. Available \
-             MCP tools: {tool_names}. The script cannot access the filesystem, network, or \
-             environment; each dispatched call goes through the same permission checks as direct \
-             tool calls."
+             step. Every namespace method returns `{{ok, content, error}}`; \
+             `ctx.<namespace>.list()` returns the callable tools with their schemas; \
+             `ctx.log(...)` streams progress notes. Fan out with `Promise.all`, branch on \
+             results, and `return` a JSON-serializable summary object — the return value is the \
+             tool result. Dispatch surface: {dispatch_sections}. Scripts run for up to 2 minutes; \
+             longer scripts keep running in the background and return an operation id usable \
+             with the inspect/stop/wait tools. The script cannot access the filesystem, network, \
+             or environment; each dispatched call goes through the same permission checks as \
+             direct tool calls."
         );
         Self {
             mcp_tools,
+            runtime_tools,
+            harness,
             limits: ScriptLimits::default(),
+            initial_wait: INITIAL_WAIT,
             description,
         }
+    }
+
+    /// Override the synchronous phase before promotion (used by tests and
+    /// tuning; production default is 2s).
+    pub fn with_initial_wait(
+        mcp_tools: Vec<Arc<dyn Tool>>,
+        runtime_tools: Vec<Arc<dyn Tool>>,
+        harness: Option<ScriptHarnessContext>,
+        initial_wait: Duration,
+    ) -> Self {
+        let mut tool = Self::new(mcp_tools, runtime_tools, harness);
+        tool.initial_wait = initial_wait;
+        tool
     }
 
     fn namespaces(&self) -> ScriptNamespaces {
         ScriptNamespaces {
             mcp: self.mcp_tools.clone(),
+            runtime: self.runtime_tools.clone(),
+            harness: self.harness.clone(),
         }
     }
+}
+
+fn tool_name_list(tools: &[Arc<dyn Tool>]) -> String {
+    tools
+        .iter()
+        .map(|tool| tool.name())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 #[async_trait]
@@ -77,7 +153,7 @@ impl Tool for ScriptTool {
             "properties": {
                 "script": {
                     "type": "string",
-                    "description": "JavaScript source. Runs inside an async function; use `await`, top-level `return`, `ctx.mcp.*` tool methods, and `ctx.log`."
+                    "description": "JavaScript source. Runs inside an async function; use `await`, top-level `return`, `ctx.*` tool methods, and `ctx.log`."
                 },
                 "timeout_ms": {
                     "type": "integer",
@@ -107,42 +183,240 @@ impl Tool for ScriptTool {
         let timeout = args
             .get("timeout_ms")
             .and_then(|value| value.as_u64())
-            .map(std::time::Duration::from_millis)
+            .map(Duration::from_millis)
             .unwrap_or(self.limits.default_timeout);
 
-        let outcome = engine::run(script, self.namespaces(), &self.limits, timeout).await?;
-        Ok(outcome_to_result(&outcome))
+        // The engine runs on a spawned task from the start so promotion never
+        // drops a half-executed interpreter: the initial synchronous wait and
+        // the background phase observe the same run.
+        let stop = CancellationToken::new();
+        let logs = Arc::new(Mutex::new(LogBuffer::default()));
+        let op_runtime = current_async_operation_runtime();
+        let mut join = {
+            let namespaces = self.namespaces();
+            let limits = self.limits.clone();
+            let script = script.to_string();
+            let engine_stop = stop.clone();
+            let engine_logs = logs.clone();
+            let scope_runtime = op_runtime.clone();
+            tokio::spawn(async move {
+                let run =
+                    engine::run(&script, namespaces, &limits, timeout, engine_stop, engine_logs);
+                match scope_runtime {
+                    Some(runtime) => scope_async_operation_runtime(runtime, run).await,
+                    None => run.await,
+                }
+            })
+        };
+
+        let Some(runtime) = op_runtime else {
+            // No async-operation runtime in scope: run synchronously. The
+            // engine terminates itself at `timeout` via its deadline thread.
+            return match join.await {
+                Ok(Ok(outcome)) => Ok(synchronous_result(outcome, &logs)),
+                Ok(Err(error)) => Ok(ToolResult::failure(error.to_string())),
+                Err(error) => Ok(ToolResult::failure(format!(
+                    "script task failed: {error}"
+                ))),
+            };
+        };
+
+        match tokio::time::timeout(self.initial_wait, &mut join).await {
+            Ok(Ok(Ok(outcome))) => Ok(synchronous_result(outcome, &logs)),
+            Ok(Ok(Err(error))) => Ok(ToolResult::failure(error.to_string())),
+            Ok(Err(error)) => Ok(ToolResult::failure(format!(
+                "script task failed: {error}"
+            ))),
+            Err(_elapsed) => {
+                promote_to_operation(runtime, join, stop, logs, script, timeout, &self.limits)
+                    .await
+            }
+        }
     }
 }
 
-fn outcome_to_result(outcome: &ScriptOutcome) -> ToolResult {
+/// Promote a still-running script to an async operation and return a receipt.
+#[allow(clippy::too_many_arguments)]
+async fn promote_to_operation(
+    runtime: nenjo::AsyncOperationRuntime,
+    join: tokio::task::JoinHandle<anyhow::Result<ScriptOutcome>>,
+    stop: CancellationToken,
+    logs: Arc<Mutex<LogBuffer>>,
+    script: &str,
+    timeout: Duration,
+    limits: &ScriptLimits,
+) -> anyhow::Result<ToolResult> {
+    let operation_id = format!(
+        "script_{}",
+        SCRIPT_OPERATION_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+    let controls = AsyncControls::new(AsyncControl::Inspect)
+        .with(AsyncControl::Stop)
+        .with(AsyncControl::Wait);
+    let handle = runtime
+        .start(StartAsyncOperation {
+            id: operation_id.clone(),
+            kind: AsyncOperationKind::Script,
+            label: script_operation_label(script),
+            parent_operation_id: None,
+            parent_tool_name: Some(SCRIPT_TOOL_NAME.into()),
+            started_summary: "Script is still running".into(),
+            model_visible: true,
+            controls,
+        })
+        .await;
+
+    // Route async-operation stop (model-facing stop tool or runtime
+    // cancellation) into the engine's cancellation token.
+    let bridge_stop = stop.clone();
+    let operation_stop = handle.cancel_token();
+    tokio::spawn(async move {
+        operation_stop.cancelled().await;
+        bridge_stop.cancel();
+    });
+
+    stream_new_logs(&handle, &logs).await;
+    let finisher_logs = logs.clone();
+    let finisher_limits = limits.clone();
+    let finisher_handle = handle.clone();
+    let finisher = tokio::spawn(async move {
+        finish_script_operation(finisher_handle, join, finisher_logs, finisher_limits, timeout).await;
+    });
+    handle.attach_join(finisher).await;
+
+    Ok(ToolResult::success(serde_json::to_string(
+        &ScriptOperationStarted {
+            result_type: "operation_started",
+            async_operation: AsyncOperationStartReceipt::new(
+                operation_id,
+                AsyncOperationKind::Script,
+                controls,
+            ),
+            timeout_ms: timeout.as_millis() as u64,
+        },
+    )?))
+}
+
+/// Await the engine, stream log lines into the transcript, and settle the
+/// async operation with the final output.
+async fn finish_script_operation(
+    handle: AsyncOperationHandle,
+    mut join: tokio::task::JoinHandle<anyhow::Result<ScriptOutcome>>,
+    logs: Arc<Mutex<LogBuffer>>,
+    limits: ScriptLimits,
+    timeout: Duration,
+) {
+    let mut interval = tokio::time::interval(LOG_STREAM_INTERVAL);
+    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    let result = loop {
+        tokio::select! {
+            res = &mut join => break res,
+            _ = interval.tick() => stream_new_logs(&handle, &logs).await,
+        }
+    };
+    stream_new_logs(&handle, &logs).await;
+    let drained = {
+        let mut buffer = logs.lock().expect("log mutex poisoned");
+        let mut lines = buffer.take_all();
+        if buffer.truncated() {
+            lines.push("[log truncated: cap reached]".to_string());
+        }
+        lines
+    };
+    match result {
+        Ok(Ok(outcome)) if outcome.error.is_none() => {
+            handle
+                .complete("Script completed", Some(envelope(&outcome, &drained)))
+                .await;
+        }
+        Ok(Ok(outcome)) => {
+            let error = match outcome.timed_out {
+                true => format!(
+                    "script exceeded wall-clock timeout of {:?}",
+                    timeout.min(limits.max_timeout)
+                ),
+                false => outcome
+                    .error
+                    .clone()
+                    .unwrap_or_else(|| "script failed".into()),
+            };
+            handle.fail_with_output(error, Some(envelope(&outcome, &drained))).await;
+        }
+        Ok(Err(error)) => handle.fail(error.to_string()).await,
+        Err(error) => handle
+            .fail(format!("script task failed: {error}"))
+            .await,
+    }
+}
+
+async fn stream_new_logs(handle: &AsyncOperationHandle, logs: &Arc<Mutex<LogBuffer>>) {
+    let lines = logs.lock().expect("log mutex poisoned").take_new();
+    for line in lines {
+        handle
+            .transcript(AsyncOperationTranscriptEvent::OutputChunk {
+                summary: format!("[log] {line}"),
+            })
+            .await;
+    }
+}
+
+fn script_operation_label(script: &str) -> String {
+    let first_line = script.lines().find(|line| !line.trim().is_empty());
+    match first_line {
+        Some(line) if line.len() <= 60 => format!("script: {line}"),
+        Some(line) => format!("script: {}…", &line[..60]),
+        None => "script".to_string(),
+    }
+}
+
+#[derive(Serialize)]
+struct ScriptOperationStarted {
+    #[serde(rename = "type")]
+    result_type: &'static str,
+    #[serde(flatten)]
+    async_operation: AsyncOperationStartReceipt,
+    timeout_ms: u64,
+}
+
+fn synchronous_result(outcome: ScriptOutcome, logs: &Arc<Mutex<LogBuffer>>) -> ToolResult {
+    let drained = {
+        let mut buffer = logs.lock().expect("log mutex poisoned");
+        let mut lines = buffer.take_all();
+        if buffer.truncated() {
+            lines.push("[log truncated: cap reached]".to_string());
+        }
+        lines
+    };
     if let Some(error) = &outcome.error {
         let mut text = error.clone();
-        if !outcome.logs.is_empty() {
+        if !drained.is_empty() {
             text.push_str("\n\nscript log:\n");
-            text.push_str(&outcome.logs.join("\n"));
+            text.push_str(&drained.join("\n"));
         }
         return ToolResult::failure(text);
     }
+    ToolResult::success(serde_json::to_string(&envelope(&outcome, &drained)).unwrap_or_default())
+}
 
-    // Machine-readable envelope so the model can parse the return value even
-    // when log lines are present.
-    let payload = json!({
+/// Machine-readable envelope so the model can parse the return value even
+/// when log lines are present.
+fn envelope(outcome: &ScriptOutcome, drained: &[String]) -> serde_json::Value {
+    json!({
         "result": outcome.value.clone().unwrap_or(serde_json::Value::Null),
-        "log": outcome.logs,
-    });
-    ToolResult::success(serde_json::to_string(&payload).unwrap_or_default())
+        "log": drained,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nenjo::{AsyncOpManager, AsyncOperationRuntime};
     use nenjo_tool_api::ToolCategory;
-    use serde_json::json;
+    use serde_json::Value;
     use std::time::Duration;
 
-    /// Deterministic stand-in for an `ExternalMcpTool`.
-    struct FakeMcpTool {
+    /// Deterministic stand-ins for real worker tools.
+    struct FakeTool {
         name: &'static str,
         behavior: FakeBehavior,
     }
@@ -152,39 +426,44 @@ mod tests {
         Echo,
         /// Always returns a denial.
         Deny(&'static str),
+        /// Sleeps before echoing — drives promotion past the initial wait.
+        Slow(Duration),
     }
 
-    impl FakeMcpTool {
-        fn echo(name: &'static str) -> Self {
-            Self {
+    impl FakeTool {
+        fn echo(name: &'static str) -> Arc<dyn Tool> {
+            Arc::new(Self {
                 name,
                 behavior: FakeBehavior::Echo,
-            }
+            })
         }
 
-        fn deny(name: &'static str, reason: &'static str) -> Self {
-            Self {
+        fn deny(name: &'static str, reason: &'static str) -> Arc<dyn Tool> {
+            Arc::new(Self {
                 name,
                 behavior: FakeBehavior::Deny(reason),
-            }
+            })
         }
 
-        fn arc(self) -> Arc<dyn Tool> {
-            Arc::new(self)
+        fn slow(name: &'static str, delay: Duration) -> Arc<dyn Tool> {
+            Arc::new(Self {
+                name,
+                behavior: FakeBehavior::Slow(delay),
+            })
         }
     }
 
     #[async_trait]
-    impl Tool for FakeMcpTool {
+    impl Tool for FakeTool {
         fn name(&self) -> &str {
             self.name
         }
 
         fn description(&self) -> &str {
-            "fake mcp tool for script tests"
+            "fake tool for script tests"
         }
 
-        fn parameters_schema(&self) -> serde_json::Value {
+        fn parameters_schema(&self) -> Value {
             json!({"type": "object"})
         }
 
@@ -196,77 +475,76 @@ mod tests {
             ToolOrigin::Mcp
         }
 
-        async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
+        async fn execute(&self, args: Value) -> anyhow::Result<ToolResult> {
             match &self.behavior {
                 FakeBehavior::Echo => Ok(ToolResult::success(args.to_string())),
                 FakeBehavior::Deny(reason) => Ok(ToolResult::failure(*reason)),
+                FakeBehavior::Slow(delay) => {
+                    tokio::time::sleep(*delay).await;
+                    Ok(ToolResult::success(args.to_string()))
+                }
             }
         }
     }
 
-    fn script_tool(tools: Vec<Arc<dyn Tool>>) -> ScriptTool {
-        ScriptTool::mcp(tools)
+    fn script_tool(mcp: Vec<Arc<dyn Tool>>, runtime: Vec<Arc<dyn Tool>>) -> ScriptTool {
+        ScriptTool::new(mcp, runtime, None)
     }
 
     async fn run_script(tool: &ScriptTool, script: &str) -> ToolResult {
-        tool.execute(json!({"script": script, "timeout_ms": 5_000}))
+        tool.execute(json!({"script": script, "timeout_ms": 8_000}))
             .await
             .expect("execute should not error at the transport level")
     }
 
+    fn envelope_of(result: &ToolResult) -> Value {
+        serde_json::from_str(&result.output.text_content()).expect("JSON envelope")
+    }
+
     #[tokio::test]
-    async fn script_dispatches_mcp_tools_and_returns_value() {
-        let tool = script_tool(vec![
-            FakeMcpTool::echo("mcp_test__get_issue").arc(),
-            FakeMcpTool::echo("mcp_test__list_issues").arc(),
-        ]);
+    async fn script_dispatches_tools_from_both_namespaces() {
+        let tool = script_tool(
+            vec![FakeTool::echo("mcp_test__get_issue")],
+            vec![FakeTool::echo("runtime_test__read_file")],
+        );
         let result = run_script(
             &tool,
             r#"
-                const direct = await ctx.mcp.mcp_test__get_issue({ id: 42 });
-                const [a, b] = await Promise.all([
-                    ctx.mcp.mcp_test__get_issue({ id: 1 }),
-                    ctx.mcp.mcp_test__list_issues({ state: "open" }),
-                ]);
-                ctx.log("fetched", direct.ok ? "ok" : "failed");
-                return { ids: [a.content, b.content], direct: direct.ok };
+                const issue = await ctx.mcp.mcp_test__get_issue({ id: 42 });
+                const file = await ctx.runtime.runtime_test__read_file({ path: "a.txt" });
+                ctx.log("fetched");
+                return { issue: issue.ok, file: file.content };
             "#,
         )
         .await;
         assert!(result.success, "script failed: {:?}", result.error);
-        let value: serde_json::Value = serde_json::from_str(&result.output.text_content())
-            .expect("JSON envelope");
-        assert_eq!(value["result"]["direct"], json!(true));
-        assert_eq!(
-            value["result"]["ids"],
-            json!([r#"{"id":1}"#, r#"{"state":"open"}"#])
-        );
-        assert_eq!(value["log"], json!(["fetched ok"]));
+        let value = envelope_of(&result);
+        assert_eq!(value["result"]["issue"], json!(true));
+        assert_eq!(value["result"]["file"], json!(r#"{"path":"a.txt"}"#));
+        assert_eq!(value["log"], json!(["fetched"]));
     }
 
     #[tokio::test]
     async fn script_surfaces_denials_like_direct_calls() {
-        let tool = script_tool(vec![FakeMcpTool::deny("mcp_test__write_file", "denied by policy").arc()]);
+        let tool = script_tool(
+            vec![FakeTool::deny("mcp_test__write_file", "denied by policy")],
+            vec![],
+        );
         let result = run_script(
             &tool,
             "return await ctx.mcp.mcp_test__write_file({ path: 'x' });",
         )
         .await;
         assert!(result.success, "script itself succeeds; denial is data");
-        let envelope: serde_json::Value =
-            serde_json::from_str(&result.output.text_content()).expect("JSON envelope");
-        assert_eq!(envelope["result"]["ok"], json!(false));
-        assert_eq!(envelope["result"]["error"], json!("denied by policy"));
+        let value = envelope_of(&result);
+        assert_eq!(value["result"]["ok"], json!(false));
+        assert_eq!(value["result"]["error"], json!("denied by policy"));
     }
 
     #[tokio::test]
-    async fn script_dispatch_of_unknown_tool_is_a_data_error() {
-        let tool = script_tool(vec![FakeMcpTool::echo("mcp_test__known").arc()]);
-        let result = run_script(
-            &tool,
-            "return await ctx.mcp.mcp_test__does_not_exist({});",
-        )
-        .await;
+    async fn unknown_namespace_method_threads_a_readable_type_error() {
+        let tool = script_tool(vec![FakeTool::echo("mcp_test__known")], vec![]);
+        let result = run_script(&tool, "return await ctx.mcp.mcp_test__does_not_exist({});").await;
         // The shim only defines methods for granted tools, so a typo'd tool is
         // an ordinary JS TypeError the model can read and fix.
         assert!(!result.success);
@@ -275,8 +553,40 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn list_and_harness_are_exposed() {
+        let tool = ScriptTool::new(
+            vec![FakeTool::echo("mcp_test__a")],
+            vec![FakeTool::echo("runtime_test__b")],
+            Some(ScriptHarnessContext {
+                session_id: Some(uuid::Uuid::nil()),
+                project_slug: Some("acme".into()),
+            }),
+        );
+        let result = run_script(
+            &tool,
+            r#"
+                return {
+                    mcpNames: (await ctx.mcp.list()).map(t => t.name),
+                    runtimeNames: (await ctx.runtime.list()).map(t => t.name),
+                    project: ctx.harness.project,
+                    sessionId: ctx.harness.sessionId,
+                    hasLog: typeof ctx.log === "function",
+                };
+            "#,
+        )
+        .await;
+        assert!(result.success, "script failed: {:?}", result.error);
+        let value = envelope_of(&result);
+        assert_eq!(value["result"]["mcpNames"], json!(["mcp_test__a"]));
+        assert_eq!(value["result"]["runtimeNames"], json!(["runtime_test__b"]));
+        assert_eq!(value["result"]["project"], json!("acme"));
+        assert_eq!(value["result"]["sessionId"], json!(uuid::Uuid::nil().to_string()));
+        assert_eq!(value["result"]["hasLog"], json!(true));
+    }
+
+    #[tokio::test]
     async fn busy_loop_is_killed_by_timeout() {
-        let tool = script_tool(vec![FakeMcpTool::echo("mcp_test__echo").arc()]);
+        let tool = script_tool(vec![FakeTool::echo("mcp_test__echo")], vec![]);
         let started = std::time::Instant::now();
         let result = tool
             .execute(json!({"script": "while (true) {}", "timeout_ms": 300}))
@@ -288,47 +598,21 @@ mod tests {
             "timeout must actually kill the interpreter"
         );
         assert!(
-            result.error.as_deref().unwrap_or_default().contains("timeout"),
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("timeout"),
             "unexpected error: {:?}",
             result.error
         );
     }
 
     #[tokio::test]
-    async fn list_and_log_are_exposed() {
-        let tool = script_tool(vec![
-            FakeMcpTool::echo("mcp_test__a").arc(),
-            FakeMcpTool::echo("mcp_test__b").arc(),
-        ]);
-        let result = run_script(
-            &tool,
-            r#"
-                const names = (await ctx.mcp.list()).map(t => t.name);
-                return { names, hasLog: typeof ctx.log === "function" };
-            "#,
-        )
-        .await;
-        assert!(result.success, "script failed: {:?}", result.error);
-        let envelope: serde_json::Value =
-            serde_json::from_str(&result.output.text_content()).expect("JSON envelope");
-        assert_eq!(
-            envelope["result"]["names"],
-            json!(["mcp_test__a", "mcp_test__b"])
-        );
-        assert_eq!(envelope["result"]["hasLog"], json!(true));
-    }
-
-    #[tokio::test]
     async fn oversized_return_value_is_rejected() {
-        let tool = script_tool(vec![FakeMcpTool::echo("mcp_test__echo").arc()]);
-        let mut limits_tool = script_tool(vec![FakeMcpTool::echo("mcp_test__echo").arc()]);
-        limits_tool.limits.max_output_bytes = 1_000;
-        let _ = tool; // keep the default-limit instance referenced for symmetry
-        let result = run_script(
-            &limits_tool,
-            "return { blob: 'x'.repeat(100_000) };",
-        )
-        .await;
+        let mut tool = script_tool(vec![FakeTool::echo("mcp_test__echo")], vec![]);
+        tool.limits.max_output_bytes = 1_000;
+        let result = run_script(&tool, "return { blob: 'x'.repeat(100_000) };").await;
         assert!(!result.success);
         assert!(
             result
@@ -343,7 +627,7 @@ mod tests {
 
     #[tokio::test]
     async fn missing_script_argument_is_rejected() {
-        let tool = script_tool(vec![FakeMcpTool::echo("mcp_test__echo").arc()]);
+        let tool = script_tool(vec![FakeTool::echo("mcp_test__echo")], vec![]);
         let result = tool
             .execute(json!({}))
             .await
@@ -352,13 +636,80 @@ mod tests {
         assert!(result.error.as_deref().unwrap_or_default().contains("script"));
     }
 
-    #[test]
-    fn script_tool_is_absent_without_mcp_tools_in_description_namespace() {
-        // The factory only registers ScriptTool when MCP tools exist; the tool
-        // itself must still advertise an empty catalog rather than crash.
-        let tool = script_tool(vec![]);
-        let spec = tool.spec();
-        assert_eq!(spec.name, SCRIPT_TOOL_NAME);
-        assert!(spec.parameters["properties"]["script"].is_object());
+    #[tokio::test]
+    async fn long_script_is_promoted_to_async_operation_and_completes() {
+        // A tool call slower than the initial wait forces promotion.
+        let tool = ScriptTool::with_initial_wait(
+            vec![FakeTool::slow("mcp_test__slow", Duration::from_millis(800))],
+            vec![],
+            None,
+            Duration::from_millis(200),
+        );
+        let runtime = AsyncOperationRuntime::new(AsyncOpManager::new());
+        let result = scope_async_operation_runtime(runtime.clone(), async {
+            tool.execute(json!({"script": r#"
+                ctx.log("started");
+                return await ctx.mcp.mcp_test__slow({ n: 1 });
+            "#}))
+            .await
+            .expect("execute should not error at the transport level")
+        })
+        .await;
+        assert!(
+            result.success,
+            "expected promotion receipt: {:?}",
+            result.output.text_content()
+        );
+        let receipt: Value = serde_json::from_str(&result.output.text_content()).unwrap();
+        assert_eq!(receipt["type"], json!("operation_started"));
+        assert_eq!(receipt["kind"], json!("script"));
+        let operation_id = receipt["operation_id"].as_str().expect("operation id").to_string();
+
+        // Let the background run finish, then inspect the settled operation.
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        let inspect = runtime
+            .inspect(vec![operation_id.clone()], None, true, 10)
+            .await;
+        let printed = serde_json::to_value(&inspect).unwrap().to_string();
+        assert!(printed.contains("Script completed"), "output missing: {printed}");
+        assert!(printed.contains(r#"{\"n\":1}"#), "final output missing: {printed}");
+        assert!(printed.contains("started"), "streamed log missing: {printed}");
+    }
+
+    #[tokio::test]
+    async fn stopping_a_promoted_script_transitions_it_to_stopped() {
+        let tool = ScriptTool::with_initial_wait(
+            vec![FakeTool::slow("mcp_test__slow", Duration::from_secs(60))],
+            vec![],
+            None,
+            Duration::from_millis(200),
+        );
+        let runtime = AsyncOperationRuntime::new(AsyncOpManager::new());
+        let result = scope_async_operation_runtime(runtime.clone(), async {
+            tool.execute(json!({"script": "ctx.log('looping'); while (true) { await ctx.mcp.mcp_test__slow({}); }", "timeout_ms": 60_000}))
+                .await
+                .expect("execute should not error")
+        })
+        .await;
+        assert!(result.success, "expected promotion receipt");
+        let receipt: Value = serde_json::from_str(&result.output.text_content()).unwrap();
+        let operation_id = receipt["operation_id"].as_str().expect("operation id").to_string();
+
+        let stopped = runtime
+            .stop(vec![operation_id.clone()], None, Some("test stop".into()), None)
+            .await;
+        let printed = serde_json::to_value(&stopped).unwrap().to_string();
+        assert!(
+            printed.contains(&operation_id) && printed.contains("stopped"),
+            "operation should transition to stopped: {printed}"
+        );
+
+        // The engine must exit promptly via the stop→token bridge.
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let inspect = runtime
+            .inspect(vec![operation_id.clone()], None, false, 10)
+            .await;
+        let printed = serde_json::to_value(&inspect).unwrap().to_string();
+        assert!(printed.contains("\"stopped\""), "expected stopped status: {printed}");
     }
 }

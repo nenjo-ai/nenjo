@@ -5,7 +5,7 @@
 //! tool sets.
 
 // Re-export core tool types.
-pub use nenjo::{Tool, Tool as ToolTrait, ToolCategory, ToolResult, ToolSpec};
+pub use nenjo::{Tool, Tool as ToolTrait, ToolCategory, ToolOrigin, ToolResult, ToolSpec};
 
 pub mod file_delete;
 pub mod file_edit;

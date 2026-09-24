@@ -35,9 +35,13 @@ use super::native_media::tool_name;
 use super::platform_services::PlatformToolServices;
 use super::{
     AutonomyLevel, FileDeleteTool, FileEditTool, FileReadTool, FileWriteTool, HttpRequestTool,
-    ListInstalledSkillsTool, NativeMediaTool, RepoStatusTool, RuntimeAdapter, ScriptTool, SearchTool,
-    SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool, WebSearchTool,
+    ListInstalledSkillsTool, NativeMediaTool, RepoStatusTool, RuntimeAdapter, ScriptTool,
+    SearchTool, SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool,
+    WebSearchTool,
 };
+use super::script::ScriptHarnessContext;
+use super::script::SCRIPT_TOOL_NAME;
+use nenjo_tool_api::ToolOrigin;
 
 tokio::task_local! {
     static PLATFORM_NOTIFICATION_EMITTER: Arc<dyn PlatformNotificationEmitter>;
@@ -297,14 +301,9 @@ where
                 )
                 .await;
             // Convert Box<dyn Tool> → Arc<dyn Tool>
-            let mcp_tools = mcp_tools
-                .into_iter()
-                .map(Arc::from)
-                .collect::<Vec<Arc<dyn Tool>>>();
-            // The script tool exposes the same MCP tools under `ctx.mcp` so an
-            // agent can orchestrate fan-out/aggregation in one step (BOO-61).
-            tools.push(Arc::new(ScriptTool::mcp(mcp_tools.clone())));
-            tools.extend(mcp_tools);
+            for tool in mcp_tools {
+                tools.push(Arc::from(tool));
+            }
         }
 
         let policy = ManifestAccessPolicy::new(agent.platform_scopes.clone());
@@ -394,6 +393,29 @@ where
         }
 
         self.add_native_media_tools(agent, &mut tools);
+
+        // The script tool exposes every granted tool as a `ctx` namespace so an
+        // agent can orchestrate fan-out/aggregation in one step (BOO-61). MCP
+        // tools land in `ctx.mcp`, host/platform tools in `ctx.runtime`, and
+        // session/project identity in `ctx.harness`.
+        let mcp_tools = tools
+            .iter()
+            .filter(|tool| tool.origin() == ToolOrigin::Mcp)
+            .cloned()
+            .collect();
+        let runtime_tools = tools
+            .iter()
+            .filter(|tool| tool.origin() != ToolOrigin::Mcp && tool.name() != SCRIPT_TOOL_NAME)
+            .cloned()
+            .collect();
+        tools.push(Arc::new(ScriptTool::new(
+            mcp_tools,
+            runtime_tools,
+            Some(ScriptHarnessContext {
+                session_id: tool_context.current_session_id,
+                project_slug: tool_context.project_slug.clone(),
+            }),
+        )));
 
         tools
     }

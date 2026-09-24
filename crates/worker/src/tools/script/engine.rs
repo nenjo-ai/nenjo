@@ -14,10 +14,7 @@
 //! privileges.
 
 use std::collections::HashMap;
-use std::sync::{
-    atomic::{AtomicBool, Ordering},
-    Arc, Mutex,
-};
+use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
 use nenjo_tool_api::{Tool, ToolResult};
@@ -26,6 +23,7 @@ use rquickjs::{
 };
 use serde_json::{json, Map, Number};
 use tokio::time::{Duration, Instant};
+use tokio_util::sync::CancellationToken;
 
 /// Hard resource caps for a single script execution.
 #[derive(Debug, Clone)]
@@ -59,13 +57,27 @@ impl Default for ScriptLimits {
     }
 }
 
-/// Tool namespaces exposed to a script. Phase 1 populates only `mcp`.
+/// Tool namespaces exposed to a script.
 #[derive(Clone, Default)]
 pub struct ScriptNamespaces {
+    /// Exposed as `ctx.mcp.*`.
     pub mcp: Vec<Arc<dyn Tool>>,
+    /// Exposed as `ctx.runtime.*`.
+    pub runtime: Vec<Arc<dyn Tool>>,
+    /// Exposed as `ctx.harness.*` metadata (session/project identity).
+    pub harness: Option<ScriptHarnessContext>,
 }
 
-/// Result of a script run.
+/// Harness-level identity exposed to `harness`-scoped scripts.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptHarnessContext {
+    pub session_id: Option<uuid::Uuid>,
+    pub project_slug: Option<String>,
+}
+
+/// Result of a script run. Log lines live in the caller-owned
+/// [`LogBuffer`], so async-operation streaming can read them while the
+/// script is still running.
 #[derive(Debug, Default)]
 pub struct ScriptOutcome {
     /// JSON-serializable return value of the script.
@@ -74,19 +86,20 @@ pub struct ScriptOutcome {
     pub error: Option<String>,
     /// True when the wall-clock budget was exhausted.
     pub timed_out: bool,
-    /// Lines emitted through `ctx.log`.
-    pub logs: Vec<String>,
 }
 
+/// Shared, externally readable log buffer fed by `ctx.log`.
 #[derive(Default)]
-struct LogBuffer {
+pub struct LogBuffer {
     lines: Vec<String>,
     total_bytes: usize,
     truncated: bool,
+    /// Number of lines already consumed by async-operation streaming.
+    published: usize,
 }
 
 impl LogBuffer {
-    fn push(&mut self, limits: &ScriptLimits, line: String) {
+    pub(crate) fn push(&mut self, limits: &ScriptLimits, line: String) {
         if self.lines.len() >= limits.max_log_lines
             || self.total_bytes + line.len() > limits.max_log_bytes
         {
@@ -96,102 +109,120 @@ impl LogBuffer {
         self.total_bytes += line.len();
         self.lines.push(line);
     }
+
+    /// Lines not yet consumed by a streamer.
+    pub(crate) fn take_new(&mut self) -> Vec<String> {
+        let new = self.lines[self.published.min(self.lines.len())..].to_vec();
+        self.published = self.lines.len();
+        new
+    }
+
+    /// All lines, marking them published.
+    pub(crate) fn take_all(&mut self) -> Vec<String> {
+        self.published = self.lines.len();
+        self.lines.clone()
+    }
+
+    pub(crate) fn truncated(&self) -> bool {
+        self.truncated
+    }
 }
 
 /// Run a script with the given namespaces and limits.
+///
+/// `stop` cancels the run: the engine's own deadline thread cancels it at
+/// `timeout`, and an external supervisor (async-operation stop) may cancel it
+/// earlier. Cancellation trips the QuickJS interrupt handler, so CPU-bound
+/// loops terminate even without an await point.
 pub async fn run(
     script: &str,
     namespaces: ScriptNamespaces,
     limits: &ScriptLimits,
     timeout: Duration,
+    stop: CancellationToken,
+    logs: Arc<Mutex<LogBuffer>>,
 ) -> Result<ScriptOutcome> {
     let timeout = timeout.min(limits.max_timeout);
-    let logs = Arc::new(Mutex::new(LogBuffer::default()));
 
     let runtime = AsyncRuntime::new()?;
     runtime.set_memory_limit(limits.max_memory_bytes).await;
     runtime.set_max_stack_size(limits.max_stack_bytes).await;
 
-    // Interrupt handler aborts CPU-bound loops (a blocked interpreter never
-    // yields to the scheduler, so a timer on the local executor would not fire
-    // — the deadline must live on a dedicated OS thread).
-    let deadline = Arc::new(AtomicBool::new(false));
-    let expired = deadline.clone();
-    runtime
-        .set_interrupt_handler(Some(Box::new(move || expired.load(Ordering::Relaxed))))
-        .await;
-    std::thread::spawn({
-        let expired = deadline.clone();
-        move || {
-            std::thread::sleep(timeout);
-            expired.store(true, Ordering::Relaxed);
-        }
+    // The interrupt handler is polled by QuickJS during execution. A blocked
+    // interpreter never yields to the scheduler, so the deadline must live on
+    // a dedicated OS thread rather than a timer on the local executor.
+    let deadline_stop = stop.clone();
+    std::thread::spawn(move || {
+        std::thread::sleep(timeout);
+        deadline_stop.cancel();
     });
+    let interrupt_stop = stop.clone();
+    runtime
+        .set_interrupt_handler(Some(Box::new(move || interrupt_stop.is_cancelled())))
+        .await;
 
     let ctx = AsyncContext::full(&runtime).await?;
     let started = Instant::now();
 
     // Dispatch registry: JS refers to tools by name; native side resolves.
-    let mcp_by_name: HashMap<String, Arc<dyn Tool>> = namespaces
-        .mcp
-        .iter()
-        .map(|tool| (tool.name().to_string(), tool.clone()))
-        .collect();
-    let catalog = json!(namespaces
-        .mcp
-        .iter()
-        .map(|tool| {
+    let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();
+    for tool in namespaces.mcp.iter().chain(namespaces.runtime.iter()) {
+        by_name.insert(tool.name().to_string(), tool.clone());
+    }
+    let catalog = json!({
+        "mcp": namespaces.mcp.iter().map(tool_catalog_entry).collect::<Vec<_>>(),
+        "runtime": namespaces.runtime.iter().map(tool_catalog_entry).collect::<Vec<_>>(),
+    })
+    .to_string();
+    let harness = namespaces
+        .harness
+        .map(|context| {
             json!({
-                "name": tool.name(),
-                "description": tool.description(),
-                "inputSchema": tool.parameters_schema(),
+                "sessionId": context.session_id.map(|id| id.to_string()),
+                "project": context.project_slug,
             })
         })
-        .collect::<Vec<_>>())
-    .to_string();
+        .unwrap_or(serde_json::Value::Null)
+        .to_string();
 
-    let ctx_logs = logs.clone();
-    let result: Result<anyhow::Result<serde_json::Value>, _> = tokio::time::timeout(
-        timeout + Duration::from_secs(1),
-        rquickjs::async_with!(ctx => |ctx| {
-            install_context(&ctx, mcp_by_name, &catalog, &ctx_logs, limits)?;
-            let wrapper =
-                format!("globalThis.__nenjo_script_result = (async () => {{\n{script}\n}})();");
-            let returned: Value = ctx.eval(wrapper.as_str())?;
-            let promise = Promise::from_value(returned)?;
-            match promise.into_future::<Value>().await {
-                Ok(value) => Ok(js_to_json(&value)),
-                Err(err) => {
-                    let message = exception_message(&ctx, &err);
-                    Err(anyhow::anyhow!(message))
-                }
+    let install_logs = logs.clone();
+    let install_limits = limits.clone();
+    let body = rquickjs::async_with!(ctx => |ctx| {
+        install_context(&ctx, Arc::new(by_name), &catalog, &harness, &install_logs, &install_limits)?;
+        let wrapper =
+            format!("globalThis.__nenjo_script_result = (async () => {{\n{script}\n}})();");
+        let returned: Value = ctx.eval(wrapper.as_str())?;
+        let promise = Promise::from_value(returned)?;
+        match promise.into_future::<Value>().await {
+            Ok(value) => Ok(js_to_json(&value)),
+            Err(err) => {
+                let message = exception_message(&ctx, &err);
+                Err(anyhow::anyhow!(message))
             }
-        }),
-    )
-    .await;
+        }
+    });
 
-    let mut outcome = ScriptOutcome {
-        logs: {
-            let mut buffer = logs.lock().expect("log mutex poisoned");
-            if buffer.truncated {
-                buffer.lines.push("[log truncated: cap reached]".to_string());
-            }
-            std::mem::take(&mut buffer.lines)
-        },
-        ..ScriptOutcome::default()
-    };
+    let result: Result<anyhow::Result<serde_json::Value>, _> =
+        tokio::select! {
+            res = body => Ok(res),
+            _ = stop.cancelled() => Err(anyhow::anyhow!("script stopped")),
+        };
 
+    let mut outcome = ScriptOutcome::default();
     match result {
-        Err(_elapsed) => {
-            outcome.timed_out = true;
-            outcome.error = Some(format!(
-                "script exceeded wall-clock timeout of {:?}",
-                timeout
-            ));
+        Err(stopped) => {
+            // Distinguish the engine's own deadline from external stop.
+            outcome.timed_out = started.elapsed() >= timeout;
+            outcome.error = if outcome.timed_out {
+                Some(format!("script exceeded wall-clock timeout of {timeout:?}"))
+            } else {
+                Some(stopped.to_string())
+            };
         }
         Ok(Err(err)) => {
-            // Deadline-interrupted runs surface as Error::Interrupted.
-            outcome.timed_out = started.elapsed() >= timeout || deadline.load(Ordering::Relaxed);
+            // A deadline-interrupted CPU loop surfaces here as a QuickJS
+            // exception from inside the body, not via the stop branch.
+            outcome.timed_out = started.elapsed() >= timeout;
             outcome.error = if outcome.timed_out {
                 Some(format!("script exceeded wall-clock timeout of {timeout:?}"))
             } else {
@@ -213,7 +244,22 @@ pub async fn run(
         }
     }
 
+    if outcome.error.is_some() || logs.lock().expect("log mutex poisoned").truncated() {
+        let mut buffer = logs.lock().expect("log mutex poisoned");
+        if buffer.truncated() {
+            buffer.push(limits, "[log truncated: cap reached]".to_string());
+        }
+    }
+
     Ok(outcome)
+}
+
+fn tool_catalog_entry(tool: &Arc<dyn Tool>) -> serde_json::Value {
+    json!({
+        "name": tool.name(),
+        "description": tool.description(),
+        "inputSchema": tool.parameters_schema(),
+    })
 }
 
 fn exception_message(ctx: &rquickjs::Ctx<'_>, err: &rquickjs::Error) -> String {
@@ -235,24 +281,25 @@ fn exception_message(ctx: &rquickjs::Ctx<'_>, err: &rquickjs::Error) -> String {
     }
 }
 
-/// Install the `ctx` global: `ctx.mcp.<tool>()` methods, `ctx.mcp.list()`,
-/// and `ctx.log`, backed by one native async dispatch function and the JS shim.
+/// Install the `ctx` global: `ctx.mcp.*`/`ctx.runtime.*` namespaces,
+/// `ctx.harness` metadata, and `ctx.log`.
 fn install_context<'js>(
     ctx: &rquickjs::Ctx<'js>,
-    mcp_by_name: HashMap<String, Arc<dyn Tool>>,
+    by_name: Arc<HashMap<String, Arc<dyn Tool>>>,
     catalog: &str,
+    harness: &str,
     logs: &Arc<Mutex<LogBuffer>>,
     limits: &ScriptLimits,
 ) -> rquickjs::Result<()> {
-    let mcp_by_name = Arc::new(mcp_by_name);
     ctx.globals().set("__nenjo_tool_catalog", catalog)?;
+    ctx.globals().set("__nenjo_harness", harness)?;
     ctx.globals().set(
         "__nenjo_dispatch",
         Function::new(
             ctx.clone(),
             Async(move |name: String, args_json: String| {
-                let mcp_by_name = mcp_by_name.clone();
-                async move { dispatch_by_name(&mcp_by_name, &name, &args_json).await }
+                let by_name = by_name.clone();
+                async move { dispatch_by_name(&by_name, &name, &args_json).await }
             }),
         )?,
     )?;
@@ -278,16 +325,22 @@ fn install_context<'js>(
         (() => {
             const catalog = JSON.parse(globalThis.__nenjo_tool_catalog);
             const dispatch = globalThis.__nenjo_dispatch;
-            const ns = {};
-            for (const meta of catalog) {
-                ns[meta.name] = async (args) =>
-                    JSON.parse(await dispatch(meta.name, JSON.stringify(args ?? null)));
-            }
-            ns.list = () => catalog;
-            globalThis.ctx = {
-                mcp: ns,
+            const buildNamespace = (entries) => {
+                const ns = {};
+                for (const meta of entries) {
+                    ns[meta.name] = async (args) =>
+                        JSON.parse(await dispatch(meta.name, JSON.stringify(args ?? null)));
+                }
+                ns.list = () => entries;
+                return ns;
+            };
+            const ctxObj = {
+                mcp: buildNamespace(catalog.mcp),
+                runtime: buildNamespace(catalog.runtime),
+                harness: JSON.parse(globalThis.__nenjo_harness),
                 log: (...parts) => globalThis.__nenjo_log(...parts),
             };
+            globalThis.ctx = ctxObj;
         })();
     "#)?;
     Ok(())
@@ -304,9 +357,10 @@ async fn dispatch_by_name(
 ) -> String {
     let result = match tools.get(name) {
         Some(tool) => {
-            let args: serde_json::Value = serde_json::from_str(args_json).unwrap_or(
-                serde_json::Value::String(args_json.to_string()),
-            );
+            let args: serde_json::Value =
+                serde_json::from_str(args_json).unwrap_or(serde_json::Value::String(
+                    args_json.to_string(),
+                ));
             match tool.execute(args).await {
                 Ok(result) => result,
                 Err(err) => ToolResult::failure(err.to_string()),
