@@ -35,7 +35,7 @@ use super::native_media::tool_name;
 use super::platform_services::PlatformToolServices;
 use super::{
     AutonomyLevel, FileDeleteTool, FileEditTool, FileReadTool, FileWriteTool, HttpRequestTool,
-    ListInstalledSkillsTool, NativeMediaTool, RepoStatusTool, RuntimeAdapter, SearchTool,
+    ListInstalledSkillsTool, NativeMediaTool, RepoStatusTool, RuntimeAdapter, ScriptTool, SearchTool,
     SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool, WebSearchTool,
 };
 
@@ -297,9 +297,14 @@ where
                 )
                 .await;
             // Convert Box<dyn Tool> → Arc<dyn Tool>
-            for tool in mcp_tools {
-                tools.push(Arc::from(tool));
-            }
+            let mcp_tools = mcp_tools
+                .into_iter()
+                .map(Arc::from)
+                .collect::<Vec<Arc<dyn Tool>>>();
+            // The script tool exposes the same MCP tools under `ctx.mcp` so an
+            // agent can orchestrate fan-out/aggregation in one step (BOO-61).
+            tools.push(Arc::new(ScriptTool::mcp(mcp_tools.clone())));
+            tools.extend(mcp_tools);
         }
 
         let policy = ManifestAccessPolicy::new(agent.platform_scopes.clone());

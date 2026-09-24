@@ -90,6 +90,7 @@ rand = "0.8.6"
 rand_core = "0.6"
 rayon = "1.11"
 regex = "1.12"
+rquickjs = { version = "0.9", features = ["full", "futures", "parallel"] }
 reqwest = "0.13"
 rustls = { version = "0.23", default-features = false }
 rustls-webpki = "0.103.13"
