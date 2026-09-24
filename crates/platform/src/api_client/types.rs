@@ -104,6 +104,13 @@ pub struct WorkerEnrollmentStatusResponse {
     pub user_wrapped_acks: HashMap<Uuid, WrappedAccountContentKey>,
     #[serde(default)]
     pub wrapped_ock: Option<WrappedOrgContentKey>,
+    /// One-time pairing token minted by the platform at registration while
+    /// the user's browser has an outstanding onboarding attempt. Only present
+    /// in the enrollment registration response for pending enrollments.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_token: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pairing_expires_at: Option<DateTime<Utc>>,
 }
 
 /// Worker-authorized committed review response used to resume a checkpoint.

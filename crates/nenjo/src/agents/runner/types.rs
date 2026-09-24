@@ -141,6 +141,9 @@ pub enum TurnEvent<Delta = String> {
         ability_name: String,
         task_input: String,
         caller_history: Vec<ConversationMessage>,
+        /// Async operation this ability runs under, when nested (delegation,
+        /// enclosing ability). `None` roots the ability at the top level.
+        parent_operation_id: Option<String>,
     },
     /// One or more tool calls are starting.
     ToolCallStart {
@@ -192,6 +195,8 @@ pub enum TurnEvent<Delta = String> {
         ability_name: String,
         success: bool,
         final_output: String,
+        /// Async operation this ability ran under; mirrors `AbilityStarted`.
+        parent_operation_id: Option<String>,
     },
     /// A sub-agent lifecycle or signal event for observers.
     SubAgentEvent {
@@ -316,12 +321,14 @@ impl<Delta> TurnEvent<Delta> {
                 ability_name,
                 task_input,
                 caller_history,
+                parent_operation_id,
             } => TurnEvent::AbilityStarted {
                 call_id,
                 ability_tool_name,
                 ability_name,
                 task_input,
                 caller_history,
+                parent_operation_id,
             },
             Self::ToolCallStart {
                 batch_id,
@@ -400,12 +407,14 @@ impl<Delta> TurnEvent<Delta> {
                 ability_name,
                 success,
                 final_output,
+                parent_operation_id,
             } => TurnEvent::AbilityCompleted {
                 call_id,
                 ability_tool_name,
                 ability_name,
                 success,
                 final_output,
+                parent_operation_id,
             },
             Self::SubAgentEvent {
                 slug,

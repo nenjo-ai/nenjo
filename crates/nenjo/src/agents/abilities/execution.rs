@@ -177,6 +177,7 @@ async fn execute_ability_operation<P: ProviderRuntime>(
             ability_name: operation.ability.name.clone(),
             task_input: operation.task_description.clone(),
             caller_history: std::mem::take(&mut operation.caller_history_snapshot),
+            parent_operation_id: None,
         });
     }
     let prompts = child
@@ -312,6 +313,7 @@ async fn complete_ability_operation<P: ProviderRuntime>(
             ability_name: operation.ability.name.clone(),
             success,
             final_output,
+            parent_operation_id: None,
         });
     }
 }

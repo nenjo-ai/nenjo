@@ -778,6 +778,7 @@ pub fn trace_events_from_turn_event(
             ability_name,
             task_input,
             caller_history,
+            ..
         } => vec![trace_event(
             context,
             TracePhase::AbilityStarted,
@@ -851,6 +852,7 @@ pub fn trace_events_from_turn_event(
             ability_name,
             success,
             final_output,
+            ..
         } => vec![trace_event(
             context,
             TracePhase::AbilityCompleted,
@@ -1304,6 +1306,7 @@ mod tests {
             ability_name: "research".into(),
             task_input: long_input.clone(),
             caller_history: Vec::new(),
+            parent_operation_id: None,
         });
         let completed = transcript_payloads_from_turn_event(&nenjo::TurnEvent::AbilityCompleted {
             call_id: "call-1".into(),
@@ -1311,6 +1314,7 @@ mod tests {
             ability_name: "research".into(),
             success: true,
             final_output: long_output.clone(),
+            parent_operation_id: None,
         });
 
         assert!(matches!(
@@ -1338,6 +1342,7 @@ mod tests {
                 ability_name: "Review".to_string(),
                 task_input: "inspect this".to_string(),
                 caller_history: vec![ConversationMessage::user("please inspect")],
+                parent_operation_id: None,
             },
         )
         .remove(0);

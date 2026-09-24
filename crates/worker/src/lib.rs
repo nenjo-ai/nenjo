@@ -56,6 +56,21 @@ const MAX_BACKOFF: Duration = Duration::from_secs(60);
 /// Initial backoff between connection attempts.
 const INITIAL_BACKOFF: Duration = Duration::from_secs(1);
 
+/// Ensures the "waiting for enrollment approval" state is reported once per
+/// process instead of a failure warning on every retry.
+static WAITING_FOR_APPROVAL_ANNOUNCED: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+/// Whether an error is the expected "enrollment not approved yet" condition —
+/// no ACK exists until a user approves the harness — rather than a failure.
+fn is_waiting_for_enrollment_approval(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let text = cause.to_string();
+        text.contains("Worker has no enrolled ACK yet")
+            || text.contains("missing ACK required for bootstrap decrypt")
+    })
+}
+
 /// Poll interval while waiting for a worker enrollment to be approved.
 const APPROVAL_POLL_INTERVAL: Duration = Duration::from_secs(5);
 
@@ -183,11 +198,26 @@ pub async fn run_with_config(config: Config) -> Result<()> {
                     info!("Worker shut down");
                     break;
                 }
-                warn!(
-                    error = %e,
-                    retry_in = ?backoff,
-                    "Worker failed, retrying"
-                );
+                // Waiting for enrollment approval is the expected state while
+                // a harness is pending: report it once, calmly, instead of a
+                // failure warning on every retry.
+                if is_waiting_for_enrollment_approval(&e) {
+                    if !WAITING_FOR_APPROVAL_ANNOUNCED
+                        .swap(true, std::sync::atomic::Ordering::Relaxed)
+                    {
+                        info!(
+                            error = %e,
+                            retry_in = ?backoff,
+                            "Harness is waiting for enrollment approval; open the pairing link or enter the verification code on the dashboard"
+                        );
+                    }
+                } else {
+                    warn!(
+                        error = %e,
+                        retry_in = ?backoff,
+                        "Worker failed, retrying"
+                    );
+                }
                 tokio::select! {
                     _ = tokio::time::sleep(backoff) => {}
                     _ = shutdown.cancelled() => {
@@ -445,7 +475,9 @@ async fn wait_for_enrollment_approval(
         return Ok(());
     }
 
-    info!(
+    // The pairing notice (or verification-code announcement) already told the
+    // user we are waiting; stay quiet until approval or rejection.
+    debug!(
         %api_key_id,
         poll_every = ?APPROVAL_POLL_INTERVAL,
         "Waiting for worker enrollment approval"
