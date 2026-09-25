@@ -39,7 +39,7 @@ use super::{
     SearchTool, SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool,
     WebSearchTool,
 };
-use super::script::ScriptHarnessContext;
+use super::script::{script_dispatchable, ScriptHarnessContext};
 use super::script::SCRIPT_TOOL_NAME;
 use super::script::package::resolve_script_tools;
 use super::script::engine::ScriptLimits;
@@ -399,8 +399,11 @@ where
 
         // Partition granted tools once: MCP tools land in `ctx.mcp`, host and
         // platform tools in `ctx.runtime`, and session/project identity in
-        // `ctx.harness`. Both the interactive script tool and package-shipped
-        // script tools dispatch through the same namespaces (BOO-61).
+        // `ctx.harness`. Harness-origin tools (agent invocation: abilities,
+        // delegation, sub-agents, operation controls) are excluded — see
+        // `script_dispatchable`. Both the interactive script tool and
+        // package-shipped script tools dispatch through the same namespaces
+        // (BOO-61).
         let mcp_tools: Vec<Arc<dyn Tool>> = tools
             .iter()
             .filter(|tool| tool.origin() == ToolOrigin::Mcp)
@@ -408,7 +411,11 @@ where
             .collect();
         let runtime_tools: Vec<Arc<dyn Tool>> = tools
             .iter()
-            .filter(|tool| tool.origin() != ToolOrigin::Mcp && tool.name() != SCRIPT_TOOL_NAME)
+            .filter(|tool| {
+                script_dispatchable(tool.as_ref())
+                    && tool.origin() != ToolOrigin::Mcp
+                    && tool.name() != SCRIPT_TOOL_NAME
+            })
             .cloned()
             .collect();
         tools.push(Arc::new(ScriptTool::new(

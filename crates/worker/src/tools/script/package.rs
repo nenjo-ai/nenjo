@@ -77,8 +77,10 @@ impl PackageScriptTool {
                 .map(std::time::Duration::from_secs)
                 .unwrap_or(limits.default_timeout),
             read_only: manifest.read_only,
-            mcp_tools,
-            runtime_tools,
+            // Package scripts dispatch the agent's tool surface; the same
+            // agent-invocation exclusion applies (see [`script_dispatchable`]).
+            mcp_tools: super::dispatchable_only(mcp_tools),
+            runtime_tools: super::dispatchable_only(runtime_tools),
             limits,
         })
     }
@@ -89,8 +91,7 @@ impl PackageScriptTool {
             runtime: self.runtime_tools.clone(),
             harness: None,
         }
-    }
-}
+    }}
 
 /// Resolve the absolute script entry path from a manifest.
 ///
@@ -358,6 +359,64 @@ mod tests {
             "name must match the provider tool-name pattern: {}",
             tool.name()
         );
+    }
+
+    /// Stand-in for agent-invoking tools (ToolOrigin::Harness).
+    struct FakeHarnessTool;
+
+    #[async_trait]
+    impl Tool for FakeHarnessTool {
+        fn name(&self) -> &str {
+            "spawn_sub_agents"
+        }
+
+        fn description(&self) -> &str {
+            "spawns sub-agents"
+        }
+
+        fn parameters_schema(&self) -> serde_json::Value {
+            json!({"type": "object"})
+        }
+
+        fn origin(&self) -> ToolOrigin {
+            ToolOrigin::Harness
+        }
+
+        async fn execute(&self, _args: serde_json::Value) -> anyhow::Result<ToolResult> {
+            panic!("agent-invoking tool must never be dispatched from a script")
+        }
+    }
+
+    #[tokio::test]
+    async fn package_scripts_cannot_dispatch_agent_invoking_tools() {
+        let root = tempfile::tempdir().unwrap();
+        write_script(
+            root.path(),
+            "demo.js",
+            "return { keys: Object.keys(ctx.runtime), spawnType: typeof ctx.runtime.spawn_sub_agents, readType: typeof ctx.runtime.runtime_test__read_file };",
+        );
+        let manifest = manifest_with("demo.js", root.path());
+        let tool = PackageScriptTool::from_manifest(
+            manifest,
+            vec![],
+            vec![Arc::new(FakeTool), Arc::new(FakeHarnessTool)],
+            ScriptLimits::default(),
+        )
+        .unwrap();
+        let result = tool
+            .execute(json!({}))
+            .await
+            .expect("execute should not error at transport level");
+        assert!(result.success, "script failed: {:?}", result.error);
+        let envelope: serde_json::Value =
+            serde_json::from_str(&result.output.text_content()).unwrap();
+        assert_eq!(
+            envelope["result"]["keys"],
+            json!(["runtime_test__read_file", "list"]),
+            "harness tool must not appear in ctx.runtime"
+        );
+        assert_eq!(envelope["result"]["spawnType"], json!("undefined"));
+        assert_eq!(envelope["result"]["readType"], json!("function"));
     }
 
     #[tokio::test]

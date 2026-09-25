@@ -33,6 +33,27 @@ use self::lifecycle::{INITIAL_WAIT, promote_to_operation};
 
 pub const SCRIPT_TOOL_NAME: &str = "script";
 
+/// Whether a tool may be dispatched from inside a script VM.
+///
+/// `ToolOrigin::Harness` tools are excluded: they orchestrate other agents —
+/// ability brokers (`use_ability`, `list_assigned_abilities`), delegation and
+/// sub-agent spawning, and async-operation controls (`inspect`, `send_input`,
+/// `stop`, `wait`). A script must not spawn or steer agents, and must not
+/// manipulate the operation lifecycle it may itself be running under. Every
+/// other origin dispatches through the normal permission pipeline, so scripts
+/// gain control flow, never privileges.
+pub(crate) fn script_dispatchable(tool: &dyn Tool) -> bool {
+    !matches!(tool.origin(), ToolOrigin::Harness)
+}
+
+/// Strip non-dispatchable tools from a namespace candidate list.
+pub(crate) fn dispatchable_only(tools: Vec<Arc<dyn Tool>>) -> Vec<Arc<dyn Tool>> {
+    tools
+        .into_iter()
+        .filter(|tool| script_dispatchable(tool.as_ref()))
+        .collect()
+}
+
 /// Tool implementation wrapping the QuickJS engine.
 pub struct ScriptTool {
     /// Tools dispatchable from `ctx.mcp`.
@@ -48,11 +69,17 @@ pub struct ScriptTool {
 
 impl ScriptTool {
     /// Build a script tool exposing MCP and host tools as context namespaces.
+    ///
+    /// Harness-origin tools (agent invocation and operation control) are
+    /// stripped here regardless of what the caller passes — see
+    /// [`script_dispatchable`].
     pub fn new(
         mcp_tools: Vec<Arc<dyn Tool>>,
         runtime_tools: Vec<Arc<dyn Tool>>,
         harness: Option<ScriptHarnessContext>,
     ) -> Self {
+        let mcp_tools = dispatchable_only(mcp_tools);
+        let runtime_tools = dispatchable_only(runtime_tools);
         let mut sections = Vec::new();
         if !mcp_tools.is_empty() {
             sections.push(format!(
