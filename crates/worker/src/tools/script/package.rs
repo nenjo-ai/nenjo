@@ -25,7 +25,7 @@ pub struct PackageScriptTool {
     description: String,
     parameters: serde_json::Value,
     source: String,
-    timeout_seconds: u64,
+    timeout: std::time::Duration,
     read_only: bool,
     mcp_tools: Vec<Arc<dyn Tool>>,
     runtime_tools: Vec<Arc<dyn Tool>>,
@@ -37,6 +37,11 @@ impl PackageScriptTool {
     ///
     /// Fails when the manifest lacks a package root, the entry path escapes
     /// the package, or the script file cannot be read.
+    ///
+    /// The manifest's `command.args` and `command.cwd` fields are ignored:
+    /// they exist for a future subprocess backend, while this tool executes
+    /// the script directly in the QuickJS engine. Any non-default values are
+    /// surfaced as a warning rather than silently dropped.
     pub fn from_manifest(
         manifest: ScriptToolManifest,
         mcp_tools: Vec<Arc<dyn Tool>>,
@@ -49,6 +54,15 @@ impl PackageScriptTool {
         if source.len() > 512 * 1024 {
             anyhow::bail!("script tool `{}` exceeds 512 KiB size limit", manifest.slug);
         }
+        if !manifest.command.args.is_empty() || manifest.command.cwd != "workspace" {
+            tracing::warn!(
+                slug = %manifest.slug,
+                args = ?manifest.command.args,
+                cwd = %manifest.command.cwd,
+                "Script tool manifest declares command.args/command.cwd, which the \
+                 QuickJS backend ignores"
+            );
+        }
         let description = manifest
             .description
             .clone()
@@ -58,9 +72,10 @@ impl PackageScriptTool {
             description,
             parameters: manifest.parameters.clone(),
             source,
-            timeout_seconds: manifest.timeout_seconds.unwrap_or_else(|| {
-                limits.default_timeout.as_secs().max(1)
-            }),
+            timeout: manifest
+                .timeout_seconds
+                .map(std::time::Duration::from_secs)
+                .unwrap_or(limits.default_timeout),
             read_only: manifest.read_only,
             mcp_tools,
             runtime_tools,
@@ -138,28 +153,19 @@ impl Tool for PackageScriptTool {
     async fn execute(&self, args: serde_json::Value) -> anyhow::Result<ToolResult> {
         let stop = CancellationToken::new();
         let logs = Arc::new(Mutex::new(LogBuffer::default()));
-        let timeout = std::time::Duration::from_secs(self.timeout_seconds);
         let outcome = engine::run_with_input(
             &self.source,
             self.namespaces(),
             &self.limits,
-            timeout,
+            self.timeout,
             stop,
             logs.clone(),
             Some(args),
         )
         .await?;
-        Ok(super::outcome_to_tool_result(&outcome, &drain_logs(&logs)))
+        let drained = logs.lock().expect("log mutex poisoned").drain_all();
+        Ok(super::outcome_to_tool_result(&outcome, &drained))
     }
-}
-
-fn drain_logs(logs: &Arc<Mutex<LogBuffer>>) -> Vec<String> {
-    let mut buffer = logs.lock().expect("log mutex poisoned");
-    let mut lines = buffer.take_all();
-    if buffer.truncated() {
-        lines.push("[log truncated: cap reached]".to_string());
-    }
-    lines
 }
 
 /// Registry resolving assigned script tool slugs against the cached catalog.
@@ -334,6 +340,24 @@ mod tests {
             panic!("missing script file must be rejected")
         };
         assert!(error.to_string().contains("failed to read"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn model_facing_name_is_sanitized() {
+        let root = tempfile::tempdir().unwrap();
+        write_script(root.path(), "demo.js", "return 1;");
+        let mut manifest = manifest_with("demo.js", root.path());
+        manifest.name = "My Fancy Tool!*".into();
+        let tool =
+            PackageScriptTool::from_manifest(manifest, vec![], vec![], ScriptLimits::default())
+                .unwrap();
+        assert!(
+            tool.name()
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-'),
+            "name must match the provider tool-name pattern: {}",
+            tool.name()
+        );
     }
 
     #[tokio::test]

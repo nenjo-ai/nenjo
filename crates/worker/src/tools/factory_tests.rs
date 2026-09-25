@@ -1881,7 +1881,9 @@ async fn worker_factory_registers_assigned_package_script_tools() {
         domains: vec![],
         platform_scopes: vec![],
         mcp_servers: vec![],
-        script_tools: vec![slug],
+        // Assigning the same slug twice must yield one tool (duplicate-name
+        // skip), not two identical registrations.
+        script_tools: vec![slug.clone(), slug],
         media: vec![],
         abilities: vec![],
         prompt_locked: false,
@@ -1890,10 +1892,12 @@ async fn worker_factory_registers_assigned_package_script_tools() {
     };
 
     let tools = factory.create_tools(&agent).await;
-    let package_tool = tools
+    let package_tools = tools
         .iter()
-        .find(|tool| tool.name() == "demo_tool")
-        .expect("assigned package script tool should be registered");
+        .filter(|tool| tool.name() == "demo_tool")
+        .collect::<Vec<_>>();
+    assert_eq!(package_tools.len(), 1, "duplicate assignment must be deduped");
+    let package_tool = package_tools[0];
 
     let result = package_tool
         .execute(serde_json::json!({"a": 1, "b": 2}))

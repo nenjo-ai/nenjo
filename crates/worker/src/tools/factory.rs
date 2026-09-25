@@ -397,23 +397,23 @@ where
 
         self.add_native_media_tools(agent, &mut tools);
 
-        // The script tool exposes every granted tool as a `ctx` namespace so an
-        // agent can orchestrate fan-out/aggregation in one step (BOO-61). MCP
-        // tools land in `ctx.mcp`, host/platform tools in `ctx.runtime`, and
-        // session/project identity in `ctx.harness`.
-        let mcp_tools = tools
+        // Partition granted tools once: MCP tools land in `ctx.mcp`, host and
+        // platform tools in `ctx.runtime`, and session/project identity in
+        // `ctx.harness`. Both the interactive script tool and package-shipped
+        // script tools dispatch through the same namespaces (BOO-61).
+        let mcp_tools: Vec<Arc<dyn Tool>> = tools
             .iter()
             .filter(|tool| tool.origin() == ToolOrigin::Mcp)
             .cloned()
             .collect();
-        let runtime_tools = tools
+        let runtime_tools: Vec<Arc<dyn Tool>> = tools
             .iter()
             .filter(|tool| tool.origin() != ToolOrigin::Mcp && tool.name() != SCRIPT_TOOL_NAME)
             .cloned()
             .collect();
         tools.push(Arc::new(ScriptTool::new(
-            mcp_tools,
-            runtime_tools,
+            mcp_tools.clone(),
+            runtime_tools.clone(),
             Some(ScriptHarnessContext {
                 session_id: tool_context.current_session_id,
                 project_slug: tool_context.project_slug.clone(),
@@ -421,28 +421,16 @@ where
         )));
 
         // Package-shipped script tools assigned to the agent run on the same
-        // engine, with the same dispatch surface (BOO-61 phase 3).
+        // engine, with the same dispatch surface.
         if !agent.script_tools.is_empty() {
             let catalog = load_cached_script_tools(&self.config.manifests_dir);
-            let package_mcp = tools
-                .iter()
-                .filter(|tool| tool.origin() == ToolOrigin::Mcp)
-                .cloned()
-                .collect();
-            let package_runtime = tools
-                .iter()
-                .filter(|tool| {
-                    tool.origin() != ToolOrigin::Mcp && tool.name() != SCRIPT_TOOL_NAME
-                })
-                .cloned()
-                .collect();
             let mut taken_names: std::collections::HashSet<String> =
                 tools.iter().map(|tool| tool.name().to_string()).collect();
             let (package_tools, problems) = resolve_script_tools(
                 &agent.script_tools,
                 &catalog,
-                package_mcp,
-                package_runtime,
+                mcp_tools,
+                runtime_tools,
                 ScriptLimits::default(),
             );
             for problem in problems {

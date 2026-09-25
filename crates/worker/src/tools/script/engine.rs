@@ -117,10 +117,15 @@ impl LogBuffer {
         new
     }
 
-    /// All lines, marking them published.
-    pub(crate) fn take_all(&mut self) -> Vec<String> {
+    /// All lines plus the truncation marker, marking them published. This is
+    /// the terminal read used when a run settles.
+    pub(crate) fn drain_all(&mut self) -> Vec<String> {
         self.published = self.lines.len();
-        self.lines.clone()
+        let mut lines = self.lines.clone();
+        if self.truncated {
+            lines.push("[log truncated: cap reached]".to_string());
+        }
+        lines
     }
 
     pub(crate) fn truncated(&self) -> bool {
