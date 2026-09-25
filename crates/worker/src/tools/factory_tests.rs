@@ -1817,3 +1817,114 @@ async fn platform_manifest_backend_prefers_local_ability_over_package_overlay() 
         "Local routine builder."
     );
 }
+
+#[tokio::test]
+async fn worker_factory_registers_assigned_package_script_tools() {
+    let temp = tempdir().unwrap();
+    let root = temp.path();
+    let manifests_dir = root.join("manifests");
+    std::fs::create_dir_all(&manifests_dir).unwrap();
+
+    let package_root = root.join("packages/demo");
+    std::fs::create_dir_all(&package_root).unwrap();
+    let workspace = root.join("workspace");
+    std::fs::create_dir_all(&workspace).unwrap();
+    std::fs::write(workspace.join("demo-input.txt"), "2").unwrap();
+    std::fs::write(
+        package_root.join("demo.js"),
+        "ctx.log('summing'); const file = await ctx.runtime.read({ path: 'demo-input.txt' }); return { sum: args.a + args.b, file: file.content };",
+    )
+    .unwrap();
+
+    // Cached catalog exactly as bootstrap writes it from the platform sync.
+    let slug: Slug = "pkg_demo_tool".parse().unwrap();
+    let catalog = serde_json::json!([{
+        "slug": slug,
+        "name": "demo_tool",
+        "description": "adds two numbers",
+        "category": "read_write",
+        "parameters": {"type": "object"},
+        "command": {"path": "demo.js", "args": [], "cwd": "workspace"},
+        "root_path": "",
+        "root_dir": package_root,
+        "timeout_seconds": 5,
+        "source_type": "package",
+        "read_only": false,
+        "metadata": null
+    }]);
+    std::fs::write(
+        manifests_dir.join("script_tools.json"),
+        serde_json::to_string(&catalog).unwrap(),
+    )
+    .unwrap();
+
+    let config = crate::config::Config {
+        workspace_dir: root.join("workspace"),
+        state_dir: root.join("state"),
+        manifests_dir: manifests_dir.clone(),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider = Arc::new(WorkerAuthProvider::load_or_create(root.join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+    let agent = AgentManifest {
+        name: "tester".into(),
+        slug: Slug::derive("test-agent"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: vec![slug],
+        media: vec![],
+        abilities: vec![],
+        prompt_locked: false,
+        source_type: None,
+        metadata: serde_json::json!({}),
+    };
+
+    let tools = factory.create_tools(&agent).await;
+    let package_tool = tools
+        .iter()
+        .find(|tool| tool.name() == "demo_tool")
+        .expect("assigned package script tool should be registered");
+
+    let result = package_tool
+        .execute(serde_json::json!({"a": 1, "b": 2}))
+        .await
+        .unwrap();
+    assert!(result.success, "script failed: {:?}", result.error);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    assert_eq!(envelope["result"]["sum"], serde_json::json!(3));
+    assert_eq!(envelope["result"]["file"], serde_json::json!("2"));
+    assert_eq!(envelope["log"], serde_json::json!(["summing"]));
+
+    // The interactive script tool must not expose package script tools as a
+    // dispatchable ctx.runtime entry (no recursion).
+    let script_tool = tools
+        .iter()
+        .find(|tool| tool.name() == crate::tools::script::SCRIPT_TOOL_NAME)
+        .unwrap();
+    let result = script_tool
+        .execute(serde_json::json!({
+            "script": "return Object.keys(ctx.runtime).filter(k => k === 'demo_tool');",
+            "timeout_ms": 5000
+        }))
+        .await
+        .unwrap();
+    assert!(result.success);
+    let envelope: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    assert_eq!(
+        envelope["result"],
+        serde_json::json!([]),
+        "package script tools must not be dispatchable from scripts"
+    );
+}

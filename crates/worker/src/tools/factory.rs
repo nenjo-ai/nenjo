@@ -41,6 +41,9 @@ use super::{
 };
 use super::script::ScriptHarnessContext;
 use super::script::SCRIPT_TOOL_NAME;
+use super::script::package::resolve_script_tools;
+use super::script::engine::ScriptLimits;
+use crate::bootstrap::load_cached_script_tools;
 use nenjo_tool_api::ToolOrigin;
 
 tokio::task_local! {
@@ -416,6 +419,47 @@ where
                 project_slug: tool_context.project_slug.clone(),
             }),
         )));
+
+        // Package-shipped script tools assigned to the agent run on the same
+        // engine, with the same dispatch surface (BOO-61 phase 3).
+        if !agent.script_tools.is_empty() {
+            let catalog = load_cached_script_tools(&self.config.manifests_dir);
+            let package_mcp = tools
+                .iter()
+                .filter(|tool| tool.origin() == ToolOrigin::Mcp)
+                .cloned()
+                .collect();
+            let package_runtime = tools
+                .iter()
+                .filter(|tool| {
+                    tool.origin() != ToolOrigin::Mcp && tool.name() != SCRIPT_TOOL_NAME
+                })
+                .cloned()
+                .collect();
+            let mut taken_names: std::collections::HashSet<String> =
+                tools.iter().map(|tool| tool.name().to_string()).collect();
+            let (package_tools, problems) = resolve_script_tools(
+                &agent.script_tools,
+                &catalog,
+                package_mcp,
+                package_runtime,
+                ScriptLimits::default(),
+            );
+            for problem in problems {
+                tracing::warn!(agent = %agent.slug, "{problem}");
+            }
+            for tool in package_tools {
+                if !taken_names.insert(tool.name().to_string()) {
+                    tracing::warn!(
+                        agent = %agent.slug,
+                        tool = %tool.name(),
+                        "Skipping package script tool with duplicate name"
+                    );
+                    continue;
+                }
+                tools.push(tool);
+            }
+        }
 
         tools
     }

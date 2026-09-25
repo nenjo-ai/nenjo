@@ -142,6 +142,20 @@ pub async fn run(
     stop: CancellationToken,
     logs: Arc<Mutex<LogBuffer>>,
 ) -> Result<ScriptOutcome> {
+    run_with_input(script, namespaces, limits, timeout, stop, logs, None).await
+}
+
+/// Run a script that additionally receives `input` as its `args` parameter
+/// (used by package-shipped script tools).
+pub async fn run_with_input(
+    script: &str,
+    namespaces: ScriptNamespaces,
+    limits: &ScriptLimits,
+    timeout: Duration,
+    stop: CancellationToken,
+    logs: Arc<Mutex<LogBuffer>>,
+    input: Option<serde_json::Value>,
+) -> Result<ScriptOutcome> {
     let timeout = timeout.min(limits.max_timeout);
 
     let runtime = AsyncRuntime::new()?;
@@ -187,10 +201,16 @@ pub async fn run(
 
     let install_logs = logs.clone();
     let install_limits = limits.clone();
+    // JSON is a valid JS expression, so the input can be inlined safely; the
+    // script receives it as the `args` parameter of its entry function.
+    let args_literal = input
+        .map(|value| serde_json::to_string(&value).unwrap_or_else(|_| "undefined".to_string()))
+        .unwrap_or_else(|| "undefined".to_string());
     let body = rquickjs::async_with!(ctx => |ctx| {
         install_context(&ctx, Arc::new(by_name), &catalog, &harness, &install_logs, &install_limits)?;
-        let wrapper =
-            format!("globalThis.__nenjo_script_result = (async () => {{\n{script}\n}})();");
+        let wrapper = format!(
+            "globalThis.__nenjo_script_result = (async function(args) {{\n{script}\n}})({args_literal});"
+        );
         let returned: Value = ctx.eval(wrapper.as_str())?;
         let promise = Promise::from_value(returned)?;
         match promise.into_future::<Value>().await {

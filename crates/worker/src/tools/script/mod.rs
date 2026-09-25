@@ -14,6 +14,7 @@
 //! See BOO-61.
 
 pub mod engine;
+pub mod package;
 
 use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -387,6 +388,11 @@ fn synchronous_result(outcome: ScriptOutcome, logs: &Arc<Mutex<LogBuffer>>) -> T
         }
         lines
     };
+    outcome_to_tool_result(&outcome, &drained)
+}
+
+/// Shared conversion from an engine outcome to a model-facing tool result.
+pub(crate) fn outcome_to_tool_result(outcome: &ScriptOutcome, drained: &[String]) -> ToolResult {
     if let Some(error) = &outcome.error {
         let mut text = error.clone();
         if !drained.is_empty() {
@@ -395,7 +401,7 @@ fn synchronous_result(outcome: ScriptOutcome, logs: &Arc<Mutex<LogBuffer>>) -> T
         }
         return ToolResult::failure(text);
     }
-    ToolResult::success(serde_json::to_string(&envelope(&outcome, &drained)).unwrap_or_default())
+    ToolResult::success(serde_json::to_string(&envelope(outcome, drained)).unwrap_or_default())
 }
 
 /// Machine-readable envelope so the model can parse the return value even
