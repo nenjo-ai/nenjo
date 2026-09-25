@@ -5,21 +5,20 @@
 //! mirroring the shell tool. This module owns the promotion receipt, the
 //! log-streaming finisher, and the stop→cancellation bridge.
 
-use std::sync::{Arc, Mutex};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use nenjo::tools::{AsyncControl, AsyncControls, AsyncOperationKind, AsyncOperationStartReceipt};
 use nenjo::{
-    AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent,
-    StartAsyncOperation,
+    AsyncOperationHandle, AsyncOperationRuntime, AsyncOperationTranscriptEvent, StartAsyncOperation,
 };
 use nenjo_tool_api::ToolResult;
 use serde::Serialize;
 use tokio_util::sync::CancellationToken;
 
-use super::engine::{LogBuffer, ScriptOutcome};
 use super::SCRIPT_TOOL_NAME;
+use super::engine::{LogBuffer, ScriptOutcome};
 
 /// How long a script runs synchronously before promotion to an async operation.
 pub(crate) const INITIAL_WAIT: Duration = Duration::from_secs(2);
@@ -108,7 +107,10 @@ async fn finish_script_operation(
         // message) whenever a run fails, times out, or is stopped.
         Ok(Ok(outcome)) if outcome.error.is_none() => {
             handle
-                .complete("Script completed", Some(super::envelope(&outcome, &drained)))
+                .complete(
+                    "Script completed",
+                    Some(super::envelope(&outcome, &drained)),
+                )
                 .await;
         }
         Ok(Ok(outcome)) => {
@@ -162,7 +164,10 @@ mod tests {
 
     #[test]
     fn label_uses_first_non_empty_line() {
-        assert_eq!(script_operation_label("\n  ctx.log();\n"), "script:   ctx.log();");
+        assert_eq!(
+            script_operation_label("\n  ctx.log();\n"),
+            "script:   ctx.log();"
+        );
     }
 
     #[test]

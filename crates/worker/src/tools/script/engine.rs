@@ -19,9 +19,9 @@ use std::sync::{Arc, Mutex};
 use anyhow::Result;
 use nenjo_tool_api::{Tool, ToolResult};
 use rquickjs::{
-    function::Async, function::Rest, AsyncContext, AsyncRuntime, Function, Promise, Value,
+    AsyncContext, AsyncRuntime, Function, Promise, Value, function::Async, function::Rest,
 };
-use serde_json::{json, Map, Number};
+use serde_json::{Map, Number, json};
 use tokio::time::{Duration, Instant};
 use tokio_util::sync::CancellationToken;
 
@@ -227,11 +227,10 @@ pub async fn run_with_input(
         }
     });
 
-    let result: Result<anyhow::Result<serde_json::Value>, _> =
-        tokio::select! {
-            res = body => Ok(res),
-            _ = stop.cancelled() => Err(anyhow::anyhow!("script stopped")),
-        };
+    let result: Result<anyhow::Result<serde_json::Value>, _> = tokio::select! {
+        res = body => Ok(res),
+        _ = stop.cancelled() => Err(anyhow::anyhow!("script stopped")),
+    };
 
     let mut outcome = ScriptOutcome::default();
     match result {
@@ -333,20 +332,17 @@ fn install_context<'js>(
     let log_limits = limits.clone();
     ctx.globals().set(
         "__nenjo_log",
-        Function::new(
-            ctx.clone(),
-            move |parts: Rest<String>| {
-                let line = parts.iter().cloned().collect::<Vec<String>>().join(" ");
-                log_buffer
-                    .lock()
-                    .expect("log mutex poisoned")
-                    .push(&log_limits, line);
-            },
-        )?,
+        Function::new(ctx.clone(), move |parts: Rest<String>| {
+            let line = parts.iter().cloned().collect::<Vec<String>>().join(" ");
+            log_buffer
+                .lock()
+                .expect("log mutex poisoned")
+                .push(&log_limits, line);
+        })?,
     )?;
 
-    let _: () = ctx
-        .eval(r#"
+    let _: () = ctx.eval(
+        r#"
         (() => {
             const catalog = JSON.parse(globalThis.__nenjo_tool_catalog);
             const dispatch = globalThis.__nenjo_dispatch;
@@ -367,7 +363,8 @@ fn install_context<'js>(
             };
             globalThis.ctx = ctxObj;
         })();
-    "#)?;
+    "#,
+    )?;
     Ok(())
 }
 
@@ -382,10 +379,8 @@ async fn dispatch_by_name(
 ) -> String {
     let result = match tools.get(name) {
         Some(tool) => {
-            let args: serde_json::Value =
-                serde_json::from_str(args_json).unwrap_or(serde_json::Value::String(
-                    args_json.to_string(),
-                ));
+            let args: serde_json::Value = serde_json::from_str(args_json)
+                .unwrap_or(serde_json::Value::String(args_json.to_string()));
             match tool.execute(args).await {
                 Ok(result) => result,
                 Err(err) => ToolResult::failure(err.to_string()),
@@ -422,7 +417,9 @@ fn js_to_json(value: &Value<'_>) -> serde_json::Value {
                 .expect("type_of guarantees bool for Type::Bool"),
         ),
         rquickjs::Type::Int => serde_json::Value::Number(Number::from(
-            value.as_int().expect("type_of guarantees int for Type::Int"),
+            value
+                .as_int()
+                .expect("type_of guarantees int for Type::Int"),
         )),
         rquickjs::Type::Float => serde_json::Number::from_f64(
             value

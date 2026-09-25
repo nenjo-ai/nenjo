@@ -45,7 +45,7 @@ pub use native_runtime::NativeRuntime;
 pub use nenjo::skills::{ListInstalledSkillsTool, UseSkillTool};
 pub use repo_status::RepoStatusTool;
 pub use runtime::RuntimeAdapter;
-pub use script::{ScriptTool, SCRIPT_TOOL_NAME};
+pub use script::{SCRIPT_TOOL_NAME, ScriptTool};
 pub use search::SearchTool;
 pub use security::{AutonomyLevel, SecurityPolicy};
 pub use shell::ShellTool;

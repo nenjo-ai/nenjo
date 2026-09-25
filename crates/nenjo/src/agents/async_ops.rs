@@ -482,10 +482,7 @@ pub fn current_async_operation_runtime() -> Option<AsyncOperationRuntime> {
 
 /// Run `future` with `runtime` installed as the current async-operation
 /// runtime, so tools executed inside it can promote themselves.
-pub async fn scope_async_operation_runtime<F, T>(
-    runtime: AsyncOperationRuntime,
-    future: F,
-) -> T
+pub async fn scope_async_operation_runtime<F, T>(runtime: AsyncOperationRuntime, future: F) -> T
 where
     F: Future<Output = T>,
 {
@@ -534,7 +531,9 @@ impl AsyncOperationRuntime {
         reason: Option<String>,
         events_tx: Option<tokio::sync::mpsc::UnboundedSender<TurnEvent>>,
     ) -> AsyncControlResult<AsyncOpStopped> {
-        self.manager.stop(operation_ids, kind, reason, events_tx).await
+        self.manager
+            .stop(operation_ids, kind, reason, events_tx)
+            .await
     }
 
     /// Inspect operations (see [`AsyncOpManager::inspect`]).
@@ -549,7 +548,6 @@ impl AsyncOperationRuntime {
             .inspect(operation_ids, kind, include_transcript, limit)
             .await
     }
-
 }
 
 impl AsyncOperationHandle {

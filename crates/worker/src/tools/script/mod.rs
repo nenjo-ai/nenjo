@@ -218,8 +218,14 @@ impl Tool for ScriptTool {
             let engine_logs = logs.clone();
             let scope_runtime = op_runtime.clone();
             tokio::spawn(async move {
-                let run =
-                    engine::run(&script, namespaces, &limits, timeout, engine_stop, engine_logs);
+                let run = engine::run(
+                    &script,
+                    namespaces,
+                    &limits,
+                    timeout,
+                    engine_stop,
+                    engine_logs,
+                );
                 match scope_runtime {
                     Some(runtime) => scope_async_operation_runtime(runtime, run).await,
                     None => run.await,
@@ -233,21 +239,15 @@ impl Tool for ScriptTool {
             return match join.await {
                 Ok(Ok(outcome)) => Ok(synchronous_result(outcome, &logs)),
                 Ok(Err(error)) => Ok(ToolResult::failure(error.to_string())),
-                Err(error) => Ok(ToolResult::failure(format!(
-                    "script task failed: {error}"
-                ))),
+                Err(error) => Ok(ToolResult::failure(format!("script task failed: {error}"))),
             };
         };
 
         match tokio::time::timeout(self.initial_wait, &mut join).await {
             Ok(Ok(Ok(outcome))) => Ok(synchronous_result(outcome, &logs)),
             Ok(Ok(Err(error))) => Ok(ToolResult::failure(error.to_string())),
-            Ok(Err(error)) => Ok(ToolResult::failure(format!(
-                "script task failed: {error}"
-            ))),
-            Err(_elapsed) => {
-                promote_to_operation(runtime, join, stop, logs, script, timeout).await
-            }
+            Ok(Err(error)) => Ok(ToolResult::failure(format!("script task failed: {error}"))),
+            Err(_elapsed) => promote_to_operation(runtime, join, stop, logs, script, timeout).await,
         }
     }
 }
@@ -421,7 +421,10 @@ mod tests {
         // an ordinary JS TypeError the model can read and fix.
         assert!(!result.success);
         let error = result.error.as_deref().expect("error set");
-        assert!(error.contains("not a function"), "unexpected error: {error}");
+        assert!(
+            error.contains("not a function"),
+            "unexpected error: {error}"
+        );
     }
 
     #[tokio::test]
@@ -452,7 +455,10 @@ mod tests {
         assert_eq!(value["result"]["mcpNames"], json!(["mcp_test__a"]));
         assert_eq!(value["result"]["runtimeNames"], json!(["runtime_test__b"]));
         assert_eq!(value["result"]["project"], json!("acme"));
-        assert_eq!(value["result"]["sessionId"], json!(uuid::Uuid::nil().to_string()));
+        assert_eq!(
+            value["result"]["sessionId"],
+            json!(uuid::Uuid::nil().to_string())
+        );
         assert_eq!(value["result"]["hasLog"], json!(true));
     }
 
@@ -505,7 +511,13 @@ mod tests {
             .await
             .expect("execute should not error at the transport level");
         assert!(!result.success);
-        assert!(result.error.as_deref().unwrap_or_default().contains("script"));
+        assert!(
+            result
+                .error
+                .as_deref()
+                .unwrap_or_default()
+                .contains("script")
+        );
     }
 
     #[tokio::test]
@@ -523,8 +535,8 @@ mod tests {
                 ctx.log("started");
                 return await ctx.mcp.mcp_test__slow({ n: 1 });
             "#}))
-            .await
-            .expect("execute should not error at the transport level")
+                .await
+                .expect("execute should not error at the transport level")
         })
         .await;
         assert!(
@@ -535,7 +547,10 @@ mod tests {
         let receipt: Value = serde_json::from_str(&result.output.text_content()).unwrap();
         assert_eq!(receipt["type"], json!("operation_started"));
         assert_eq!(receipt["kind"], json!("script"));
-        let operation_id = receipt["operation_id"].as_str().expect("operation id").to_string();
+        let operation_id = receipt["operation_id"]
+            .as_str()
+            .expect("operation id")
+            .to_string();
 
         // Let the background run finish, then inspect the settled operation.
         tokio::time::sleep(Duration::from_millis(1500)).await;
@@ -543,9 +558,18 @@ mod tests {
             .inspect(vec![operation_id.clone()], None, true, 10)
             .await;
         let printed = serde_json::to_value(&inspect).unwrap().to_string();
-        assert!(printed.contains("Script completed"), "output missing: {printed}");
-        assert!(printed.contains(r#"{\"n\":1}"#), "final output missing: {printed}");
-        assert!(printed.contains("started"), "streamed log missing: {printed}");
+        assert!(
+            printed.contains("Script completed"),
+            "output missing: {printed}"
+        );
+        assert!(
+            printed.contains(r#"{\"n\":1}"#),
+            "final output missing: {printed}"
+        );
+        assert!(
+            printed.contains("started"),
+            "streamed log missing: {printed}"
+        );
     }
 
     #[tokio::test]
@@ -565,10 +589,18 @@ mod tests {
         .await;
         assert!(result.success, "expected promotion receipt");
         let receipt: Value = serde_json::from_str(&result.output.text_content()).unwrap();
-        let operation_id = receipt["operation_id"].as_str().expect("operation id").to_string();
+        let operation_id = receipt["operation_id"]
+            .as_str()
+            .expect("operation id")
+            .to_string();
 
         let stopped = runtime
-            .stop(vec![operation_id.clone()], None, Some("test stop".into()), None)
+            .stop(
+                vec![operation_id.clone()],
+                None,
+                Some("test stop".into()),
+                None,
+            )
             .await;
         let printed = serde_json::to_value(&stopped).unwrap().to_string();
         assert!(
@@ -582,6 +614,9 @@ mod tests {
             .inspect(vec![operation_id.clone()], None, false, 10)
             .await;
         let printed = serde_json::to_value(&inspect).unwrap().to_string();
-        assert!(printed.contains("\"stopped\""), "expected stopped status: {printed}");
+        assert!(
+            printed.contains("\"stopped\""),
+            "expected stopped status: {printed}"
+        );
     }
 }

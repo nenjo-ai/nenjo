@@ -49,8 +49,9 @@ impl PackageScriptTool {
         limits: ScriptLimits,
     ) -> anyhow::Result<Self> {
         let entry = script_entry_path(&manifest)?;
-        let source = std::fs::read_to_string(&entry)
-            .map_err(|error| anyhow::anyhow!("failed to read script tool `{}`: {error}", manifest.slug))?;
+        let source = std::fs::read_to_string(&entry).map_err(|error| {
+            anyhow::anyhow!("failed to read script tool `{}`: {error}", manifest.slug)
+        })?;
         if source.len() > 512 * 1024 {
             anyhow::bail!("script tool `{}` exceeds 512 KiB size limit", manifest.slug);
         }
@@ -91,7 +92,8 @@ impl PackageScriptTool {
             runtime: self.runtime_tools.clone(),
             harness: None,
         }
-    }}
+    }
+}
 
 /// Resolve the absolute script entry path from a manifest.
 ///
@@ -100,10 +102,7 @@ impl PackageScriptTool {
 /// components are rejected to keep execution inside the package.
 fn script_entry_path(manifest: &ScriptToolManifest) -> anyhow::Result<PathBuf> {
     if manifest.root_dir.as_os_str().is_empty() {
-        anyhow::bail!(
-            "script tool `{}` does not declare root_dir",
-            manifest.slug
-        );
+        anyhow::bail!("script tool `{}` does not declare root_dir", manifest.slug);
     }
     let relative = [manifest.root_path.as_str(), manifest.command.path.as_str()]
         .iter()
@@ -181,7 +180,9 @@ pub fn resolve_script_tools(
     let mut problems = Vec::new();
     for slug in assigned {
         let Some(manifest) = catalog.iter().find(|manifest| &manifest.slug == slug) else {
-            problems.push(format!("script tool `{slug}` assigned but not found in cache"));
+            problems.push(format!(
+                "script tool `{slug}` assigned but not found in cache"
+            ));
             continue;
         };
         match PackageScriptTool::from_manifest(
@@ -279,10 +280,7 @@ mod tests {
         let envelope: serde_json::Value =
             serde_json::from_str(&result.output.text_content()).unwrap();
         assert_eq!(envelope["result"]["echo"], json!({"path": "a.txt"}));
-        assert_eq!(
-            envelope["result"]["file"],
-            json!(r#"{"path":"a.txt"}"#)
-        );
+        assert_eq!(envelope["result"]["file"], json!(r#"{"path":"a.txt"}"#));
         assert_eq!(envelope["log"], json!(["running"]));
     }
 
@@ -302,12 +300,9 @@ mod tests {
     async fn traversal_entry_paths_are_rejected() {
         let root = tempfile::tempdir().unwrap();
         let manifest = manifest_with("../outside.js", root.path());
-        let Err(error) = PackageScriptTool::from_manifest(
-            manifest,
-            vec![],
-            vec![],
-            ScriptLimits::default(),
-        ) else {
+        let Err(error) =
+            PackageScriptTool::from_manifest(manifest, vec![], vec![], ScriptLimits::default())
+        else {
             panic!("traversal path must be rejected")
         };
         assert!(error.to_string().contains("'..'"), "{error}");
@@ -317,12 +312,9 @@ mod tests {
     async fn missing_root_dir_is_rejected() {
         let mut manifest = manifest_with("demo.js", Path::new("/nonexistent-package"));
         manifest.root_dir = PathBuf::new();
-        let Err(error) = PackageScriptTool::from_manifest(
-            manifest,
-            vec![],
-            vec![],
-            ScriptLimits::default(),
-        ) else {
+        let Err(error) =
+            PackageScriptTool::from_manifest(manifest, vec![], vec![], ScriptLimits::default())
+        else {
             panic!("missing root_dir must be rejected")
         };
         assert!(error.to_string().contains("root_dir"), "{error}");
@@ -332,12 +324,9 @@ mod tests {
     async fn missing_script_file_is_rejected() {
         let root = tempfile::tempdir().unwrap();
         let manifest = manifest_with("nope.js", root.path());
-        let Err(error) = PackageScriptTool::from_manifest(
-            manifest,
-            vec![],
-            vec![],
-            ScriptLimits::default(),
-        ) else {
+        let Err(error) =
+            PackageScriptTool::from_manifest(manifest, vec![], vec![], ScriptLimits::default())
+        else {
             panic!("missing script file must be rejected")
         };
         assert!(error.to_string().contains("failed to read"), "{error}");

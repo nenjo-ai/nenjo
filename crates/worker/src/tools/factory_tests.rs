@@ -1896,7 +1896,11 @@ async fn worker_factory_registers_assigned_package_script_tools() {
         .iter()
         .filter(|tool| tool.name() == "demo_tool")
         .collect::<Vec<_>>();
-    assert_eq!(package_tools.len(), 1, "duplicate assignment must be deduped");
+    assert_eq!(
+        package_tools.len(),
+        1,
+        "duplicate assignment must be deduped"
+    );
     let package_tool = package_tools[0];
 
     let result = package_tool
@@ -1904,8 +1908,7 @@ async fn worker_factory_registers_assigned_package_script_tools() {
         .await
         .unwrap();
     assert!(result.success, "script failed: {:?}", result.error);
-    let envelope: serde_json::Value =
-        serde_json::from_str(&result.output.text_content()).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
     assert_eq!(envelope["result"]["sum"], serde_json::json!(3));
     assert_eq!(envelope["result"]["file"], serde_json::json!("2"));
     assert_eq!(envelope["log"], serde_json::json!(["summing"]));
@@ -1924,8 +1927,7 @@ async fn worker_factory_registers_assigned_package_script_tools() {
         .await
         .unwrap();
     assert!(result.success);
-    let envelope: serde_json::Value =
-        serde_json::from_str(&result.output.text_content()).unwrap();
+    let envelope: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
     assert_eq!(
         envelope["result"],
         serde_json::json!([]),
