@@ -105,7 +105,9 @@ impl ScriptTool {
         };
         let description = format!(
             "Run a short JavaScript (QuickJS) program to orchestrate multiple tool calls in one \
-             step. Every namespace method returns `{{ok, content, error}}`; \
+             step. Every namespace method returns `{{ok, content, error}}`; `content` is the \
+             tool output with JSON objects and arrays decoded to real values, and failed calls \
+             add `tool` plus the tool's error message while keeping any partial `content`. \
              `ctx.<namespace>.list()` returns the callable tools with their schemas; \
              `ctx.log(...)` streams progress notes. Fan out with `Promise.all`, branch on \
              results, and `return` a JSON-serializable summary object — the return value is the \
@@ -283,7 +285,7 @@ pub(crate) fn envelope(outcome: &ScriptOutcome, drained: &[String]) -> serde_jso
 mod tests {
     use super::*;
     use nenjo::{AsyncOpManager, AsyncOperationRuntime};
-    use nenjo_tool_api::ToolCategory;
+    use nenjo_tool_api::{ToolCategory, ToolOutput};
     use serde_json::Value;
     use std::time::Duration;
 
@@ -300,6 +302,10 @@ mod tests {
         Deny(&'static str),
         /// Sleeps before echoing — drives promotion past the initial wait.
         Slow(Duration),
+        /// Succeeds with non-JSON text output.
+        RawText(&'static str),
+        /// Fails with an error message and partial JSON content.
+        FailWith(&'static str, &'static str),
     }
 
     impl FakeTool {
@@ -321,6 +327,24 @@ mod tests {
             Arc::new(Self {
                 name,
                 behavior: FakeBehavior::Slow(delay),
+            })
+        }
+
+        fn raw_text(name: &'static str, text: &'static str) -> Arc<dyn Tool> {
+            Arc::new(Self {
+                name,
+                behavior: FakeBehavior::RawText(text),
+            })
+        }
+
+        fn fail_with(
+            name: &'static str,
+            error: &'static str,
+            content: &'static str,
+        ) -> Arc<dyn Tool> {
+            Arc::new(Self {
+                name,
+                behavior: FakeBehavior::FailWith(error, content),
             })
         }
     }
@@ -355,6 +379,12 @@ mod tests {
                     tokio::time::sleep(*delay).await;
                     Ok(ToolResult::success(args.to_string()))
                 }
+                FakeBehavior::RawText(text) => Ok(ToolResult::success(*text)),
+                FakeBehavior::FailWith(error, content) => Ok(ToolResult {
+                    success: false,
+                    output: ToolOutput::text(*content),
+                    error: Some(error.to_string()),
+                }),
             }
         }
     }
@@ -392,8 +422,36 @@ mod tests {
         assert!(result.success, "script failed: {:?}", result.error);
         let value = envelope_of(&result);
         assert_eq!(value["result"]["issue"], json!(true));
-        assert_eq!(value["result"]["file"], json!(r#"{"path":"a.txt"}"#));
+        // JSON tool output arrives decoded; the script never string-parses.
+        assert_eq!(value["result"]["file"], json!({"path": "a.txt"}));
         assert_eq!(value["log"], json!(["fetched"]));
+    }
+
+    #[tokio::test]
+    async fn dispatch_decodes_json_output_and_keeps_text_as_text() {
+        let tool = script_tool(
+            vec![FakeTool::raw_text("mcp_test__plain", "plain text response")],
+            vec![FakeTool::echo("runtime_test__read_file")],
+        );
+        let result = run_script(
+            &tool,
+            r#"
+                const plain = await ctx.mcp.mcp_test__plain({});
+                const file = await ctx.runtime.runtime_test__read_file({ path: "a.txt" });
+                return {
+                    plainKind: typeof plain.content,
+                    plain: plain.content,
+                    path: file.content.path,
+                };
+            "#,
+        )
+        .await;
+        assert!(result.success, "script failed: {:?}", result.error);
+        let value = envelope_of(&result);
+        // Non-JSON output stays a string; JSON object output is a real value.
+        assert_eq!(value["result"]["plainKind"], json!("string"));
+        assert_eq!(value["result"]["plain"], json!("plain text response"));
+        assert_eq!(value["result"]["path"], json!("a.txt"));
     }
 
     #[tokio::test]
@@ -410,7 +468,27 @@ mod tests {
         assert!(result.success, "script itself succeeds; denial is data");
         let value = envelope_of(&result);
         assert_eq!(value["result"]["ok"], json!(false));
+        assert_eq!(value["result"]["tool"], json!("mcp_test__write_file"));
         assert_eq!(value["result"]["error"], json!("denied by policy"));
+    }
+
+    #[tokio::test]
+    async fn failed_dispatch_carries_tool_name_partial_content_and_error() {
+        let tool = script_tool(
+            vec![FakeTool::fail_with(
+                "mcp_test__flaky",
+                "upstream returned 502",
+                r#"{"retryable": true}"#,
+            )],
+            vec![],
+        );
+        let result = run_script(&tool, "return await ctx.mcp.mcp_test__flaky({});").await;
+        assert!(result.success, "script itself succeeds; failure is data");
+        let value = envelope_of(&result);
+        assert_eq!(value["result"]["ok"], json!(false));
+        assert_eq!(value["result"]["tool"], json!("mcp_test__flaky"));
+        assert_eq!(value["result"]["error"], json!("upstream returned 502"));
+        assert_eq!(value["result"]["content"], json!({"retryable": true}));
     }
 
     #[tokio::test]
@@ -563,7 +641,7 @@ mod tests {
             "output missing: {printed}"
         );
         assert!(
-            printed.contains(r#"{\"n\":1}"#),
+            printed.contains("\"content\":{\"n\":1.0}"),
             "final output missing: {printed}"
         );
         assert!(

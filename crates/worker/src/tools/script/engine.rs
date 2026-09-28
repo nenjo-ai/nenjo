@@ -391,18 +391,30 @@ async fn dispatch_by_name(
     let payload = match result.success {
         true => json!({
             "ok": true,
-            "content": result.output.text_content(),
+            "content": decode_tool_output(result.output.text_content()),
             "error": serde_json::Value::Null,
         }),
         false => json!({
             "ok": false,
-            "content": serde_json::Value::Null,
+            "tool": name,
+            "content": decode_tool_output(result.output.text_content()),
             "error": result
                 .error
                 .unwrap_or_else(|| "tool call failed".to_string()),
         }),
     };
     payload.to_string()
+}
+
+/// Decode tool output for scripts: JSON objects and arrays arrive as
+/// structured values the script can use directly; everything else stays
+/// text. Bare JSON scalars are deliberately not decoded so numeric or
+/// boolean-looking text does not silently change type.
+fn decode_tool_output(text: String) -> serde_json::Value {
+    match serde_json::from_str::<serde_json::Value>(&text) {
+        Ok(value @ (serde_json::Value::Object(_) | serde_json::Value::Array(_))) => value,
+        _ => serde_json::Value::String(text),
+    }
 }
 
 /// Convert a JS value to `serde_json::Value`.

@@ -34,7 +34,11 @@ tool catalog; a small JS shim builds the namespaces from them. No native
 closure captures `Ctx`, which keeps every native future `Send` and avoids
 rquickjs lifetime hazards. Tool arguments/results cross as JSON; each
 dispatch returns `{ok, content, error}` — a denial is data, identical to what
-a direct model call would observe.
+a direct model call would observe. `content` is the tool's output with JSON
+objects and arrays decoded to real values (bare JSON scalars stay strings so
+numeric-looking text does not silently change type); failed calls add `tool`
+and the tool's error message while keeping any partial `content`, so a script
+can aggregate `ok: false` outcomes and surface them in its return value.
 
 Limits: 128 MiB heap, 1 MiB stack, 1 MiB return-value cap, 1k log lines /
 256 KiB log cap. Wall-clock default 30 s, max 120 s, enforced by a dedicated

@@ -280,7 +280,7 @@ mod tests {
         let envelope: serde_json::Value =
             serde_json::from_str(&result.output.text_content()).unwrap();
         assert_eq!(envelope["result"]["echo"], json!({"path": "a.txt"}));
-        assert_eq!(envelope["result"]["file"], json!(r#"{"path":"a.txt"}"#));
+        assert_eq!(envelope["result"]["file"], json!({"path": "a.txt"}));
         assert_eq!(envelope["log"], json!(["running"]));
     }
 
