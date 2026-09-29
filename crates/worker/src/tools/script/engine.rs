@@ -14,6 +14,7 @@
 //! privileges.
 
 use std::collections::HashMap;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use anyhow::Result;
@@ -22,7 +23,7 @@ use rquickjs::{
     AsyncContext, AsyncRuntime, Function, Promise, Value, function::Async, function::Rest,
 };
 use serde_json::{Map, Number, json};
-use tokio::time::{Duration, Instant};
+use tokio::time::Duration;
 use tokio_util::sync::CancellationToken;
 
 /// Hard resource caps for a single script execution.
@@ -170,9 +171,16 @@ pub async fn run_with_input(
     // The interrupt handler is polled by QuickJS during execution. A blocked
     // interpreter never yields to the scheduler, so the deadline must live on
     // a dedicated OS thread rather than a timer on the local executor.
+    // `deadline_fired` makes timeout classification exact: an elapsed-time
+    // check races the interrupt unwind (the unwind can be observed a hair
+    // before the clock crosses the deadline), which would misreport a
+    // deadline kill as a bare interpreter exception.
+    let deadline_fired = Arc::new(AtomicBool::new(false));
+    let deadline_flag = Arc::clone(&deadline_fired);
     let deadline_stop = stop.clone();
     std::thread::spawn(move || {
         std::thread::sleep(timeout);
+        deadline_flag.store(true, Ordering::Release);
         deadline_stop.cancel();
     });
     let interrupt_stop = stop.clone();
@@ -181,7 +189,6 @@ pub async fn run_with_input(
         .await;
 
     let ctx = AsyncContext::full(&runtime).await?;
-    let started = Instant::now();
 
     // Dispatch registry: JS refers to tools by name; native side resolves.
     let mut by_name: HashMap<String, Arc<dyn Tool>> = HashMap::new();
@@ -236,7 +243,7 @@ pub async fn run_with_input(
     match result {
         Err(stopped) => {
             // Distinguish the engine's own deadline from external stop.
-            outcome.timed_out = started.elapsed() >= timeout;
+            outcome.timed_out = deadline_fired.load(Ordering::Acquire);
             outcome.error = if outcome.timed_out {
                 Some(format!("script exceeded wall-clock timeout of {timeout:?}"))
             } else {
@@ -246,7 +253,7 @@ pub async fn run_with_input(
         Ok(Err(err)) => {
             // A deadline-interrupted CPU loop surfaces here as a QuickJS
             // exception from inside the body, not via the stop branch.
-            outcome.timed_out = started.elapsed() >= timeout;
+            outcome.timed_out = deadline_fired.load(Ordering::Acquire);
             outcome.error = if outcome.timed_out {
                 Some(format!("script exceeded wall-clock timeout of {timeout:?}"))
             } else {
