@@ -5,7 +5,7 @@
 //! tool sets.
 
 // Re-export core tool types.
-pub use nenjo::{Tool, Tool as ToolTrait, ToolCategory, ToolResult, ToolSpec};
+pub use nenjo::{Tool, Tool as ToolTrait, ToolCategory, ToolOrigin, ToolResult, ToolSpec};
 
 pub mod file_delete;
 pub mod file_edit;
@@ -23,6 +23,7 @@ pub(crate) mod platform_payload;
 pub(crate) mod platform_services;
 pub mod repo_status;
 pub mod runtime;
+pub mod script;
 pub mod search;
 pub mod security;
 pub mod shell;
@@ -44,6 +45,7 @@ pub use native_runtime::NativeRuntime;
 pub use nenjo::skills::{ListInstalledSkillsTool, UseSkillTool};
 pub use repo_status::RepoStatusTool;
 pub use runtime::RuntimeAdapter;
+pub use script::{SCRIPT_TOOL_NAME, ScriptTool};
 pub use search::SearchTool;
 pub use security::{AutonomyLevel, SecurityPolicy};
 pub use shell::ShellTool;

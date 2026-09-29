@@ -28,7 +28,7 @@ use super::types::{
     ToolCall, TurnEvent, TurnInputReceiver, TurnLoopConfig, TurnLoopError, TurnOutput,
 };
 use crate::agents::async_ops::{
-    AsyncOpWaitFilter, AsyncOperationRuntime, scope_current_async_operation_runtime,
+    AsyncOpWaitFilter, AsyncOperationRuntime, scope_async_operation_runtime,
 };
 use crate::agents::instance::AgentInstance;
 use crate::hooks::{
@@ -1509,7 +1509,7 @@ async fn execute_tool(
                     Some(tx),
                     CURRENT_CHAT_HISTORY.scope(
                         current_history,
-                        scope_current_async_operation_runtime(async_operations, execute),
+                        scope_async_operation_runtime(async_operations, execute),
                     ),
                 )
                 .await
@@ -1519,7 +1519,7 @@ async fn execute_tool(
                     None,
                     CURRENT_CHAT_HISTORY.scope(
                         current_history,
-                        scope_current_async_operation_runtime(async_operations, execute),
+                        scope_async_operation_runtime(async_operations, execute),
                     ),
                 )
                 .await

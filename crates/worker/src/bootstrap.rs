@@ -23,7 +23,7 @@ use nenjo::Slug;
 use nenjo::agents::prompts::PromptConfig;
 use nenjo::manifest::{
     CommandManifest, ContextBlockManifest, Manifest, ManifestIdentity, ManifestLoader,
-    ManifestResource, ManifestResourceKind,
+    ManifestResource, ManifestResourceKind, ScriptToolManifest,
 };
 use nenjo::{LocalManifestStore, ManifestReader, ManifestWriter};
 use nenjo_events::{
@@ -1098,6 +1098,11 @@ pub fn load_cached_organization_settings(manifests_dir: &Path) -> OrganizationSe
 /// Load the complete task schedule list cached during worker bootstrap/sync.
 pub fn load_cached_task_schedules(manifests_dir: &Path) -> Vec<TaskScheduleAssignment> {
     load_cached_json_vec(manifests_dir, "task_schedules.json")
+}
+
+/// Load the script tool manifests cached during worker bootstrap/sync.
+pub fn load_cached_script_tools(manifests_dir: &Path) -> Vec<ScriptToolManifest> {
+    load_cached_json_vec(manifests_dir, "script_tools.json")
 }
 
 fn load_cached_json_vec<T>(manifests_dir: &Path, filename: &str) -> Vec<T>

@@ -33,11 +33,18 @@ use super::file_delete::ProtectedProjectPaths;
 use super::file_mutation::FileMutationCoordinator;
 use super::native_media::tool_name;
 use super::platform_services::PlatformToolServices;
+use super::script::SCRIPT_TOOL_NAME;
+use super::script::engine::ScriptLimits;
+use super::script::package::resolve_script_tools;
+use super::script::{ScriptHarnessContext, script_dispatchable};
 use super::{
     AutonomyLevel, FileDeleteTool, FileEditTool, FileReadTool, FileWriteTool, HttpRequestTool,
-    ListInstalledSkillsTool, NativeMediaTool, RepoStatusTool, RuntimeAdapter, SearchTool,
-    SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool, WebSearchTool,
+    ListInstalledSkillsTool, NativeMediaTool, RepoStatusTool, RuntimeAdapter, ScriptTool,
+    SearchTool, SecurityPolicy, ShellTool, SkillMcpTool, Tool, UseSkillTool, WebFetchTool,
+    WebSearchTool,
 };
+use crate::bootstrap::load_cached_script_tools;
+use nenjo_tool_api::ToolOrigin;
 
 tokio::task_local! {
     static PLATFORM_NOTIFICATION_EMITTER: Arc<dyn PlatformNotificationEmitter>;
@@ -389,6 +396,65 @@ where
         }
 
         self.add_native_media_tools(agent, &mut tools);
+
+        // Partition granted tools once: MCP tools land in `ctx.mcp`, host and
+        // platform tools in `ctx.runtime`, and session/project identity in
+        // `ctx.harness`. Harness-origin tools (agent invocation: abilities,
+        // delegation, sub-agents, operation controls) are excluded — see
+        // `script_dispatchable`. Both the interactive script tool and
+        // package-shipped script tools dispatch through the same namespaces
+        // (BOO-61).
+        let mcp_tools: Vec<Arc<dyn Tool>> = tools
+            .iter()
+            .filter(|tool| tool.origin() == ToolOrigin::Mcp)
+            .cloned()
+            .collect();
+        let runtime_tools: Vec<Arc<dyn Tool>> = tools
+            .iter()
+            .filter(|tool| {
+                script_dispatchable(tool.as_ref())
+                    && tool.origin() != ToolOrigin::Mcp
+                    && tool.name() != SCRIPT_TOOL_NAME
+            })
+            .cloned()
+            .collect();
+        tools.push(Arc::new(ScriptTool::new(
+            mcp_tools.clone(),
+            runtime_tools.clone(),
+            Some(ScriptHarnessContext {
+                session_id: tool_context.current_session_id,
+                project_slug: tool_context.project_slug.clone(),
+            }),
+        )));
+
+        // Package-shipped script tools assigned to the agent run on the same
+        // engine, with the same dispatch surface.
+        if !agent.script_tools.is_empty() {
+            let catalog = load_cached_script_tools(&self.config.manifests_dir);
+            let mut taken_names: std::collections::HashSet<String> =
+                tools.iter().map(|tool| tool.name().to_string()).collect();
+            let (package_tools, problems) = resolve_script_tools(
+                &agent.script_tools,
+                &catalog,
+                mcp_tools,
+                runtime_tools,
+                ScriptLimits::default(),
+            );
+            for problem in problems {
+                tracing::warn!(agent = %agent.slug, "{problem}");
+            }
+            for tool in package_tools {
+                if !taken_names.insert(tool.name().to_string()) {
+                    tracing::warn!(
+                        agent = %agent.slug,
+                        tool = %tool.name(),
+                        "Skipping package script tool with duplicate name"
+                    );
+                    continue;
+                }
+                tools.push(tool);
+            }
+        }
 
         tools
     }

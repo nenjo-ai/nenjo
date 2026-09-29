@@ -207,23 +207,23 @@ impl AsyncOpSignal {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AsyncOpSignalDigest {
-    pub(crate) operation_id: String,
-    pub(crate) kind: &'static str,
-    pub(crate) label: String,
-    pub(crate) status: &'static str,
+    pub operation_id: String,
+    pub kind: &'static str,
+    pub label: String,
+    pub status: &'static str,
     pub(crate) events: Vec<AsyncOpSignal>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct AsyncOpInspection {
-    pub(crate) operation_id: String,
-    pub(crate) kind: &'static str,
-    pub(crate) label: String,
-    pub(crate) status: &'static str,
+pub struct AsyncOpInspection {
+    pub operation_id: String,
+    pub kind: &'static str,
+    pub label: String,
+    pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) latest_signal: Option<String>,
+    pub latest_signal: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) latest_output: Option<Value>,
+    pub latest_output: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) transcript_delta: Option<Vec<AsyncOperationTranscriptEvent>>,
 }
@@ -277,8 +277,8 @@ impl AsyncOpWaitFilter {
 #[derive(Debug, Clone)]
 pub(crate) struct StartAsyncOp {
     pub(crate) id: AsyncOpId,
-    pub(crate) kind: AsyncOpKind,
-    pub(crate) label: String,
+    pub kind: AsyncOpKind,
+    pub label: String,
     pub(crate) parent_operation_id: Option<String>,
     pub(crate) parent_tool_name: Option<String>,
     pub(crate) started_summary: String,
@@ -288,16 +288,16 @@ pub(crate) struct StartAsyncOp {
 
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct AsyncOpDeliveryResult {
-    pub(crate) operation_id: String,
-    pub(crate) status: &'static str,
+    pub operation_id: String,
+    pub status: &'static str,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(crate) reason: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
-pub(crate) struct AsyncOpStopped {
-    pub(crate) operation_id: String,
-    pub(crate) status: &'static str,
+pub struct AsyncOpStopped {
+    pub operation_id: String,
+    pub status: &'static str,
 }
 
 struct ModelOperationSelection {
@@ -306,7 +306,7 @@ struct ModelOperationSelection {
 }
 
 #[derive(Clone)]
-pub(crate) struct AsyncOpManager {
+pub struct AsyncOpManager {
     inner: Arc<ManagerInner>,
 }
 
@@ -480,10 +480,9 @@ pub fn current_async_operation_runtime() -> Option<AsyncOperationRuntime> {
         .flatten()
 }
 
-pub(crate) async fn scope_current_async_operation_runtime<F, T>(
-    runtime: AsyncOperationRuntime,
-    future: F,
-) -> T
+/// Run `future` with `runtime` installed as the current async-operation
+/// runtime, so tools executed inside it can promote themselves.
+pub async fn scope_async_operation_runtime<F, T>(runtime: AsyncOperationRuntime, future: F) -> T
 where
     F: Future<Output = T>,
 {
@@ -493,7 +492,7 @@ where
 }
 
 impl AsyncOperationRuntime {
-    pub(crate) fn new(manager: AsyncOpManager) -> Self {
+    pub fn new(manager: AsyncOpManager) -> Self {
         Self { manager }
     }
 
@@ -522,6 +521,32 @@ impl AsyncOperationRuntime {
             handle: started.handle,
             events_tx,
         }
+    }
+
+    /// Stop one or more running operations (see [`AsyncOpManager::stop`]).
+    pub async fn stop(
+        &self,
+        operation_ids: Vec<String>,
+        kind: Option<AsyncOperationKind>,
+        reason: Option<String>,
+        events_tx: Option<tokio::sync::mpsc::UnboundedSender<TurnEvent>>,
+    ) -> AsyncControlResult<AsyncOpStopped> {
+        self.manager
+            .stop(operation_ids, kind, reason, events_tx)
+            .await
+    }
+
+    /// Inspect operations (see [`AsyncOpManager::inspect`]).
+    pub async fn inspect(
+        &self,
+        operation_ids: Vec<String>,
+        kind: Option<AsyncOperationKind>,
+        include_transcript: bool,
+        limit: usize,
+    ) -> AsyncControlResult<AsyncOpInspection> {
+        self.manager
+            .inspect(operation_ids, kind, include_transcript, limit)
+            .await
     }
 }
 
@@ -578,7 +603,7 @@ impl AsyncOperationHandle {
 }
 
 impl AsyncOpManager {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::with_cancel(CancellationToken::new())
     }
 
@@ -744,7 +769,7 @@ impl AsyncOpManager {
         AsyncControlResult::from_parts(results, selection.rejected)
     }
 
-    pub(crate) async fn stop(
+    pub async fn stop(
         &self,
         operation_ids: Vec<String>,
         kind: Option<AsyncOpKind>,
@@ -825,7 +850,7 @@ impl AsyncOpManager {
         stopped
     }
 
-    pub(crate) async fn inspect(
+    pub async fn inspect(
         &self,
         operation_ids: Vec<String>,
         kind: Option<AsyncOpKind>,

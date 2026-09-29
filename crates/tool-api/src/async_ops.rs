@@ -146,6 +146,7 @@ pub enum AsyncOperationKind {
     Shell,
     Media,
     TaskExecution,
+    Script,
 }
 
 impl AsyncOperationKind {
@@ -157,6 +158,7 @@ impl AsyncOperationKind {
             Self::Shell => "shell",
             Self::Media => "media",
             Self::TaskExecution => "task_execution",
+            Self::Script => "script",
         }
     }
 }
