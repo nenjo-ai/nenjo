@@ -267,6 +267,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             session_id,
             domain_session_id,
             domain_activation,
+            generate_title,
             ..
         } => {
             ctx.harness
@@ -287,6 +288,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         domain_activation,
                         hook_scopes: Vec::new(),
                         timezone: ctx.organization_settings.timezone,
+                        generate_title,
                     },
                 )
                 .await
@@ -306,6 +308,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
             session_id,
             domain_session_id,
             domain_activation,
+            generate_title,
             ..
         } => {
             ctx.harness
@@ -326,6 +329,7 @@ pub async fn route_command(command: Command, ctx: CommandContext) -> Result<()> 
                         domain_session_id,
                         domain_activation,
                         timezone: ctx.organization_settings.timezone,
+                        generate_title,
                     },
                 )
                 .await

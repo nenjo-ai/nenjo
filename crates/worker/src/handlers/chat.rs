@@ -16,6 +16,7 @@ use uuid::Uuid;
 use nenjo::Slug;
 use nenjo_events::{ChatStreamErrorCode, ChatStreamFrame, DomainActivation, Response, StreamEvent};
 use nenjo_models::ArtifactRef;
+use nenjo_models::{ChatMessage, ChatRole, ConversationMessage, ModelProvider};
 
 use nenjo_harness::events::HarnessChatEvent;
 use nenjo_harness::registry::ExecutionKind;
@@ -269,6 +270,8 @@ pub struct ChatCommandRequest<'a> {
     pub domain_activation: Option<DomainActivation>,
     pub hook_scopes: Vec<ActiveHookScope>,
     pub timezone: chrono_tz::Tz,
+    /// Generate a session title from this turn when the reply finalizes.
+    pub generate_title: bool,
 }
 
 pub struct ChatSlashCommandRequest<'a> {
@@ -286,6 +289,8 @@ pub struct ChatSlashCommandRequest<'a> {
     pub domain_session_id: Option<Uuid>,
     pub domain_activation: Option<DomainActivation>,
     pub timezone: chrono_tz::Tz,
+    /// Generate a session title from this turn when the reply finalizes.
+    pub generate_title: bool,
 }
 
 /// Worker integration methods for chat platform commands.
@@ -410,6 +415,7 @@ where
         domain_activation,
         hook_scopes,
         timezone,
+        generate_title,
     } = request;
     let input_message_id = message_id
         .map(Uuid::parse_str)
@@ -421,6 +427,14 @@ where
         .as_ref()
         .map(|template| template.content.as_str())
         .unwrap_or(content);
+    // Snapshot the user-visible turn content before `command_template` is
+    // consumed below; title generation runs later in the turn loop.
+    let title_user_content = generate_title.then(|| {
+        command_template
+            .as_ref()
+            .map(|template| template.content.clone())
+            .unwrap_or_else(|| content.to_string())
+    });
 
     if target_type == Some("council") {
         return handle_council_chat(
@@ -438,6 +452,7 @@ where
                 domain_session_id,
                 domain_activation,
                 timezone,
+                generate_title,
             },
         )
         .await;
@@ -592,8 +607,28 @@ where
                 event: ev,
                 ..
             } => {
+                let mut suggested_title = None;
+                if generate_title
+                    && let Some(user_message) = title_user_content.as_deref()
+                    && let nenjo::TurnEvent::Done { output } = &ev
+                {
+                    suggested_title = generate_session_title(
+                        harness.provider().as_ref(),
+                        Some(&agent_slug),
+                        user_message,
+                        &output.text,
+                    )
+                    .await;
+                }
                 for mut se in turn_event_to_stream_events(&ev, &aname, &run_id, event_session_id) {
                     bind_chat_response_context(&mut se, &run_id, input_message_id);
+                    if let StreamEvent::AssistantMessageFinalized {
+                        suggested_title: slot,
+                        ..
+                    } = &mut se
+                    {
+                        *slot = suggested_title.take();
+                    }
                     if matches!(se, StreamEvent::ToolCallStarted { .. }) {
                         tool_execution_observed = true;
                     }
@@ -660,6 +695,93 @@ where
         "Chat stream output completed"
     );
     Ok(())
+}
+
+const TITLE_SYSTEM_PROMPT: &str = "You generate concise conversation titles. Reply with only the title: 3 to 6 words, no quotes, no trailing punctuation, no explanation.";
+const TITLE_INPUT_MAX_CHARS: usize = 2_000;
+const TITLE_MAX_CHARS: usize = 120;
+const TITLE_GENERATION_TIMEOUT: Duration = Duration::from_secs(20);
+
+fn sanitize_session_title(raw: &str) -> Option<String> {
+    let collapsed = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    let trimmed = collapsed.trim_matches(|c| c == '"' || c == '\'').trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let mut title: String = trimmed.chars().take(TITLE_MAX_CHARS).collect();
+    if title.chars().last().is_some_and(|c| c == '.') {
+        title.pop();
+    }
+    Some(title)
+}
+
+/// Generate a short session title from the first turn's exchange.
+///
+/// Resolves the model through the agent manifest (or, for councils, the
+/// leader agent's model) so no extra credential configuration is needed.
+/// Any failure or timeout returns `None`; title generation must never fail
+/// the chat turn.
+async fn generate_session_title<P: ProviderRuntime>(
+    provider: &P,
+    agent_slug: Option<&Slug>,
+    user_message: &str,
+    assistant_output: &str,
+) -> Option<String> {
+    let generate = async {
+        let agent = provider.find_agent_manifest(agent_slug?)?;
+        let manifest = provider.manifest_snapshot();
+        let model_slug = agent.model.as_ref()?;
+        let model_manifest = manifest.models.iter().find(|m| &m.slug == model_slug)?;
+        let model_provider = provider.create_model_provider(model_manifest).await.ok()?;
+        let truncate =
+            |text: &str| -> String { text.chars().take(TITLE_INPUT_MAX_CHARS).collect() };
+        let prompt = format!(
+            "User message:\n{}\n\nAssistant reply:\n{}\n\nGenerate the title.",
+            truncate(user_message),
+            truncate(assistant_output),
+        );
+        let messages = vec![
+            ConversationMessage::Chat(ChatMessage {
+                role: ChatRole::System,
+                content: TITLE_SYSTEM_PROMPT.to_string(),
+                artifacts: Vec::new(),
+            }),
+            ConversationMessage::Chat(ChatMessage {
+                role: ChatRole::User,
+                content: prompt,
+                artifacts: Vec::new(),
+            }),
+        ];
+        let request = nenjo_models::ChatRequest {
+            messages: &messages,
+            tools: None,
+            native_tools: None,
+            prepared_artifacts: None,
+        };
+        let temperature = model_manifest.temperature.unwrap_or(0.2).clamp(0.0, 1.0);
+        let response = model_provider
+            .chat(request, &model_manifest.model, temperature)
+            .await
+            .ok()?;
+        response.text.as_deref().and_then(sanitize_session_title)
+    };
+    match tokio::time::timeout(TITLE_GENERATION_TIMEOUT, generate).await {
+        Ok(title) => {
+            if title.is_none() {
+                warn!(
+                    "Session title generation skipped: agent model configuration missing or empty model reply"
+                );
+            }
+            title
+        }
+        Err(_) => {
+            warn!(
+                "Session title generation timed out after {:?}",
+                TITLE_GENERATION_TIMEOUT
+            );
+            None
+        }
+    }
 }
 
 fn normalize_chat_error(error: &impl std::fmt::Display) -> (ChatStreamErrorCode, String, bool) {
@@ -850,6 +972,7 @@ where
             domain_activation: request.domain_activation,
             hook_scopes,
             timezone: request.timezone,
+            generate_title: request.generate_title,
         },
     )
     .await
@@ -999,6 +1122,8 @@ struct CouncilChatAdapterRequest<'a> {
     domain_session_id: Option<Uuid>,
     domain_activation: Option<DomainActivation>,
     timezone: chrono_tz::Tz,
+    /// Generate a session title from this turn when the reply finalizes.
+    generate_title: bool,
 }
 
 async fn handle_council_chat<P, SessionRt, S>(
@@ -1056,6 +1181,24 @@ where
         "target_type": "council",
         "target": council.as_str(),
     });
+    let suggested_title = if request.generate_title {
+        let leader_agent = harness
+            .provider()
+            .manifest_snapshot()
+            .councils
+            .iter()
+            .find(|manifest| manifest.slug == council)
+            .map(|manifest| manifest.leader_agent.clone());
+        generate_session_title(
+            harness.provider().as_ref(),
+            leader_agent.as_ref(),
+            request.content,
+            &result.output,
+        )
+        .await
+    } else {
+        None
+    };
     writer.send(
         request.session_id,
         StreamEvent::AssistantMessageFinalized {
@@ -1066,6 +1209,7 @@ where
             encrypted_payload: None,
             total_input_tokens: result.input_tokens,
             total_output_tokens: result.output_tokens,
+            suggested_title,
         },
     )?;
     writer.send(
@@ -1705,6 +1849,7 @@ mod tests {
                     domain_activation: None,
                     hook_scopes: Vec::new(),
                     timezone: chrono_tz::America::Chicago,
+                    generate_title: false,
                 },
             )
             .await
@@ -1728,6 +1873,7 @@ mod tests {
                     domain_activation: None,
                     hook_scopes: Vec::new(),
                     timezone: chrono_tz::America::Chicago,
+                    generate_title: false,
                 },
             )
             .await
@@ -1797,6 +1943,97 @@ mod tests {
             2,
             "visibility must be evaluated once per execution, not once per model turn",
         );
+    }
+
+    #[tokio::test]
+    async fn chat_attaches_suggested_title_only_when_requested() {
+        let temp = tempfile::tempdir().unwrap();
+        let workspace_dir = temp.path().join("workspace");
+        let state_dir = temp.path().join("state");
+        tokio::fs::create_dir_all(&workspace_dir).await.unwrap();
+
+        let skill = ralph_loop_skill_manifest(temp.path(), temp.path(), Vec::new());
+        let manifest = skill_test_manifest_with_hooks(skill, Vec::new());
+        let (model_requests, model_responses) = scripted_model(vec![
+            text_response("Here is the fix you need."),
+            text_response("\"Fixing the login timeout bug.\""),
+        ]);
+        let provider = Provider::builder()
+            .with_manifest(manifest)
+            .with_model_factory(ScriptedModelFactory {
+                requests: model_requests.clone(),
+                responses: model_responses,
+            })
+            .with_tool_factory(WorkspaceToolFactory {
+                workspace_dir: workspace_dir.clone(),
+            })
+            .build()
+            .await
+            .unwrap();
+        let session_runtime = nenjo_harness::FileSessionRuntime::with_host(
+            nenjo_harness::FileSessionStores::new(state_dir.join("session-runtime")),
+            "worker-test",
+        );
+        let harness = Harness::builder(provider)
+            .with_session_runtime(session_runtime)
+            .build();
+        let response_sink = Arc::new(CapturedResponses::default());
+        let ctx = ChatCommandContext {
+            organization_id: Uuid::new_v4(),
+            worker_instance_id: Uuid::new_v4(),
+            response_sink: response_sink.clone(),
+            worker_id: "worker-test".to_string(),
+            state_dir,
+        };
+        let session_id = Uuid::new_v4();
+
+        harness
+            .handle_chat(
+                &ctx,
+                ChatCommandRequest {
+                    message_id: None,
+                    attempt_id: None,
+                    retry_of_run_id: None,
+                    content: "My login session times out after five minutes",
+                    artifacts: &[],
+                    project: Some("demo-project"),
+                    agent: Some("coder"),
+                    target_type: None,
+                    target: None,
+                    session_id,
+                    domain_session_id: None,
+                    domain_activation: None,
+                    hook_scopes: Vec::new(),
+                    timezone: chrono_tz::UTC,
+                    generate_title: true,
+                },
+            )
+            .await
+            .unwrap();
+
+        let responses = response_sink.responses.lock().unwrap().clone();
+        let finalized = responses
+            .iter()
+            .find_map(|response| match response_stream_event(response) {
+                Some(StreamEvent::AssistantMessageFinalized {
+                    suggested_title, ..
+                }) => suggested_title.clone(),
+                _ => None,
+            })
+            .expect("finalized assistant message should carry a suggested title");
+        assert_eq!(finalized, "Fixing the login timeout bug");
+
+        let requests = model_requests.lock().unwrap();
+        assert_eq!(
+            requests.len(),
+            2,
+            "title generation should issue a second, separate model request"
+        );
+        let title_prompt = &requests[1];
+        assert!(title_prompt.messages.iter().any(|message| {
+            message_contains(message, "Generate the title.")
+                && message_contains(message, "My login session times out")
+        }));
     }
 
     #[tokio::test]
@@ -1882,6 +2119,7 @@ Original user message: {{ chat.message }}
                     domain_session_id: None,
                     domain_activation: None,
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await
@@ -2120,6 +2358,7 @@ Original user message: {{ chat.message }}
                     domain_activation: None,
                     hook_scopes: Vec::new(),
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await
@@ -2359,6 +2598,7 @@ Original user message: {{ chat.message }}
                     domain_activation: None,
                     hook_scopes: Vec::new(),
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await
@@ -2533,6 +2773,7 @@ Original user message: {{ chat.message }}
                     domain_activation: None,
                     hook_scopes: Vec::new(),
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await
@@ -2739,6 +2980,7 @@ Original user message: {{ chat.message }}
                     domain_activation: None,
                     hook_scopes: Vec::new(),
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await
@@ -2915,6 +3157,7 @@ Original user message: {{ chat.message }}
                     domain_activation: None,
                     hook_scopes: Vec::new(),
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await
@@ -3031,6 +3274,7 @@ Original user message: {{ chat.message }}
                     domain_session_id: None,
                     domain_activation: None,
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await
@@ -3170,6 +3414,7 @@ Original user message: {{ chat.message }}
                     domain_session_id: None,
                     domain_activation: None,
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await
@@ -3300,6 +3545,7 @@ Original user message: {{ chat.message }}
                     domain_session_id: None,
                     domain_activation: None,
                     timezone: chrono_tz::UTC,
+                    generate_title: false,
                 },
             )
             .await

@@ -412,6 +412,7 @@ pub fn turn_event_to_stream_events(
                 encrypted_payload: None,
                 total_input_tokens: output.input_tokens,
                 total_output_tokens: output.output_tokens,
+                suggested_title: None,
             },
             StreamEvent::RunCompleted {
                 run_id: run_id.to_string(),

@@ -121,6 +121,10 @@ pub enum Command {
         /// Domain activation to apply before processing this turn.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         domain_activation: Option<DomainActivation>,
+        /// Ask the worker to generate a session title from this turn's context.
+        /// Set by the platform when the session title is still a default value.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        generate_title: bool,
         /// Chat session scope.
         session_id: Uuid,
     },
@@ -165,6 +169,10 @@ pub enum Command {
         /// Domain activation to apply before processing this turn.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         domain_activation: Option<DomainActivation>,
+        /// Ask the worker to generate a session title from this turn's context.
+        /// Set by the platform when the session title is still a default value.
+        #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+        generate_title: bool,
         /// Chat session scope.
         session_id: Uuid,
     },
@@ -558,6 +566,7 @@ mod tests {
             target: Some("reviewer".to_string()),
             domain_session_id: None,
             domain_activation: None,
+            generate_title: false,
             session_id,
         };
         let encoded = serde_json::to_value(&command).expect("serialize chat command");
