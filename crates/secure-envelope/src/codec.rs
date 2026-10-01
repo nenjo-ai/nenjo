@@ -536,6 +536,7 @@ impl SecureEnvelopeCodec {
                 run_id,
                 message_id,
                 input_message_id,
+                suggested_title,
                 payload,
                 total_input_tokens,
                 total_output_tokens,
@@ -544,6 +545,7 @@ impl SecureEnvelopeCodec {
                 run_id,
                 message_id,
                 input_message_id,
+                suggested_title,
                 payload: None,
                 encrypted_payload: self
                     .encrypt_stream_payload_for_object(scope, message_id, "agent_response", payload)
@@ -755,6 +757,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 session_id,
                 domain_session_id,
                 domain_activation,
+                generate_title,
             } => match self.decrypt_enc_payload(actor_user_id, &payload).await {
                 Ok(content) => Ok(DecodeCommandResult::Command(Box::new(
                     Command::ChatMessage {
@@ -773,6 +776,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         session_id,
                         domain_session_id,
                         domain_activation,
+                        generate_title,
                     },
                 ))),
                 Err(error) => Ok(Self::drop_command_decode_failure(
@@ -800,6 +804,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                 session_id,
                 domain_session_id,
                 domain_activation,
+                generate_title,
             } => match self.decrypt_enc_payload(actor_user_id, &payload).await {
                 Ok(content) => Ok(DecodeCommandResult::Command(Box::new(
                     Command::ChatCommand {
@@ -817,6 +822,7 @@ impl EnvelopeCodec for SecureEnvelopeCodec {
                         session_id,
                         domain_session_id,
                         domain_activation,
+                        generate_title,
                     },
                 ))),
                 Err(error) => Ok(Self::drop_command_decode_failure(
@@ -1284,6 +1290,7 @@ mod tests {
                     target: None,
                     domain_session_id: None,
                     domain_activation: None,
+                    generate_title: false,
                     session_id: Uuid::new_v4(),
                 },
             )
@@ -1315,6 +1322,7 @@ mod tests {
                     target: None,
                     domain_session_id: None,
                     domain_activation: None,
+                    generate_title: false,
                     session_id: Uuid::new_v4(),
                 },
             )
@@ -1362,6 +1370,7 @@ mod tests {
                     target: None,
                     domain_session_id: None,
                     domain_activation: None,
+                    generate_title: false,
                     session_id: Uuid::new_v4(),
                 },
             )
@@ -1402,6 +1411,7 @@ mod tests {
                     target: None,
                     domain_session_id: None,
                     domain_activation: None,
+                    generate_title: false,
                     session_id: Uuid::new_v4(),
                 },
             )
@@ -1569,6 +1579,7 @@ mod tests {
                 encrypted_payload: None,
                 total_input_tokens: 1,
                 total_output_tokens: 2,
+                suggested_title: None,
             },
         );
 

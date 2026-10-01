@@ -688,6 +688,10 @@ pub enum StreamEvent {
         total_input_tokens: u64,
         #[serde(default)]
         total_output_tokens: u64,
+        /// Worker-generated conversation title, attached only when the platform
+        /// asked for one via `Command::generate_title`. Plaintext metadata.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        suggested_title: Option<String>,
     },
 
     /// An active hook started executing.
@@ -1121,11 +1125,13 @@ mod tests {
             target: None,
             domain_session_id: None,
             domain_activation: None,
+            generate_title: true,
             session_id: Uuid::nil(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
         assert!(json.contains(r#""type":"chat.message""#));
         assert!(json.contains(r#""hidden":true"#));
+        assert!(json.contains(r#""generate_title":true"#));
         let parsed: Command = serde_json::from_str(&json).unwrap();
         match parsed {
             Command::ChatMessage {
@@ -1165,6 +1171,7 @@ mod tests {
             target: None,
             domain_session_id: None,
             domain_activation: None,
+            generate_title: false,
             session_id: Uuid::nil(),
         };
         let json = serde_json::to_string(&cmd).unwrap();
