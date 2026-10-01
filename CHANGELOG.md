@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.0](https://github.com/nenjo-ai/nenjo/compare/v0.38.0...v0.39.0) - 2026-10-01
+
+### Added
+
+- add worker-generated chat session titles ([#123](https://github.com/nenjo-ai/nenjo/pull/123))
+
+### Other
+
+- Finalized core feature improvements ([#56](https://github.com/nenjo-ai/nenjo/pull/56))
+
 ## [0.38.0](https://github.com/nenjo-ai/nenjo/compare/v0.37.0...v0.38.0) - 2026-09-29
 
 ### Other
