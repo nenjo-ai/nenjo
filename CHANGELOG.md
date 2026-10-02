@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.39.1](https://github.com/nenjo-ai/nenjo/compare/v0.39.0...v0.39.1) - 2026-10-02
+
+### Added
+
+- fetch voice input audio from platform object store ([#125](https://github.com/nenjo-ai/nenjo/pull/125))
+
+### Other
+
+- Finalized core feature improvements ([#56](https://github.com/nenjo-ai/nenjo/pull/56))
+
 ## [0.39.0](https://github.com/nenjo-ai/nenjo/compare/v0.38.0...v0.39.0) - 2026-10-01
 
 ### Added
