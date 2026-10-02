@@ -171,6 +171,20 @@ impl ApiClient {
         response.json().await.map_err(ApiClientError::Http)
     }
 
+    /// Download raw voice-input audio bytes for a transcription job.
+    ///
+    /// The backend authorizes any API key in the owning organization.
+    pub async fn fetch_voice_input_audio(&self, job_id: Uuid) -> Result<Vec<u8>> {
+        let url = format!("{}/api/v1/voice-inputs/{job_id}/audio", self.base_url);
+        let response = self.get(&url).await?;
+        let status = response.status();
+        if !status.is_success() {
+            return Err(self.api_error(status, response).await);
+        }
+        let bytes = response.bytes().await.map_err(ApiClientError::Http)?;
+        Ok(bytes.to_vec())
+    }
+
     pub async fn put_review(&self, review_id: Uuid, request: &PutReviewRequest) -> Result<()> {
         let url = format!("{}/api/v1/reviews/{review_id}", self.base_url);
         let response = self.put_json(&url, request).await?;

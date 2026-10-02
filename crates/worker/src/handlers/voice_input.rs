@@ -1,6 +1,7 @@
 //! Push-to-talk voice input handlers.
 
 use anyhow::{Context, Result};
+use base64::Engine as _;
 use nenjo_events::{Response, VoiceInputAudio, VoiceTranscriptSegment};
 use nenjo_models::{
     MediaInputAsset, NativeMediaRequest, NativeMediaResponse, TranscribeAudioRequest,
@@ -71,20 +72,40 @@ async fn transcribe(
         .provider_with_base_url(provider_name, request.base_url)
         .with_context(|| format!("failed to initialize media provider '{provider_name}'"))?;
 
-    let mut provider_options = json!({
+    let provider_options = json!({
         "response_format": "verbose_json",
     });
-    if let Some(object_key) = request.audio.object_key.as_deref() {
-        provider_options["source_object_key"] = json!(object_key);
-    }
+
+    // Newer platforms leave `data_uri` empty and serve the clip from the
+    // object store; fall back to inline audio for older command senders.
+    let data_uri = if !request.audio.data_uri.is_empty() {
+        request.audio.data_uri.clone()
+    } else {
+        let has_object = request
+            .audio
+            .object_key
+            .as_deref()
+            .is_some_and(|key| !key.is_empty());
+        if !has_object {
+            anyhow::bail!("voice input audio has neither inline data nor an object reference");
+        }
+        let bytes = ctx
+            .api
+            .fetch_voice_input_audio(request.job_id)
+            .await
+            .context("failed to download voice input audio from platform")?;
+        format!(
+            "data:{};base64,{}",
+            request.audio.content_type,
+            base64::engine::general_purpose::STANDARD.encode(bytes)
+        )
+    };
 
     let response = provider
         .submit_media(NativeMediaRequest::TranscribeAudio(
             TranscribeAudioRequest {
                 model: model.to_string(),
-                audio: MediaInputAsset::DataUri {
-                    data_uri: request.audio.data_uri.clone(),
-                },
+                audio: MediaInputAsset::DataUri { data_uri },
                 language: request
                     .language
                     .map(str::trim)
