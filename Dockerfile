@@ -4,10 +4,16 @@ ARG RUST_VERSION=1.94.0
 ARG DEBIAN_VERSION=bookworm
 ARG NODE_VERSION=24
 ARG AGENT_BROWSER_VERSION=0.32.2
+# Pdfium build from https://github.com/bblanchon/pdfium-binaries/releases, matching
+# the `pdfium_latest` API version pinned by pdfium-render in Cargo.toml.
+ARG PDFIUM_VERSION=7881
 
 FROM node:${NODE_VERSION}-${DEBIAN_VERSION}-slim AS node-runtime
 
 FROM rust:${RUST_VERSION}-${DEBIAN_VERSION} AS builder
+
+ARG PDFIUM_VERSION
+ARG TARGETARCH
 
 WORKDIR /src
 
@@ -19,6 +25,19 @@ RUN apt-get update \
         git \
         pkg-config \
     && rm -rf /var/lib/apt/lists/*
+
+RUN case "${TARGETARCH}" in \
+        amd64) PDFIUM_ARCH=x64 ;; \
+        arm64) PDFIUM_ARCH=arm64 ;; \
+        arm) PDFIUM_ARCH=arm ;; \
+        *) echo "unsupported TARGETARCH: ${TARGETARCH}" >&2 && exit 1 ;; \
+    esac \
+    && curl -fsSL -o /tmp/pdfium.tgz \
+        "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${PDFIUM_VERSION}/pdfium-linux-${PDFIUM_ARCH}.tgz" \
+    && mkdir -p /out/pdfium \
+    && tar -xzf /tmp/pdfium.tgz -C /out/pdfium \
+    && cp /out/pdfium/lib/libpdfium.so /out/libpdfium.so \
+    && cp /out/pdfium/LICENSE /out/pdfium-LICENSE
 
 COPY . .
 
@@ -80,6 +99,11 @@ RUN apt-get update \
 COPY --from=builder /out/nenjo /usr/local/bin/nenjo
 COPY --from=builder /out/nenpm /usr/local/bin/nenpm
 COPY --from=builder /out/nenjoup /usr/local/bin/nenjoup
+COPY --from=builder /out/libpdfium.so /usr/local/lib/libpdfium.so
+COPY --from=builder /out/pdfium-LICENSE /usr/share/doc/libpdfium/LICENSE
+
+# Pdfium is used at run-time for PDF text extraction (see NENJO_PDFIUM_LIBRARY).
+ENV NENJO_PDFIUM_LIBRARY=/usr/local/lib/libpdfium.so
 
 RUN useradd --create-home --home-dir /home/nenjo --shell /bin/bash --uid 10001 nenjo \
     && mkdir -p /home/nenjo/.nenjo/workspace \

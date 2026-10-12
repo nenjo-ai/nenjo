@@ -72,12 +72,22 @@ jobs:
     name: Test
     needs: build
     runs-on: blacksmith-4vcpu-ubuntu-2404
+    env:
+      # Version must match PDFIUM_VERSION in Dockerfile and pdfium-render in Cargo.toml.
+      PDFIUM_VERSION: 7881
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: "1.94.0"
       - uses: Swatinem/rust-cache@v2
+      - name: Install Pdfium
+        run: |
+          curl -fsSL -o /tmp/pdfium.tgz \
+            "https://github.com/bblanchon/pdfium-binaries/releases/download/chromium%2F${PDFIUM_VERSION}/pdfium-linux-x64.tgz"
+          mkdir -p /opt/pdfium/lib
+          tar -xzf /tmp/pdfium.tgz -C /opt/pdfium
+          echo "NENJO_PDFIUM_LIBRARY=/opt/pdfium/lib/libpdfium.so" >> "$GITHUB_ENV"
       - name: Test
         run: cargo test --workspace --exclude nenjo-integration-tests
 
@@ -115,7 +125,8 @@ jobs:
             git --version &&
             git lfs version &&
             rg --version &&
-            tar --version
+            tar --version &&
+            test -r "$NENJO_PDFIUM_LIBRARY"
           '
 
       - name: Build dev image

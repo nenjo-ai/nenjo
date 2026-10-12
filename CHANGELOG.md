@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Replaced `pdf-extract` with Google's Pdfium engine (via `pdfium-render`) for PDF text extraction in the worker. Malformed PDFs that previously crashed text extraction (e.g. Type3 fonts with missing glyph widths) no longer fail chat runs; extraction degrades to empty page text while rendered page images remain available. The worker image now bundles `libpdfium.so` (pinned to Chromium build 7881); set `NENJO_PDFIUM_LIBRARY` when running outside the image.
+
 ## [0.39.1](https://github.com/nenjo-ai/nenjo/compare/v0.39.0...v0.39.1) - 2026-10-02
 
 ### Added
