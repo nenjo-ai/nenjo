@@ -1,0 +1,11 @@
+# Configuration for `cargo audit` (used by the Audit Dependencies CI job).
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0253: `lru::LruCache::pop()` is unsound only when a stored key's
+    # `Drop` panics inside `catch_unwind`. The fix landed in lru 0.18.2, but our sole
+    # dependent (tantivy 0.26.x, via nenjo-knowledge) pins lru "0.16.3" and no released
+    # tantivy version allows lru >= 0.18. tantivy uses primitive hash keys with
+    # infallible `Drop`, so the trigger conditions cannot occur here. Re-evaluate on
+    # the next tantivy upgrade.
+    "RUSTSEC-2026-0253",
+]

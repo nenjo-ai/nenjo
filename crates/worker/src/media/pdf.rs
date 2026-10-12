@@ -574,9 +574,11 @@ mod tests {
         let pages_id = document.new_object_id();
         let charproc_id = document.add_object(Stream::new(
             dictionary! {},
-            Content { operations: Vec::new() }
-                .encode()
-                .expect("encode empty charproc"),
+            Content {
+                operations: Vec::new(),
+            }
+            .encode()
+            .expect("encode empty charproc"),
         ));
         let font_id = document.add_object(dictionary! {
             "Type" => "Font",
