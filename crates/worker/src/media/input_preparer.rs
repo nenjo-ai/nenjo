@@ -1123,6 +1123,10 @@ mod tests {
 
     #[tokio::test]
     async fn vllm_text_model_receives_extracted_pdf_text_without_a_file_part() {
+        if !crate::media::pdf::pdfium_available() {
+            eprintln!("skipping: Pdfium is not installed; set NENJO_PDFIUM_LIBRARY");
+            return;
+        }
         let bytes = test_pdf(3, Some("Locally extracted evidence"));
         let reference = pdf_reference(&bytes);
         let materializer = Arc::new(TestMaterializer {

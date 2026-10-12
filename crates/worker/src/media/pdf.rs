@@ -1,9 +1,10 @@
 //! Deterministic, bounded local PDF derivation for providers without native PDF input.
 
 use nenjo::concurrency::{AdmissionError, AdmissionPool};
+use std::any::Any;
 use std::num::NonZeroUsize;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, LazyLock, OnceLock};
 use std::time::Duration;
 
 use hayro::hayro_interpret::InterpreterSettings;
@@ -11,6 +12,7 @@ use hayro::hayro_syntax::Pdf;
 use hayro::vello_cpu::color::palette::css::WHITE;
 use hayro::{RenderCache, RenderSettings, render};
 use nenjo_models::ArtifactRef;
+use pdfium_render::prelude::*;
 use tokio::sync::OnceCell;
 use tokio::task::JoinError;
 
@@ -21,7 +23,44 @@ const MAX_EXTRACTED_TEXT_BYTES: usize = 256 * 1024;
 const MAX_RENDERED_PAGE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_DERIVATIVE_CACHE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_DERIVATIVE_CACHE_ENTRIES: usize = 16;
-pub const PDF_DERIVATION_VERSION: &str = "pdf-extract-0.12.0+hayro-0.7.1:v1";
+pub const PDF_DERIVATION_VERSION: &str = "pdfium-7881+hayro-0.7.1:v2";
+
+/// Optional absolute path to the Pdfium dynamic library used for text extraction.
+/// When unset, the worker binds to a Pdfium library next to the executable, then
+/// to a system-installed library.
+const PDFIUM_LIBRARY_ENV: &str = "NENJO_PDFIUM_LIBRARY";
+
+/// Shared Pdfium instance. Pdfium is not thread-safe on its own; the
+/// `thread_safe` feature serializes every FFI call behind a mutex, and the
+/// underlying binding can only be initialized once per process.
+static PDFIUM: LazyLock<Option<Arc<Pdfium>>> = LazyLock::new(|| {
+    let attempted = match std::env::var(PDFIUM_LIBRARY_ENV) {
+        Ok(path) => path.into(),
+        Err(_) => Pdfium::pdfium_platform_library_name_at_path("./"),
+    };
+    match Pdfium::bind_to_library(&attempted).or_else(|_| Pdfium::bind_to_system_library()) {
+        Ok(bindings) => Some(Arc::new(Pdfium::new(bindings))),
+        Err(error) => {
+            tracing::warn!(
+                library = %attempted.display(),
+                %error,
+                "Pdfium library unavailable; PDF text extraction is disabled \
+                 and only rendered page images will be provided"
+            );
+            None
+        }
+    }
+});
+
+fn pdfium_instance() -> Option<Arc<Pdfium>> {
+    PDFIUM.clone()
+}
+
+/// Whether PDF text extraction is available in this process. Text-derivation
+/// tests skip their text assertions when Pdfium is not installed locally.
+pub fn pdfium_available() -> bool {
+    pdfium_instance().is_some()
+}
 
 /// One-based page identity that cannot represent page zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -226,10 +265,6 @@ pub enum PdfDerivationError {
     },
     #[error("PDF rendered bytes exceed configured maximum of {maximum}")]
     RenderedBytesExceeded { maximum: u64 },
-    #[error("PDF extracted text has {actual} bytes; maximum is {maximum}")]
-    ExtractedTextTooLarge { actual: usize, maximum: usize },
-    #[error("PDF text extraction failed: {details}")]
-    TextExtraction { details: String },
     #[error("PDF page rendering task failed: {details}")]
     RenderTask { details: String },
     #[error("PDF page {page} could not be encoded as PNG: {details}")]
@@ -279,12 +314,12 @@ async fn derive_pdf_with_pool(
 
     let text_bytes = Arc::clone(&bytes);
     let text_task = tokio::task::spawn_blocking(move || extract_page_text(&text_bytes, page_count));
-    let rendered_pages = render_all_pages(bytes, page_count, config, pool).await;
+    let rendered_pages = render_all_pages(bytes, page_count, config, pool).await?;
     let text_pages = text_task.await.map_err(render_join_error)?;
 
     Ok(PdfDocumentDerivatives {
-        text_pages: text_pages?,
-        rendered_pages: rendered_pages?,
+        text_pages,
+        rendered_pages,
     })
 }
 
@@ -304,28 +339,74 @@ fn load_pdf(bytes: &[u8]) -> Result<Pdf, PdfDerivationError> {
     })
 }
 
-fn extract_page_text(
-    bytes: &[u8],
-    page_count: usize,
-) -> Result<Vec<PdfPageText>, PdfDerivationError> {
-    let extracted = pdf_extract::extract_text_from_mem_by_pages(bytes).map_err(|error| {
-        PdfDerivationError::TextExtraction {
-            details: error.to_string(),
+/// Extracts per-page text with Pdfium. Extraction is best-effort: any failure
+/// (library unavailable, malformed fonts, panic inside the library glue) degrades
+/// to empty page text while the rendered page images remain available to the model.
+fn extract_page_text(bytes: &[u8], page_count: usize) -> Vec<PdfPageText> {
+    let fallback = |reason: &str, details: String| {
+        tracing::warn!(
+            %details,
+            page_count,
+            "PDF text extraction failed ({reason}); continuing with rendered pages only"
+        );
+        (0..page_count)
+            .map(|index| PdfPageText {
+                page: PdfPageNumber::from_index(index),
+                text: String::new(),
+            })
+            .collect::<Vec<_>>()
+    };
+
+    let extracted = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        let pdfium = pdfium_instance().ok_or_else(|| "pdfium library unavailable".to_string())?;
+        let document = pdfium
+            .load_pdf_from_byte_vec(bytes.to_vec(), None)
+            .map_err(|error| error.to_string())?;
+        let mut pages = Vec::with_capacity(page_count);
+        for index in 0..page_count {
+            let text = match document.pages().get(index as PdfPageIndex) {
+                Ok(page) => match page.text() {
+                    Ok(text) => text.all(),
+                    Err(_) => String::new(),
+                },
+                Err(_) => String::new(),
+            };
+            pages.push(PdfPageText {
+                page: PdfPageNumber::from_index(index),
+                text,
+            });
         }
-    })?;
-    let total_bytes = extracted.iter().map(String::len).sum::<usize>();
+        Ok::<Vec<PdfPageText>, String>(pages)
+    })) {
+        Ok(Ok(pages)) => pages,
+        Ok(Err(details)) => return fallback("extraction error", details),
+        Err(panic) => {
+            let details = panic_message(&panic);
+            return fallback("panic", details);
+        }
+    };
+
+    let total_bytes = extracted.iter().map(|page| page.text.len()).sum::<usize>();
     if total_bytes > MAX_EXTRACTED_TEXT_BYTES {
-        return Err(PdfDerivationError::ExtractedTextTooLarge {
-            actual: total_bytes,
-            maximum: MAX_EXTRACTED_TEXT_BYTES,
-        });
+        return fallback(
+            "extracted text exceeds budget",
+            format!(
+                "extracted {} bytes; maximum is {} bytes",
+                total_bytes, MAX_EXTRACTED_TEXT_BYTES
+            ),
+        );
     }
-    Ok((0..page_count)
-        .map(|index| PdfPageText {
-            page: PdfPageNumber::from_index(index),
-            text: extracted.get(index).cloned().unwrap_or_default(),
-        })
-        .collect())
+    extracted
+}
+
+fn panic_message(panic: &(dyn Any + Send)) -> String {
+    if let Some(message) = panic.downcast_ref::<&str>() {
+        (*message).to_string()
+    } else if let Some(message) = panic.downcast_ref::<String>() {
+        message.clone()
+    } else {
+        "unknown panic".to_string()
+    }
 }
 
 async fn render_all_pages(
@@ -479,6 +560,92 @@ mod tests {
 
     use super::*;
 
+    /// Pdfium is required for text-derivation assertions; install a Pdfium build
+    /// (e.g. from https://github.com/bblanchon/pdfium-binaries/releases) and point
+    /// `NENJO_PDFIUM_LIBRARY` at its shared library when developing locally.
+    fn pdfium_available() -> bool {
+        pdfium_instance().is_some()
+    }
+
+    /// Mirrors the Type3 font shape that crashed `pdf-extract` ("missing width"):
+    /// the text uses code 66, which has neither an entry in `Widths` nor a charproc.
+    fn type3_pdf_missing_width(page_count: usize) -> Arc<[u8]> {
+        let mut document = Document::with_version("1.5");
+        let pages_id = document.new_object_id();
+        let charproc_id = document.add_object(Stream::new(
+            dictionary! {},
+            Content { operations: Vec::new() }
+                .encode()
+                .expect("encode empty charproc"),
+        ));
+        let font_id = document.add_object(dictionary! {
+            "Type" => "Font",
+            "Subtype" => "Type3",
+            "FontBBox" => vec![0.into(), 0.into(), 1000.into(), 1000.into()],
+            "FontMatrix" => vec![
+                0.001.into(), 0.into(), 0.into(), 0.001.into(), 0.into(), 0.into(),
+            ],
+            "CharProcs" => dictionary! { "A" => charproc_id },
+            "Encoding" => dictionary! {
+                "Type" => "Encoding",
+                "Differences" => vec![65.into(), Object::Name("A".into())],
+            },
+            "FirstChar" => 65,
+            "LastChar" => 65,
+            "Widths" => vec![500.into()],
+        });
+        let resources_id = document.add_object(dictionary! {
+            "Font" => dictionary! { "F1" => font_id },
+        });
+        let mut page_ids = Vec::with_capacity(page_count);
+        for index in 0..page_count {
+            let operations = vec![
+                Operation::new("BT", vec![]),
+                Operation::new("Tf", vec!["F1".into(), 18.into()]),
+                Operation::new("Td", vec![50.into(), 740.into()]),
+                Operation::new(
+                    "Tj",
+                    vec![Object::string_literal(format!("B page {}", index + 1))],
+                ),
+                Operation::new("ET", vec![]),
+                Operation::new("q", vec![]),
+                Operation::new("RG", vec![0.into(), 0.into(), 0.into()]),
+                Operation::new("re", vec![50.into(), 500.into(), 300.into(), 120.into()]),
+                Operation::new("S", vec![]),
+                Operation::new("Q", vec![]),
+            ];
+            let content = Content { operations };
+            let content_id = document.add_object(Stream::new(
+                dictionary! {},
+                content.encode().expect("encode fixture content"),
+            ));
+            page_ids.push(document.add_object(dictionary! {
+                "Type" => "Page",
+                "Parent" => pages_id,
+                "Contents" => content_id,
+            }));
+        }
+        document.objects.insert(
+            pages_id,
+            Object::Dictionary(dictionary! {
+                "Type" => "Pages",
+                "Kids" => page_ids.iter().copied().map(Object::Reference).collect::<Vec<_>>(),
+                "Count" => i64::try_from(page_count).unwrap(),
+                "Resources" => resources_id,
+                "MediaBox" => vec![0.into(), 0.into(), 595.into(), 842.into()],
+            }),
+        );
+        let catalog_id = document.add_object(dictionary! {
+            "Type" => "Catalog",
+            "Pages" => pages_id,
+        });
+        document.trailer.set("Root", catalog_id);
+        document.compress();
+        let mut bytes = Vec::new();
+        document.save_to(&mut bytes).expect("save PDF fixture");
+        Arc::from(bytes)
+    }
+
     fn test_pdf(page_count: usize, text: Option<&str>) -> Arc<[u8]> {
         let mut document = Document::with_version("1.5");
         let pages_id = document.new_object_id();
@@ -570,7 +737,9 @@ mod tests {
 
         assert_eq!(derivatives.text_pages.len(), 5);
         assert_eq!(derivatives.rendered_pages.len(), 5);
-        assert!(derivatives.text_pages[0].text.contains("Nenjo PDF page 1"));
+        if pdfium_available() {
+            assert!(derivatives.text_pages[0].text.contains("Nenjo PDF page 1"));
+        }
         assert_eq!(derivatives.rendered_pages[4].page.get(), 5);
         assert!(
             derivatives
@@ -594,6 +763,25 @@ mod tests {
 
         assert!(!derivatives.has_extracted_text());
         assert_eq!(derivatives.rendered_pages.len(), 2);
+    }
+
+    /// Regression: a Type3 font with a code missing from `Widths` used to panic
+    /// inside `pdf-extract` and fail the entire derivation. Extraction must
+    /// degrade to empty page text while rendered pages remain available.
+    #[tokio::test]
+    async fn type3_font_with_missing_width_degrades_text_but_keeps_rendering() {
+        let derivatives = derive_pdf(type3_pdf_missing_width(2), &compact_config())
+            .await
+            .expect("derivation must not fail on malformed Type3 widths");
+
+        assert_eq!(derivatives.text_pages.len(), 2);
+        assert_eq!(derivatives.rendered_pages.len(), 2);
+        assert!(
+            derivatives
+                .rendered_pages
+                .iter()
+                .all(|page| page.png.starts_with(b"\x89PNG\r\n\x1a\n"))
+        );
     }
 
     #[tokio::test]

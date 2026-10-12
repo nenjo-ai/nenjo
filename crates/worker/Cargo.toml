@@ -80,7 +80,7 @@ rand_core = { workspace = true, features = ["getrandom"] }
 zeroize = { workspace = true, features = ["zeroize_derive"] }
 glob = { workspace = true }
 hayro = { workspace = true }
-pdf-extract = { workspace = true }
+pdfium-render = { workspace = true }
 chrono-tz = { workspace = true }
 nanohtml2text = { workspace = true }
 urlencoding = { workspace = true }
