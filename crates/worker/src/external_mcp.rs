@@ -283,7 +283,44 @@ enum Transport {
     },
 }
 
+/// Shared MCP initialize request params.
+fn initialize_params() -> serde_json::Value {
+    serde_json::json!({
+        "protocolVersion": "2025-03-26",
+        "capabilities": {},
+        "clientInfo": {
+            "name": "nenjo-worker",
+            "version": "0.1.0"
+        }
+    })
+}
+
+/// True when an error from `send_rpc` indicates the HTTP server rejected our
+/// session id. Per the MCP spec, servers return 404 for unknown or expired
+/// session ids (idle expiry, server restart).
+fn is_stale_http_session_error(err: &anyhow::Error) -> bool {
+    err.to_string().starts_with("HTTP 404")
+}
+
 impl Transport {
+    /// True when this transport is HTTP and holds a server-issued session id,
+    /// meaning a 404 may be a dropped session rather than a bad URL.
+    fn http_session_may_be_stale(&self) -> bool {
+        matches!(
+            self,
+            Transport::Http {
+                session_id: Some(_),
+                ..
+            }
+        )
+    }
+
+    fn clear_http_session(&mut self) {
+        if let Transport::Http { session_id, .. } = self {
+            *session_id = None;
+        }
+    }
+
     async fn send_rpc(
         &mut self,
         method: &'static str,
@@ -658,17 +695,7 @@ impl ConnectedServer {
 
         // Initialize the server
         let _init = transport
-            .send_rpc(
-                "initialize",
-                Some(serde_json::json!({
-                    "protocolVersion": "2025-03-26",
-                    "capabilities": {},
-                    "clientInfo": {
-                        "name": "nenjo-worker",
-                        "version": "0.1.0"
-                    }
-                })),
-            )
+            .send_rpc("initialize", Some(initialize_params()))
             .await?;
 
         transport
@@ -739,9 +766,40 @@ impl ConnectedServer {
             "name": name,
             "arguments": arguments,
         });
-        let resp = self.transport.send_rpc("tools/call", Some(params)).await?;
+        match self
+            .transport
+            .send_rpc("tools/call", Some(params.clone()))
+            .await
+        {
+            Ok(resp) => McpToolCallOutcome::parse(resp)?.into_result(),
+            Err(err)
+                if self.transport.http_session_may_be_stale()
+                    && is_stale_http_session_error(&err) =>
+            {
+                // HTTP servers expire sessions (idle timeout, restart). Drop the
+                // stale id, re-initialize, and retry the call once on the new session.
+                info!(
+                    server = %self.server_def.name,
+                    "External MCP HTTP session rejected; re-initializing session"
+                );
+                self.reinitialize_http_session().await?;
+                let resp = self.transport.send_rpc("tools/call", Some(params)).await?;
+                McpToolCallOutcome::parse(resp)?.into_result()
+            }
+            Err(err) => Err(err),
+        }
+    }
 
-        McpToolCallOutcome::parse(resp)?.into_result()
+    /// Re-run MCP initialization after the server dropped our HTTP session.
+    async fn reinitialize_http_session(&mut self) -> anyhow::Result<()> {
+        self.transport.clear_http_session();
+        self.transport
+            .send_rpc("initialize", Some(initialize_params()))
+            .await?;
+        self.transport
+            .send_notification("notifications/initialized", None)
+            .await?;
+        Ok(())
     }
 }
 
@@ -1694,6 +1752,137 @@ while IFS= read -r line; do
 done
 "#
         .to_string()
+    }
+
+    /// Mock streamable-HTTP MCP server: issues a fresh session id on every
+    /// `initialize`, and answers 404 "Session not found" for any tools/* call
+    /// whose `Mcp-Session-Id` does not match the current session or while the
+    /// session has been marked expired.
+    #[tokio::test]
+    async fn http_transport_reinitializes_after_server_expires_session() {
+        use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
+
+        let expired = Arc::new(AtomicBool::new(false));
+        let counter = Arc::new(AtomicU64::new(0));
+        let current_session = Arc::new(tokio::sync::Mutex::new(String::new()));
+
+        let app = {
+            let expired = expired.clone();
+            let counter = counter.clone();
+            let current_session = current_session.clone();
+            axum::Router::new().route(
+                "/mcp",
+                axum::routing::post(
+                    move |headers: axum::http::HeaderMap, body: String| {
+                        let expired = expired.clone();
+                        let counter = counter.clone();
+                        let current_session = current_session.clone();
+                        async move {
+                            let req: serde_json::Value =
+                                serde_json::from_str(&body).expect("valid JSON-RPC");
+                            let method =
+                                req["method"].as_str().unwrap_or_default().to_string();
+
+                            if method == "initialize" {
+                                let sid = format!(
+                                    "session-{}",
+                                    counter.fetch_add(1, Ordering::SeqCst) + 1
+                                );
+                                *current_session.lock().await = sid.clone();
+                                expired.store(false, Ordering::SeqCst);
+                                return axum::response::Response::builder()
+                                    .status(200)
+                                    .header("mcp-session-id", sid)
+                                    .header("content-type", "application/json")
+                                    .body(axum::body::Body::from(
+                                        r#"{"jsonrpc":"2.0","id":1,"result":{"protocolVersion":"2025-03-26","capabilities":{},"serverInfo":{"name":"mock","version":"0"}}}"#,
+                                    ))
+                                    .unwrap();
+                            }
+
+                            if req.get("id").is_none() {
+                                // notifications/initialized etc.
+                                return axum::response::Response::builder()
+                                    .status(200)
+                                    .body(axum::body::Body::empty())
+                                    .unwrap();
+                            }
+
+                            let presented = headers
+                                .get("mcp-session-id")
+                                .and_then(|v| v.to_str().ok())
+                                .unwrap_or_default();
+                            let session = current_session.lock().await.clone();
+                            if expired.load(Ordering::SeqCst) || presented != session {
+                                return axum::response::Response::builder()
+                                    .status(404)
+                                    .header("content-type", "application/json")
+                                    .body(axum::body::Body::from(
+                                        r#"{"error":"Session not found"}"#,
+                                    ))
+                                    .unwrap();
+                            }
+
+                            let result = if method == "tools/list" {
+                                r#"{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"tool","description":"Tool","inputSchema":{"type":"object","properties":{}}}]}}"#
+                            } else {
+                                r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"tool-ok"}]}}"#
+                            };
+                            axum::response::Response::builder()
+                                .status(200)
+                                .header("content-type", "application/json")
+                                .body(axum::body::Body::from(result.to_string()))
+                                .unwrap()
+                        }
+                    },
+                ),
+            )
+        };
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move { axum::serve(listener, app).await.expect("server") });
+
+        let manifest = McpServerManifest {
+            slug: nenjo::Slug::derive("session-google"),
+            name: "Session Google".to_string(),
+            description: None,
+            transport: "http".to_string(),
+            command: None,
+            args: None,
+            url: Some(format!("http://{addr}/mcp")),
+            env_schema: json!([]),
+            source_type: "test".to_string(),
+            read_only: false,
+            metadata: serde_json::Value::Null,
+        };
+        let mut connected = ConnectedServer::connect(ServerSpec {
+            manifest,
+            runtime: ServerRuntime::Manifest,
+            policy: ServerPolicy::STANDARD,
+        })
+        .await
+        .unwrap();
+
+        // First call succeeds on the initial session.
+        let out = connected
+            .call_tool("tool", json!({}))
+            .await
+            .expect("initial call");
+        assert_eq!(out, "tool-ok");
+
+        // Server expires/drops the session the worker still holds.
+        expired.store(true, Ordering::SeqCst);
+
+        // The next call transparently re-initializes and succeeds.
+        let out = connected
+            .call_tool("tool", json!({}))
+            .await
+            .expect("call after session expiry");
+        assert_eq!(out, "tool-ok");
+
+        // A brand-new session was negotiated (not a replay of the old one).
+        assert_eq!(*current_session.lock().await, "session-2");
     }
 
     fn mcp_error_fixture_script() -> String {
