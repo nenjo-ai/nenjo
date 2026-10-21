@@ -38,13 +38,17 @@ pub fn notification_tools() -> Vec<ToolSpec> {
         },
         ToolSpec {
             name: "send_notification".into(),
-            description: "Send a push notification from this agent. Use recipient_handle for a specific user, otherwise the notification is sent to the organization.".into(),
+            description: "Send a push notification from this agent. Use recipient_handle for a specific user, otherwise the notification is sent to the organization. Use title to label the notification conversation so recipients can tell what it is about.".into(),
             parameters: json!({
                 "type": "object",
                 "properties": {
                     "body": {
                         "type": "string",
                         "description": "Notification body shown to users."
+                    },
+                    "title": {
+                        "type": "string",
+                        "description": "Optional short label used as the conversation title for notifications sent outside a chat session, for example \"Nightly deploy report\"."
                     },
                     "tag": {
                         "type": "string",

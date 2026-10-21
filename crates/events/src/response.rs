@@ -278,6 +278,10 @@ pub enum Response {
         recipient_user_id: Option<Uuid>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         recipient_handle: Option<String>,
+        /// Optional conversation title used when the platform derives a
+        /// notification conversation for a non-chat source session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        title: Option<String>,
         encrypted_payload: EncryptedPayload,
     },
 
@@ -1401,6 +1405,7 @@ mod tests {
         let resp = Response::PushNotification {
             agent: "reviewer".into(),
             session_id,
+            title: Some("Nightly deploy report".into()),
             recipient_user_id: Some(recipient_user_id),
             recipient_handle: Some("@casey".into()),
             encrypted_payload: payload.clone(),
@@ -1409,6 +1414,7 @@ mod tests {
         let json = serde_json::to_string(&resp).unwrap();
         assert!(json.contains(r#""type":"push.notification""#));
         assert!(json.contains(r#""session_id""#));
+        assert!(json.contains(r#""title":"Nightly deploy report""#));
         assert!(json.contains(r#""recipient_handle":"@casey""#));
         assert!(json.contains(r#""encrypted_payload""#));
 
@@ -1417,12 +1423,14 @@ mod tests {
             Response::PushNotification {
                 agent,
                 session_id: parsed_session_id,
+                title,
                 recipient_user_id: parsed_recipient_user_id,
                 recipient_handle,
                 encrypted_payload,
             } => {
                 assert_eq!(agent, "reviewer");
                 assert_eq!(parsed_session_id, session_id);
+                assert_eq!(title.as_deref(), Some("Nightly deploy report"));
                 assert_eq!(parsed_recipient_user_id, Some(recipient_user_id));
                 assert_eq!(recipient_handle.as_deref(), Some("@casey"));
                 assert_eq!(encrypted_payload.account_id, payload.account_id);

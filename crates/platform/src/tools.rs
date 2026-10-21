@@ -70,10 +70,13 @@ pub trait PlatformNotificationEmitter: Send + Sync {
     ///
     /// If `recipient` is set, the encrypted payload is scoped to that user.
     /// Without a recipient, the payload is org-scoped and broadcast to the org.
+    /// `title` labels the conversation the platform derives for non-chat
+    /// source sessions.
     fn send_push_notification(
         &self,
         agent: &str,
         current_session_id: Option<Uuid>,
+        title: Option<&str>,
         encrypted_payload: EncryptedPayload,
         recipient: Option<PlatformNotificationRecipient>,
     ) -> Result<()>;
@@ -556,6 +559,10 @@ where
                 sink.send_push_notification(
                     self.backend.agent.as_str(),
                     self.backend.current_session_id,
+                    args.title
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|t| !t.is_empty()),
                     encrypted_payload,
                     recipient,
                 )?;
@@ -600,6 +607,7 @@ struct ListNotificationsArgs {
 #[serde(deny_unknown_fields)]
 struct SendNotificationArgs {
     body: String,
+    title: Option<String>,
     tag: Option<String>,
     recipient_handle: Option<String>,
     recipient_user_id: Option<Uuid>,
@@ -701,6 +709,7 @@ mod tests {
     struct RecordedNotification {
         agent: String,
         current_session_id: Option<Uuid>,
+        title: Option<String>,
         encrypted_payload: EncryptedPayload,
         recipient: Option<PlatformNotificationRecipient>,
     }
@@ -715,12 +724,14 @@ mod tests {
             &self,
             agent: &str,
             current_session_id: Option<Uuid>,
+            title: Option<&str>,
             encrypted_payload: EncryptedPayload,
             recipient: Option<PlatformNotificationRecipient>,
         ) -> Result<()> {
             *self.last_notification.lock().unwrap() = Some(RecordedNotification {
                 agent: agent.to_string(),
                 current_session_id,
+                title: title.map(str::to_string),
                 encrypted_payload,
                 recipient,
             });
@@ -910,7 +921,10 @@ mod tests {
             .find(|tool| tool.name() == "send_notification")
             .expect("send_notification tool should be exposed");
         let result = tool
-            .execute(json!({ "body": "Step scoped notification" }))
+            .execute(json!({
+                "body": "Step scoped notification",
+                "title": "  Nightly deploy report  "
+            }))
             .await
             .unwrap();
 
@@ -918,6 +932,7 @@ mod tests {
         let notification = sink.last_notification.lock().unwrap();
         let notification = notification.as_ref().expect("notification emitted");
         assert_eq!(notification.current_session_id, Some(current_session_id));
+        assert_eq!(notification.title.as_deref(), Some("Nightly deploy report"));
     }
 
     #[tokio::test]
