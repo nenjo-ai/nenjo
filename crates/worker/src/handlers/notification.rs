@@ -33,12 +33,14 @@ where
         &self,
         agent: &str,
         current_session_id: Option<Uuid>,
+        title: Option<&str>,
         encrypted_payload: EncryptedPayload,
         recipient: Option<PlatformNotificationRecipient>,
     ) -> Result<()> {
         self.response_sink.send(Response::PushNotification {
             agent: agent.to_string(),
             session_id: current_session_id.unwrap_or(self.session_id),
+            title: title.map(str::to_string),
             recipient_user_id: recipient.as_ref().and_then(|target| target.user_id),
             recipient_handle: recipient.and_then(|target| target.handle),
             encrypted_payload,
@@ -88,6 +90,7 @@ mod tests {
             .send_push_notification(
                 "triage-agent",
                 Some(current_session_id),
+                Some("Triage summary"),
                 encrypted_payload(),
                 Some(PlatformNotificationRecipient {
                     user_id: Some(recipient_user_id),
@@ -102,12 +105,14 @@ mod tests {
             Response::PushNotification {
                 agent,
                 session_id,
+                title,
                 recipient_user_id: actual_user_id,
                 recipient_handle,
                 encrypted_payload,
             } => {
                 assert_eq!(agent, "triage-agent");
                 assert_eq!(*session_id, current_session_id);
+                assert_eq!(title.as_deref(), Some("Triage summary"));
                 assert_eq!(*actual_user_id, Some(recipient_user_id));
                 assert_eq!(recipient_handle.as_deref(), Some("@casey"));
                 assert_eq!(encrypted_payload.object_type, "push.notification");

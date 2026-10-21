@@ -95,6 +95,7 @@ impl PlatformNotificationEmitter for TestNotificationSink {
         &self,
         _agent: &str,
         _current_session_id: Option<uuid::Uuid>,
+        _title: Option<&str>,
         _encrypted_payload: EncryptedPayload,
         _recipient: Option<nenjo_platform::tools::PlatformNotificationRecipient>,
     ) -> anyhow::Result<()> {
