@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.41.0](https://github.com/nenjo-ai/nenjo/compare/v0.40.0...v0.41.0) - 2026-10-22
+
+### Added
+
+- *(notifications)* let agents title notification conversations ([#130](https://github.com/nenjo-ai/nenjo/pull/130))
+
+### Fixed
+
+- *(worker)* re-initialize external MCP HTTP sessions after server ex… ([#129](https://github.com/nenjo-ai/nenjo/pull/129))
+
+### Other
+
+- Finalized core feature improvements ([#56](https://github.com/nenjo-ai/nenjo/pull/56))
+
 ## [0.40.0](https://github.com/nenjo-ai/nenjo/compare/v0.39.1...v0.40.0) - 2026-10-12
 
 ### Other
