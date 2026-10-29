@@ -82,6 +82,7 @@ impl TokenEstimator {
 }
 
 /// Estimate total token count across all messages using the default chars/4 heuristic.
+#[cfg(test)]
 pub(crate) fn estimate_tokens(messages: &[ConversationMessage]) -> usize {
     TokenEstimator::default().estimate(messages)
 }
