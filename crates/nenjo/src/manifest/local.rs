@@ -479,6 +479,7 @@ mod tests {
             model_provider: "openai".into(),
             temperature: Some(0.3),
             context_window: None,
+            estimated_bytes_per_token: None,
             base_url: None,
             native_tools: vec![],
             capabilities: Vec::new(),

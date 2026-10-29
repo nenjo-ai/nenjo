@@ -249,6 +249,42 @@ pub fn sanitize_api_error(input: &str) -> String {
     format!("{}...", &scrubbed[..end])
 }
 
+/// A request was rejected because the prompt exceeded the model's maximum
+/// context length (HTTP 400 input-token overflow). Plain retries cannot fix
+/// this; the caller must shrink the prompt (e.g. by compacting history).
+#[derive(Debug, thiserror::Error)]
+#[error(
+    "{provider} rejected the request: prompt exceeds the model's maximum context length ({detail})"
+)]
+pub struct ContextOverflowError {
+    pub provider: String,
+    pub detail: String,
+}
+
+/// Recognize an input-token overflow in a failed HTTP response body.
+///
+/// Matches the shapes returned by vLLM and OpenAI-compatible servers:
+/// a 400 status with an error mentioning both the context-length limit and
+/// input tokens (e.g. `"maximum context length is 262144 tokens ... param
+/// input_tokens"`).
+pub fn context_overflow_error(
+    provider: &str,
+    status: u16,
+    body: &str,
+) -> Option<ContextOverflowError> {
+    if status != 400 {
+        return None;
+    }
+    let lowered = body.to_ascii_lowercase();
+    let mentions_limit = lowered.contains("context length");
+    let mentions_input_tokens =
+        lowered.contains("input_tokens") || lowered.contains("input tokens");
+    (mentions_limit && mentions_input_tokens).then(|| ContextOverflowError {
+        provider: provider.to_string(),
+        detail: sanitize_api_error(body),
+    })
+}
+
 /// Build a sanitized provider error from a failed HTTP response.
 pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::Error {
     let status = response.status();
@@ -256,6 +292,9 @@ pub async fn api_error(provider: &str, response: reqwest::Response) -> anyhow::E
         .text()
         .await
         .unwrap_or_else(|_| "<failed to read provider error body>".to_string());
+    if let Some(overflow) = context_overflow_error(provider, status.as_u16(), &body) {
+        return overflow.into();
+    }
     let sanitized = sanitize_api_error(&body);
     anyhow::anyhow!("{provider} API error ({status}): {sanitized}")
 }
@@ -289,8 +328,44 @@ mod test_support {
 
     #[test]
     fn strip_thinking_unclosed_tag() {
-        let input = "Before<think>reasoning that never ends...";
+        let input = "Before<think> Reasoning that never ends...";
         assert_eq!(strip_thinking(input), "Before");
+    }
+
+    #[test]
+    fn context_overflow_error_matches_vllm_overflow_body() {
+        let body = r#"{"error":{"message":"This model's maximum context length is 262144 tokens. However, you requested 0 output tokens and your prompt contains at least 262145 input tokens, for a total of at least 262145 tokens. Please reduce the length of the input prompt or the number of requested output tokens. (parameter=input_tokens, value=262145)","type":"BadRequestError","param":"input_tokens","code":400}}"#;
+        let overflow = context_overflow_error("vllm", 400, body).expect("should detect overflow");
+        assert_eq!(overflow.provider, "vllm");
+        assert!(overflow.detail.contains("maximum context length"));
+    }
+
+    #[test]
+    fn context_overflow_error_ignores_other_statuses_and_bodies() {
+        assert!(
+            context_overflow_error("vllm", 404, r#"{"error":{"message":"model not found"}}"#)
+                .is_none()
+        );
+        assert!(
+            context_overflow_error(
+                "vllm",
+                400,
+                r#"{"error":{"message":"invalid tool schema","param":"tools"}}"#
+            )
+            .is_none()
+        );
+        assert!(
+            context_overflow_error("vllm", 500, "maximum context length input_tokens").is_none()
+        );
+    }
+
+    #[test]
+    fn context_overflow_error_is_the_downcast_type_seen_by_callers() {
+        let overflow =
+            context_overflow_error("vllm", 400, "context length exceeded (input_tokens)")
+                .expect("should detect overflow");
+        let error: anyhow::Error = overflow.into();
+        assert!(error.downcast_ref::<ContextOverflowError>().is_some());
     }
 
     #[test]

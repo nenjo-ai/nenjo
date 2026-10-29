@@ -20,8 +20,9 @@ use uuid::Uuid;
 
 use super::chat::ProviderResponseDelivery;
 use super::compaction::{
-    compact_messages_for_payload, compact_messages_with_summary, estimate_serialized_bytes,
-    estimate_serialized_messages_bytes, truncate, truncate_old_tool_arguments, truncate_str,
+    TokenEstimator, compact_messages_emergency, compact_messages_for_payload,
+    compact_messages_with_summary, estimate_serialized_bytes, estimate_serialized_messages_bytes,
+    truncate, truncate_old_tool_arguments, truncate_str,
 };
 use super::tool_calls::{normalize_tool_call_arguments, tool_for_call};
 use super::types::{
@@ -718,14 +719,32 @@ where
                     "Turn loop iteration"
                 );
 
+                let context_budget = compaction_context_budget(
+                    agent.model_manifest.context_window,
+                    model_provider.context_window(model),
+                );
+                let token_estimator = {
+                    // Config overrides win over the manifest so deployments
+                    // whose model manifests are platform-synced can still
+                    // calibrate tokenizer-specific arithmetic per model.
+                    let override_key = format!(
+                        "{}/{}",
+                        agent.model_manifest.model_provider, agent.model_manifest.model
+                    );
+                    TokenEstimator::from_configured(
+                        agent
+                            .runtime
+                            .config
+                            .compaction_bytes_per_token
+                            .get(&override_key)
+                            .copied()
+                            .or(agent.model_manifest.estimated_bytes_per_token),
+                    )
+                };
                 if agent.runtime.config.compact_context {
                     // Prefer the catalog-derived model context window. It reflects the
                     // exact configured provider model; provider heuristics remain a
                     // fallback for legacy/manual model configurations.
-                    let context_budget = compaction_context_budget(
-                        agent.model_manifest.context_window,
-                        model_provider.context_window(model),
-                    );
 
                     // Truncate tool arguments in older messages only when we're
                     // approaching the configured compaction threshold. This keeps full
@@ -736,6 +755,7 @@ where
                         &mut messages,
                         context_budget,
                         agent.runtime.config.context_compaction_trigger_percent,
+                        token_estimator,
                     );
                     // Compact conversation if token estimate still exceeds budget
                     // after argument truncation.
@@ -745,6 +765,7 @@ where
                         temperature,
                         &mut messages,
                         context_budget,
+                        token_estimator,
                         events_tx.as_ref(),
                     )
                     .await?;
@@ -862,37 +883,41 @@ where
                         );
                     }
                 }
-                let request_messages = prepared_model_artifacts
-                    .as_ref()
-                    .map_or(messages.as_slice(), |prepared| {
-                        prepared.request_messages.as_slice()
-                    });
-                let request = ChatRequest {
-                    messages: request_messages,
-                    tools: tools_ref,
-                    native_tools: Some(&agent.model_manifest.native_tools),
-                    prepared_artifacts: prepared_model_artifacts
-                        .as_ref()
-                        .map(|prepared| &prepared.artifacts),
-                };
-
-                let model_request_id = Uuid::new_v4().to_string();
-                emit_event(
-                    events_tx.as_ref(),
-                    TurnEvent::ModelRequestStarted {
-                        request_id: model_request_id.clone(),
-                        parent_call_id: None,
-                        provider: None,
-                        model: model.to_string(),
-                    },
-                );
+                let mut overflow_retried = false;
                 let (
-                    mut response,
-                    streamed_provider_tool_started_ids,
-                    streamed_provider_tool_completed_ids,
-                    streamed_text_delta,
-                ) =
-                    async {
+                    (
+                        mut response,
+                        streamed_provider_tool_started_ids,
+                        streamed_provider_tool_completed_ids,
+                        streamed_text_delta,
+                    ),
+                    model_request_id,
+                ) = loop {
+                    let request_messages = prepared_model_artifacts
+                        .as_ref()
+                        .map_or(messages.as_slice(), |prepared| {
+                            prepared.request_messages.as_slice()
+                        });
+                    let request = ChatRequest {
+                        messages: request_messages,
+                        tools: tools_ref,
+                        native_tools: Some(&agent.model_manifest.native_tools),
+                        prepared_artifacts: prepared_model_artifacts
+                            .as_ref()
+                            .map(|prepared| &prepared.artifacts),
+                    };
+
+                    let model_request_id = Uuid::new_v4().to_string();
+                    emit_event(
+                        events_tx.as_ref(),
+                        TurnEvent::ModelRequestStarted {
+                            request_id: model_request_id.clone(),
+                            parent_call_id: None,
+                            provider: None,
+                            model: model.to_string(),
+                        },
+                    );
+                    let attempt = async {
                         let started = Instant::now();
                         debug!(
                             delivery = ?response_delivery,
@@ -925,7 +950,41 @@ where
                         agent = agent_name,
                         model,
                     ))
-                    .await?;
+                    .await;
+
+                    match attempt {
+                        Ok(response) => break (response, model_request_id),
+                        Err(error) => {
+                            if overflow_retried
+                                || error
+                                    .downcast_ref::<nenjo_models::ContextOverflowError>()
+                                    .is_none()
+                            {
+                                return Err(error);
+                            }
+                            overflow_retried = true;
+                            warn!(
+                                agent = agent_name,
+                                model,
+                                request_id = %model_request_id,
+                                "Model request rejected for exceeding the model context window; compacting history and retrying once"
+                            );
+                            let emergency_budget = (context_budget / 2).max(1);
+                            compact_messages_emergency(
+                                &mut messages,
+                                emergency_budget,
+                                token_estimator,
+                            );
+                            if let Some(prepared) = &mut prepared_model_artifacts {
+                                compact_messages_emergency(
+                                    &mut prepared.request_messages,
+                                    emergency_budget,
+                                    token_estimator,
+                                );
+                            }
+                        }
+                    }
+                };
                 for tool_call in &mut response.tool_calls {
                     let normalized_fields = normalize_tool_call_arguments(tools, tool_call);
                     if normalized_fields > 0 {

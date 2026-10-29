@@ -17,23 +17,73 @@ const PHASE4_MAX_CHARS: usize = 1_200;
 const PAYLOAD_TOOL_RESULT_MAX_CHARS: usize = 4_000;
 const PAYLOAD_MESSAGE_MAX_CHARS: usize = 8_000;
 
-/// Estimate total token count across all messages using the chars/4 heuristic.
-pub(crate) fn estimate_tokens(messages: &[ConversationMessage]) -> usize {
-    messages.iter().map(estimate_message_tokens).sum()
+/// Bytes-per-token divisor used by the token estimate heuristic.
+///
+/// Token estimates divide serialized UTF-8 byte length by this value. The
+/// default of 4 is calibrated for English-centric tokenizers; CJK-heavy
+/// tokenizers (e.g. GLM) pack closer to 3 bytes per token, so a model
+/// manifest can override it via `estimated_bytes_per_token`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct TokenEstimator {
+    pub(crate) bytes_per_token: usize,
 }
 
-fn estimate_message_tokens(message: &ConversationMessage) -> usize {
-    match message {
-        ConversationMessage::Chat(chat) => {
-            (chat.content.len() + estimate_serialized_bytes(&chat.artifacts)) / 4
+impl Default for TokenEstimator {
+    fn default() -> Self {
+        Self {
+            bytes_per_token: Self::DEFAULT_BYTES_PER_TOKEN,
         }
-        ConversationMessage::AssistantToolCalls { text, tool_calls } => {
-            (text.as_deref().map_or(0, str::len) + estimate_serialized_bytes(tool_calls)) / 4
-        }
-        ConversationMessage::ToolResults(results) => estimate_serialized_bytes(results) / 4,
-        ConversationMessage::ArtifactAnalysis(analysis) => estimate_serialized_bytes(analysis) / 4,
-        ConversationMessage::RuntimeContext(context) => context.content().len() / 4,
     }
+}
+
+impl TokenEstimator {
+    pub(crate) const DEFAULT_BYTES_PER_TOKEN: usize = 4;
+    pub(crate) const MIN_BYTES_PER_TOKEN: usize = 1;
+    pub(crate) const MAX_BYTES_PER_TOKEN: usize = 8;
+
+    /// Build an estimator from an optional manifest value. Values outside
+    /// `1..=8` are clamped: 0 would divide by zero, and anything above 8
+    /// underestimates real token counts enough to defeat compaction.
+    pub(crate) fn from_configured(configured: Option<u32>) -> Self {
+        let bytes_per_token = configured.map_or(Self::DEFAULT_BYTES_PER_TOKEN, |value| {
+            (value as usize).clamp(Self::MIN_BYTES_PER_TOKEN, Self::MAX_BYTES_PER_TOKEN)
+        });
+        Self { bytes_per_token }
+    }
+
+    pub(crate) fn estimate(&self, messages: &[ConversationMessage]) -> usize {
+        messages
+            .iter()
+            .map(|message| self.estimate_message(message))
+            .sum()
+    }
+
+    fn estimate_message(&self, message: &ConversationMessage) -> usize {
+        match message {
+            ConversationMessage::Chat(chat) => {
+                (chat.content.len() + estimate_serialized_bytes(&chat.artifacts))
+                    / self.bytes_per_token
+            }
+            ConversationMessage::AssistantToolCalls { text, tool_calls } => {
+                (text.as_deref().map_or(0, str::len) + estimate_serialized_bytes(tool_calls))
+                    / self.bytes_per_token
+            }
+            ConversationMessage::ToolResults(results) => {
+                estimate_serialized_bytes(results) / self.bytes_per_token
+            }
+            ConversationMessage::ArtifactAnalysis(analysis) => {
+                estimate_serialized_bytes(analysis) / self.bytes_per_token
+            }
+            ConversationMessage::RuntimeContext(context) => {
+                context.content().len() / self.bytes_per_token
+            }
+        }
+    }
+}
+
+/// Estimate total token count across all messages using the default chars/4 heuristic.
+pub(crate) fn estimate_tokens(messages: &[ConversationMessage]) -> usize {
+    TokenEstimator::default().estimate(messages)
 }
 
 pub(crate) fn estimate_serialized_bytes<T>(value: &T) -> usize
@@ -58,6 +108,7 @@ pub(crate) async fn compact_messages_with_summary<P>(
     temperature: f64,
     messages: &mut Vec<ConversationMessage>,
     max_tokens: usize,
+    estimator: TokenEstimator,
     events_tx: Option<&mpsc::UnboundedSender<TurnEvent>>,
 ) -> Result<()>
 where
@@ -65,16 +116,16 @@ where
 {
     let messages_before = messages.len();
 
-    compact_messages_without_drop(messages, max_tokens);
+    compact_messages_without_drop(messages, max_tokens, estimator);
 
-    let summarized = if estimate_tokens(messages) > max_tokens {
-        if let Some(candidate) = find_phase3_candidate(messages, max_tokens) {
+    let summarized = if estimator.estimate(messages) > max_tokens {
+        if let Some(candidate) = find_phase3_candidate(messages, max_tokens, estimator) {
             if let Some(summary) =
                 summarize_message_span(provider, model, temperature, &messages[candidate.clone()])
                     .await?
             {
-                let candidate_tokens = estimate_tokens(&messages[candidate.clone()]);
-                let summary_tokens = estimate_tokens(std::slice::from_ref(&summary));
+                let candidate_tokens = estimator.estimate(&messages[candidate.clone()]);
+                let summary_tokens = estimator.estimate(std::slice::from_ref(&summary));
                 if summary_tokens * 5 <= candidate_tokens * 4 {
                     replace_range_with_summary(messages, candidate, summary);
                     true
@@ -91,8 +142,8 @@ where
         false
     };
 
-    if estimate_tokens(messages) > max_tokens {
-        drop_oldest_messages(messages, max_tokens);
+    if estimator.estimate(messages) > max_tokens {
+        drop_oldest_messages(messages, max_tokens, estimator);
     }
 
     if summarized && let Some(tx) = events_tx {
@@ -116,14 +167,34 @@ where
 /// 6. Phase 4: Drop oldest non-system messages until under budget (keep last 4).
 #[cfg(test)]
 fn compact_messages(messages: &mut Vec<ConversationMessage>, max_tokens: usize) {
-    compact_messages_without_drop(messages, max_tokens);
-    if estimate_tokens(messages) > max_tokens {
-        drop_oldest_messages(messages, max_tokens);
+    let estimator = TokenEstimator::default();
+    compact_messages_without_drop(messages, max_tokens, estimator);
+    if estimator.estimate(messages) > max_tokens {
+        drop_oldest_messages(messages, max_tokens, estimator);
     }
 }
 
-fn compact_messages_without_drop(messages: &mut [ConversationMessage], max_tokens: usize) {
-    if estimate_tokens(messages) <= max_tokens {
+/// Emergency post-overflow compaction: progressive truncation, then drop the
+/// oldest messages. Unlike `compact_messages_with_summary` this never calls
+/// the model — the provider just rejected the prompt for exceeding the
+/// context window, so shrink it cheaply and let the caller retry.
+pub(crate) fn compact_messages_emergency(
+    messages: &mut Vec<ConversationMessage>,
+    max_tokens: usize,
+    estimator: TokenEstimator,
+) {
+    compact_messages_without_drop(messages, max_tokens, estimator);
+    if estimator.estimate(messages) > max_tokens {
+        drop_oldest_messages(messages, max_tokens, estimator);
+    }
+}
+
+fn compact_messages_without_drop(
+    messages: &mut [ConversationMessage],
+    max_tokens: usize,
+    estimator: TokenEstimator,
+) {
+    if estimator.estimate(messages) <= max_tokens {
         return;
     }
 
@@ -137,7 +208,7 @@ fn compact_messages_without_drop(messages: &mut [ConversationMessage], max_token
         };
         compact_tool_results(results, 200, "compacted");
 
-        if estimate_tokens(messages) <= max_tokens {
+        if estimator.estimate(messages) <= max_tokens {
             return;
         }
     }
@@ -149,7 +220,7 @@ fn compact_messages_without_drop(messages: &mut [ConversationMessage], max_token
         for call in tool_calls {
             call.arguments = "{}".to_string();
         }
-        if estimate_tokens(messages) <= max_tokens {
+        if estimator.estimate(messages) <= max_tokens {
             return;
         }
     }
@@ -166,15 +237,19 @@ fn compact_messages_without_drop(messages: &mut [ConversationMessage], max_token
             "{}\n[compacted — {original_len} chars total]",
             truncate(&chat.content, 300)
         );
-        if estimate_tokens(messages) <= max_tokens {
+        if estimator.estimate(messages) <= max_tokens {
             return;
         }
     }
 }
 
-fn drop_oldest_messages(messages: &mut Vec<ConversationMessage>, max_tokens: usize) {
+fn drop_oldest_messages(
+    messages: &mut Vec<ConversationMessage>,
+    max_tokens: usize,
+    estimator: TokenEstimator,
+) {
     let min_keep = 5;
-    while messages.len() > min_keep && estimate_tokens(messages) > max_tokens {
+    while messages.len() > min_keep && estimator.estimate(messages) > max_tokens {
         let Some(start) = first_compactable_index(messages) else {
             break;
         };
@@ -330,6 +405,7 @@ fn replace_range_with_summary(
 fn find_phase3_candidate(
     messages: &[ConversationMessage],
     max_tokens: usize,
+    estimator: TokenEstimator,
 ) -> Option<Range<usize>> {
     if messages.len() < 8 {
         return None;
@@ -360,7 +436,7 @@ fn find_phase3_candidate(
             break;
         }
         let group = message_group_range(messages, end, compactable_end);
-        included_tokens += estimate_tokens(&messages[group.clone()]);
+        included_tokens += estimator.estimate(&messages[group.clone()]);
         end = group.end;
 
         if end - start >= PHASE4_MIN_MESSAGES && included_tokens >= PHASE4_MIN_TOKENS {
@@ -373,7 +449,7 @@ fn find_phase3_candidate(
     }
 
     let candidate = &messages[start..end];
-    let candidate_tokens = estimate_tokens(candidate);
+    let candidate_tokens = estimator.estimate(candidate);
     let has_dialogue = candidate.iter().any(|message| {
         message.is_role(ChatRole::User)
             || message.is_role(ChatRole::Assistant)
@@ -634,10 +710,11 @@ pub(crate) fn truncate_old_tool_arguments(
     messages: &mut [ConversationMessage],
     max_tokens: usize,
     trigger_percent: u8,
+    estimator: TokenEstimator,
 ) {
     let trigger_percent = trigger_percent.clamp(1, 100) as usize;
     let threshold = max_tokens * trigger_percent / 100;
-    if estimate_tokens(messages) < threshold {
+    if estimator.estimate(messages) < threshold {
         return;
     }
 
@@ -1121,7 +1198,9 @@ mod tests {
     #[test]
     fn phase3_candidate_keeps_tool_call_groups_intact() {
         let msgs = build_large_conversation();
-        let range = find_phase3_candidate(&msgs, estimate_tokens(&msgs) / 4).unwrap();
+        let range =
+            find_phase3_candidate(&msgs, estimate_tokens(&msgs) / 4, TokenEstimator::default())
+                .unwrap();
         assert!(range.contains(&2));
         assert!(range.contains(&3));
     }
@@ -1206,9 +1285,17 @@ mod tests {
         let (tx, mut rx) = mpsc::unbounded_channel();
         let budget = estimate_tokens(&msgs) / 3;
 
-        compact_messages_with_summary(&provider, "test-model", 0.0, &mut msgs, budget, Some(&tx))
-            .await
-            .unwrap();
+        compact_messages_with_summary(
+            &provider,
+            "test-model",
+            0.0,
+            &mut msgs,
+            budget,
+            TokenEstimator::default(),
+            Some(&tx),
+        )
+        .await
+        .unwrap();
 
         assert!(msgs.iter().any(is_summary_message));
         assert_eq!(msgs.last(), Some(&original_last));
@@ -1268,7 +1355,7 @@ mod tests {
     fn truncate_old_tool_arguments_noop_when_far_from_limit() {
         let mut msgs = build_conversation_near_limit(10_000);
         let before = msgs.clone();
-        truncate_old_tool_arguments(&mut msgs, 1_000_000, 60);
+        truncate_old_tool_arguments(&mut msgs, 1_000_000, 60, TokenEstimator::default());
         assert_eq!(msgs.len(), before.len());
         assert_eq!(msgs, before);
     }
@@ -1278,7 +1365,7 @@ mod tests {
         let mut msgs = build_conversation_near_limit(1000);
         let tokens = estimate_tokens(&msgs);
         let budget = tokens * 5 / 4;
-        truncate_old_tool_arguments(&mut msgs, budget, 60);
+        truncate_old_tool_arguments(&mut msgs, budget, 60, TokenEstimator::default());
 
         let ConversationMessage::AssistantToolCalls { tool_calls, .. } = &msgs[6] else {
             panic!("expected recent assistant tool call");
@@ -1303,5 +1390,43 @@ mod tests {
                 .unwrap()
                 .contains("previously written")
         );
+    }
+
+    #[test]
+    fn token_estimator_uses_configured_bytes_per_token() {
+        // 400 CJK chars = 1200 UTF-8 bytes; a CJK tokenizer emits far more
+        // tokens per byte than the ASCII-calibrated default assumes.
+        let cjk = "你好世界".repeat(100);
+        let msgs = vec![ConversationMessage::user(&cjk)];
+        assert_eq!(estimate_tokens(&msgs), 300);
+        assert_eq!(
+            TokenEstimator::from_configured(Some(3)).estimate(&msgs),
+            400
+        );
+    }
+
+    #[test]
+    fn token_estimator_clamps_configuration() {
+        assert_eq!(
+            TokenEstimator::from_configured(None).bytes_per_token,
+            TokenEstimator::DEFAULT_BYTES_PER_TOKEN
+        );
+        assert_eq!(TokenEstimator::from_configured(Some(0)).bytes_per_token, 1);
+        assert_eq!(
+            TokenEstimator::from_configured(Some(100)).bytes_per_token,
+            TokenEstimator::MAX_BYTES_PER_TOKEN
+        );
+        assert_eq!(TokenEstimator::from_configured(Some(3)).bytes_per_token, 3);
+    }
+
+    #[test]
+    fn emergency_compaction_shrinks_oversized_history() {
+        let mut msgs = build_conversation_near_limit(1000);
+        let estimator = TokenEstimator::default();
+        let budget = estimator.estimate(&msgs) / 3;
+
+        compact_messages_emergency(&mut msgs, budget, estimator);
+
+        assert!(estimator.estimate(&msgs) <= budget);
     }
 }

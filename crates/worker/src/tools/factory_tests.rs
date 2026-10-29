@@ -46,6 +46,7 @@ fn cached_model(
             model_provider: provider.into(),
             temperature: None,
             context_window: None,
+            estimated_bytes_per_token: None,
             base_url: base_url.map(str::to_owned),
             native_tools: Vec::new(),
             capabilities: capabilities
@@ -1534,6 +1535,7 @@ async fn platform_manifest_backend_reads_package_overlay_for_manifest_resources(
         model_provider: "openai".into(),
         temperature: None,
         context_window: None,
+        estimated_bytes_per_token: None,
         base_url: None,
         native_tools: vec![],
         capabilities: Vec::new(),

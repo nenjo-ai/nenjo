@@ -57,6 +57,7 @@ impl ModelRecord {
             model_provider: self.model_provider.clone(),
             temperature: self.temperature,
             context_window: self.context_window,
+            estimated_bytes_per_token: None,
             base_url: self.base_url.clone(),
             native_tools: self.native_tools.clone(),
             capabilities: self.capabilities.clone(),
