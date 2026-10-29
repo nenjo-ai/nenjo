@@ -15,7 +15,7 @@ tokio-util = { workspace = true, features = ["rt"] }
 # Web framework
 axum = { workspace = true, features = ["ws"] }
 tower = { workspace = true }
-tower-http = { workspace = true, features = ["cors", "compression-full", "trace"] }
+tower-http = { workspace = true, features = ["cors", "trace", "compression-gzip", "compression-deflate", "compression-br"] }
 
 # Serialization
 serde = { workspace = true, features = ["derive"] }
