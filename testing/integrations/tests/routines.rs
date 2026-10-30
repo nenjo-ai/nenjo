@@ -43,6 +43,7 @@ fn make_model() -> ModelManifest {
         model_provider: "openrouter".into(),
         temperature: Some(0.7),
         context_window: None,
+        estimated_bytes_per_token: None,
         base_url: None,
         native_tools: vec![],
         capabilities: Vec::new(),

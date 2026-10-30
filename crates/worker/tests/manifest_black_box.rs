@@ -509,6 +509,7 @@ fn model(_id: Uuid, name: &str) -> ModelManifest {
         model_provider: "test".into(),
         temperature: Some(0.1),
         context_window: None,
+        estimated_bytes_per_token: None,
         base_url: None,
         native_tools: vec![],
         capabilities: Vec::new(),

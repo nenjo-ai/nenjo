@@ -722,6 +722,12 @@ pub struct ModelManifest {
     /// heuristics to calculate its compaction budget.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub context_window: Option<u64>,
+    /// Estimated bytes per token for this model's tokenizer, used by the turn
+    /// loop's compaction arithmetic. The default of 4 fits English-centric
+    /// tokenizers; CJK-heavy tokenizers (e.g. GLM) pack closer to 3 bytes per
+    /// token and should use a lower value. Clamped to `1..=8`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub estimated_bytes_per_token: Option<u32>,
     /// Optional provider base URL override.
     pub base_url: Option<String>,
     /// Provider-native tools enabled for this model configuration.
@@ -1296,6 +1302,47 @@ mod tests {
             model_manifest_slug("openrouter", "anthropic/claude-3.5-sonnet").as_str(),
             "openrouter_anthropic_claude_3_5_sonnet"
         );
+    }
+
+    fn serde_test_model_manifest() -> ModelManifest {
+        ModelManifest {
+            name: "test-model".into(),
+            slug: model_manifest_slug("mock", "mock-llm-v1"),
+            description: None,
+            model: "mock-llm-v1".into(),
+            model_provider: "mock".into(),
+            temperature: Some(0.5),
+            context_window: Some(262_144),
+            estimated_bytes_per_token: Some(3),
+            base_url: None,
+            native_tools: vec![],
+            capabilities: Vec::new(),
+            input_modalities: Vec::new(),
+            output_modalities: Vec::new(),
+            execution_modes: Vec::new(),
+        }
+    }
+
+    #[test]
+    fn model_manifest_serde_round_trips_estimated_bytes_per_token() {
+        let manifest = serde_test_model_manifest();
+        let json = serde_json::to_value(&manifest).unwrap();
+        assert_eq!(json["estimated_bytes_per_token"], 3);
+
+        let parsed: ModelManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.estimated_bytes_per_token, Some(3));
+    }
+
+    #[test]
+    fn model_manifest_serde_defaults_estimated_bytes_per_token_when_absent() {
+        let manifest = serde_test_model_manifest();
+        let mut json = serde_json::to_value(&manifest).unwrap();
+        json.as_object_mut()
+            .unwrap()
+            .remove("estimated_bytes_per_token");
+
+        let parsed: ModelManifest = serde_json::from_value(json).unwrap();
+        assert_eq!(parsed.estimated_bytes_per_token, None);
     }
 
     #[test]

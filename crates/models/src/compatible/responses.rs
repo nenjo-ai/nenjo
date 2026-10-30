@@ -121,6 +121,11 @@ impl OpenAiCompatibleProvider {
             if !response.status().is_success() {
                 let status = response.status();
                 let error = response.text().await?;
+                if let Some(overflow) =
+                    crate::context_overflow_error(&self.name, status.as_u16(), &error)
+                {
+                    return Err(overflow.into());
+                }
                 anyhow::bail!(
                     "{} Responses API request to {url} failed with {status}: {error}",
                     self.name

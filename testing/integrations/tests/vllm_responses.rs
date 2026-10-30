@@ -460,6 +460,7 @@ async fn sdk_turn_completes_after_tool_returns_image_artifact() -> Result<()> {
         model_provider: "vllm".into(),
         temperature: Some(0.0),
         context_window: Some(32768),
+        estimated_bytes_per_token: None,
         base_url: Some(server.base_url.clone()),
         native_tools: vec![],
         capabilities: vec![],

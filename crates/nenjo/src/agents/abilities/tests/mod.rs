@@ -365,6 +365,7 @@ fn test_instance_with_active_domain() -> AgentInstance {
             model_provider: "mock".into(),
             temperature: Some(0.2),
             context_window: None,
+            estimated_bytes_per_token: None,
             base_url: None,
             native_tools: vec![],
             capabilities: Vec::new(),

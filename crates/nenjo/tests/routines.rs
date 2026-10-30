@@ -449,6 +449,7 @@ fn model(_id: Uuid) -> ModelManifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         context_window: None,
+        estimated_bytes_per_token: None,
         base_url: None,
         native_tools: vec![],
         capabilities: Vec::new(),

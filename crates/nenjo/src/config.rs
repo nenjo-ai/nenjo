@@ -1,5 +1,7 @@
 //! Agent configuration.
 
+use std::collections::HashMap;
+
 use serde::{Deserialize, Serialize};
 
 /// Default upper bound for model turns in an agent execution.
@@ -41,6 +43,14 @@ pub struct AgentConfig {
     /// Maximum child requests accepted by one `spawn_sub_agents` call.
     #[serde(default = "default_max_sub_agents_per_spawn")]
     pub max_sub_agents_per_spawn: usize,
+    /// Per-model bytes-per-token overrides for the compaction token
+    /// estimate, keyed by `"provider/model"` (for example
+    /// `"vllm/GLM-5.3-Flash-EXL3"`). Takes precedence over the model
+    /// manifest's `estimated_bytes_per_token`; values are clamped to
+    /// `1..=8`. Useful when model manifests are synced from the platform
+    /// and cannot carry tokenizer-specific fields.
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub compaction_bytes_per_token: HashMap<String, u32>,
 }
 
 fn default_max_active_descendants() -> usize {
@@ -105,6 +115,7 @@ impl Default for AgentConfig {
             max_pending_nested_runs: default_max_pending_nested_runs(),
             nested_queue_timeout_secs: default_nested_queue_timeout_secs(),
             max_sub_agents_per_spawn: default_max_sub_agents_per_spawn(),
+            compaction_bytes_per_token: HashMap::new(),
         }
     }
 }
@@ -146,5 +157,24 @@ mod tests {
         let config = AgentConfig::default();
         assert_eq!(config.max_active_nested_runs, 3);
         assert_eq!(config.max_sub_agents_per_spawn, 3);
+        assert!(config.compaction_bytes_per_token.is_empty());
+    }
+
+    #[test]
+    fn compaction_bytes_per_token_overrides_parse_from_config() {
+        let config: AgentConfig = serde_json::from_value(serde_json::json!({
+            "parallel_tools": true,
+            "compaction_bytes_per_token": {
+                "vllm/GLM-5.3-Flash-EXL3": 3
+            }
+        }))
+        .expect("agent config with compaction override");
+
+        assert_eq!(
+            config
+                .compaction_bytes_per_token
+                .get("vllm/GLM-5.3-Flash-EXL3"),
+            Some(&3)
+        );
     }
 }

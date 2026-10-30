@@ -6,6 +6,19 @@ The turn loop keeps chat history within the model context budget and the outboun
 
 The implementation lives in `crates/nenjo/src/agents/runner/turn_loop.rs`.
 
+## Token Estimate
+
+The context budget is denominated in estimated tokens. The estimator divides serialized UTF-8 byte length by a bytes-per-token divisor:
+
+- default divisor is 4 (calibrated for English-centric tokenizers)
+- a model manifest can override it per model via `estimated_bytes_per_token`
+- `AgentConfig.compaction_bytes_per_token` can override it per `"provider/model"` key from worker/agent config, which takes precedence over the manifest — useful when model manifests are synced from the platform and cannot carry tokenizer-specific fields
+- configured values are clamped to `1..=8`; CJK-heavy tokenizers (e.g. GLM, roughly 3 bytes per token) should use a lower value so estimates stay at or above real tokenizer counts
+
+## Context-Overflow Recovery
+
+If the provider rejects a request because the prompt exceeded the model's maximum context length (HTTP 400 input-token overflow, surfaced as `nenjo_models::ContextOverflowError`), the turn loop does not fail the turn. It runs one emergency compaction pass (`compact_messages_emergency`: truncation phases plus oldest-message dropping, no model summarization call) at half the normal context budget — on both the chat messages and any prepared artifact request messages — and retries the request once. A second overflow failure propagates as a normal turn-loop error.
+
 ## Chronological Strategy
 
 Context compaction runs at the start of each turn-loop iteration after deferred tool-argument truncation. Payload compaction runs later, immediately before the next provider chat call, after hook-added context and the visible tool list are known.

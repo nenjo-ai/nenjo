@@ -92,6 +92,115 @@ impl ModelProviderFactory for MockModelProviderFactory {
     }
 }
 
+struct OverflowOnceProvider {
+    request_sizes: Arc<Mutex<Vec<usize>>>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for OverflowOnceProvider {
+    async fn chat(
+        &self,
+        request: ChatRequest<'_>,
+        _model: &str,
+        _temperature: f64,
+    ) -> Result<ChatResponse> {
+        let size: usize = request
+            .messages
+            .iter()
+            .map(|message| serde_json::to_vec(message).map_or(0, |bytes| bytes.len()))
+            .sum();
+        let call_index;
+        {
+            let mut sizes = self.request_sizes.lock().unwrap();
+            call_index = sizes.len();
+            sizes.push(size);
+        }
+        if call_index == 0 {
+            return Err(nenjo_models::ContextOverflowError {
+                provider: "mock".into(),
+                detail: "maximum context length is 262144 tokens (param input_tokens)".into(),
+            }
+            .into());
+        }
+        Ok(ChatResponse {
+            text: Some("recovered after compaction".to_string()),
+            tool_calls: vec![],
+            provider_tool_calls: vec![],
+            usage: TokenUsage::default(),
+            finish_reason: nenjo_models::FinishReason::Stop,
+        })
+    }
+
+    fn context_window(&self, _model: &str) -> Option<usize> {
+        Some(128_000)
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_developer_role(&self, _model: &str) -> bool {
+        true
+    }
+}
+
+struct OverflowOnceFactory {
+    request_sizes: Arc<Mutex<Vec<usize>>>,
+}
+
+impl ModelProviderFactory for OverflowOnceFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        Ok(Arc::new(OverflowOnceProvider {
+            request_sizes: self.request_sizes.clone(),
+        }))
+    }
+}
+
+struct OverflowAlwaysProvider {
+    calls: Arc<AtomicUsize>,
+}
+
+#[async_trait::async_trait]
+impl ModelProvider for OverflowAlwaysProvider {
+    async fn chat(
+        &self,
+        _request: ChatRequest<'_>,
+        _model: &str,
+        _temperature: f64,
+    ) -> Result<ChatResponse> {
+        self.calls.fetch_add(1, Ordering::SeqCst);
+        Err(nenjo_models::ContextOverflowError {
+            provider: "mock".into(),
+            detail: "maximum context length is 262144 tokens (param input_tokens)".into(),
+        }
+        .into())
+    }
+
+    fn context_window(&self, _model: &str) -> Option<usize> {
+        Some(128_000)
+    }
+
+    fn supports_native_tools(&self) -> bool {
+        true
+    }
+
+    fn supports_developer_role(&self, _model: &str) -> bool {
+        true
+    }
+}
+
+struct OverflowAlwaysFactory {
+    calls: Arc<AtomicUsize>,
+}
+
+impl ModelProviderFactory for OverflowAlwaysFactory {
+    fn create(&self, _provider_name: &str) -> Result<Arc<dyn ModelProvider>> {
+        Ok(Arc::new(OverflowAlwaysProvider {
+            calls: self.calls.clone(),
+        }))
+    }
+}
+
 #[derive(Default)]
 struct ArtifactRequestObservation {
     calls: AtomicUsize,
@@ -293,6 +402,7 @@ fn test_manifest() -> Manifest {
         model_provider: "mock".into(),
         temperature: Some(0.5),
         context_window: None,
+        estimated_bytes_per_token: None,
         base_url: None,
         native_tools: vec![],
         capabilities: Vec::new(),
@@ -410,6 +520,78 @@ async fn natural_assistant_question_completes_the_turn() {
         .unwrap();
     assert_eq!(output.text, "Which deployment environment should I target?");
     assert_eq!(output.tool_calls, 0);
+}
+
+#[tokio::test]
+async fn turn_loop_retries_once_after_context_overflow() {
+    let request_sizes = Arc::new(Mutex::new(Vec::new()));
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(OverflowOnceFactory {
+            request_sizes: request_sizes.clone(),
+        })
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let output = runner
+        .chat(ChatInput::new("Hi"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await
+        .unwrap();
+
+    assert_eq!(output.text, "recovered after compaction");
+    let sizes = request_sizes.lock().unwrap();
+    assert_eq!(
+        sizes.len(),
+        2,
+        "context overflow should trigger exactly one compacted retry"
+    );
+}
+
+#[tokio::test]
+async fn turn_loop_fails_after_persistent_context_overflow() {
+    let calls = Arc::new(AtomicUsize::new(0));
+    let provider = Provider::builder()
+        .with_manifest(test_manifest())
+        .with_model_factory(OverflowAlwaysFactory {
+            calls: calls.clone(),
+        })
+        .with_tool_factory(NoopToolFactory)
+        .build()
+        .await
+        .unwrap();
+    let runner = provider
+        .agent("test-coder")
+        .await
+        .unwrap()
+        .build()
+        .await
+        .unwrap();
+
+    let result = runner
+        .chat(ChatInput::new("Hi"), Buffered)
+        .await
+        .unwrap()
+        .output()
+        .await;
+
+    assert!(result.is_err(), "persistent overflow should fail the run");
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        2,
+        "one original attempt plus one retry, no more"
+    );
 }
 
 #[tokio::test]
@@ -743,6 +925,7 @@ fn manifest_with_abilities_and_domains(
         model_provider: "mock".into(),
         temperature: Some(0.5),
         context_window: None,
+        estimated_bytes_per_token: None,
         base_url: None,
         native_tools: vec![],
         capabilities: Vec::new(),
