@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.42.0](https://github.com/nenjo-ai/nenjo/compare/v0.41.0...v0.42.0) - 2026-10-30
+
+### Other
+
+- Fix/context overflow compaction ([#133](https://github.com/nenjo-ai/nenjo/pull/133))
+- update Cargo.toml dependencies
+- Finalized core feature improvements ([#56](https://github.com/nenjo-ai/nenjo/pull/56))
+
 ## [0.41.0](https://github.com/nenjo-ai/nenjo/compare/v0.40.0...v0.41.0) - 2026-10-22
 
 ### Added
