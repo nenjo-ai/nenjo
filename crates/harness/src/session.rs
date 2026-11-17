@@ -244,6 +244,24 @@ where
             .map_err(HarnessError::session_runtime)
     }
 
+    /// Record a human-readable session title.
+    ///
+    /// Returns whether the runtime applied the title. Failures are logged and
+    /// swallowed: a missing local title must never fail the chat turn.
+    pub async fn set_title(&self, session_id: Uuid, title: &str) -> bool {
+        match self.runtime.set_session_title(session_id, title).await {
+            Ok(applied) => applied,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    session_id = %session_id,
+                    "Failed to persist session title"
+                );
+                false
+            }
+        }
+    }
+
     pub async fn record(&self, event: SessionRuntimeEvent) -> Result<()> {
         let session_id = event.session_id();
         let grant = self

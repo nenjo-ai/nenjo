@@ -286,6 +286,10 @@ pub(crate) async fn build_provider(
         external_mcp.clone(),
         skill_registry,
     )
+    .with_session_history(Arc::new(WorkerSessionRuntime::with_host(
+        WorkerSessionStores::new(&config.state_dir),
+        "session-history-tools",
+    )) as Arc<dyn nenjo_sessions::SessionRuntime>)
     .with_local_execution_watcher(local_execution_watcher);
 
     let memory_dir = config.state_dir.join("memory");

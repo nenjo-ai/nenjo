@@ -122,6 +122,7 @@ where
     local_execution_watcher: LocalRoutineExecutionWatcher,
     file_mutations: Arc<FileMutationCoordinator>,
     shell_admission: nenjo::concurrency::AdmissionPool,
+    session_history: Option<crate::tools::session_history::SessionHistoryBackend>,
 }
 
 impl<R> WorkerToolFactory<R>
@@ -194,7 +195,18 @@ where
             platform,
             local_execution_watcher: LocalRoutineExecutionWatcher::default(),
             file_mutations: Arc::new(FileMutationCoordinator::default()),
+            session_history: None,
         }
+    }
+
+    /// Attach read-only session history tools backed by the worker's session
+    /// runtime.
+    pub(crate) fn with_session_history(
+        mut self,
+        backend: crate::tools::session_history::SessionHistoryBackend,
+    ) -> Self {
+        self.session_history = Some(backend);
+        self
     }
 
     pub(crate) fn with_local_execution_watcher(
@@ -287,6 +299,12 @@ where
     ) -> Vec<Arc<dyn Tool>> {
         let skill_runtime = Arc::new(SkillRuntimeState::default());
         let mut tools = self.base_tools_with(security, skill_runtime);
+
+        if let Some(backend) = self.session_history.clone() {
+            for tool in crate::tools::session_history::session_history_tools(backend) {
+                tools.push(tool);
+            }
+        }
 
         // MCP tools are exposed only when their server is assigned to the agent.
         if !agent.mcp_servers.is_empty() {

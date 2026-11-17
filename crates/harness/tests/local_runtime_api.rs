@@ -8,9 +8,10 @@ use nenjo_harness::{
     ModelProviderFactory, NoopToolFactory, Provider, Streaming,
 };
 use nenjo_sessions::{
-    SessionKind, SessionOwnerKind, SessionRefs, SessionRuntimeEvent, SessionStatus, SessionStore,
-    SessionTranscriptEvent, SessionTranscriptEventPayload, SessionTranscriptRecord, SessionUpsert,
-    TokenUsage, TraceEvent, TracePhase, TranscriptQuery, TranscriptStore,
+    SessionKind, SessionOwnerKind, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus,
+    SessionStore, SessionTranscriptAppend, SessionTranscriptEvent, SessionTranscriptEventPayload,
+    SessionTranscriptRecord, SessionUpsert, TokenUsage, TraceEvent, TracePhase, TranscriptQuery,
+    TranscriptStore,
 };
 use tempfile::tempdir;
 use uuid::Uuid;

@@ -57,6 +57,15 @@ pub trait SessionRuntime: Send + Sync {
         Ok(())
     }
 
+    /// Record a human-readable session title.
+    ///
+    /// Returns `false` when the session does not exist or the runtime lost a
+    /// concurrent update race; callers must treat `false` as "not applied",
+    /// not an error.
+    async fn set_session_title(&self, _session_id: Uuid, _title: &str) -> Result<bool> {
+        Ok(false)
+    }
+
     /// Read ordered transcript evidence for a session.
     async fn read_transcript(
         &self,
@@ -122,6 +131,10 @@ where
 
     async fn delete_session(&self, session_id: Uuid) -> Result<()> {
         (**self).delete_session(session_id).await
+    }
+
+    async fn set_session_title(&self, session_id: Uuid, title: &str) -> Result<bool> {
+        (**self).set_session_title(session_id, title).await
     }
 
     async fn read_transcript(

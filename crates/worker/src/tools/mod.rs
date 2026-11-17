@@ -26,6 +26,7 @@ pub mod runtime;
 pub mod script;
 pub mod search;
 pub mod security;
+pub mod session_history;
 pub mod shell;
 pub mod skill_mcp;
 pub mod web_fetch;

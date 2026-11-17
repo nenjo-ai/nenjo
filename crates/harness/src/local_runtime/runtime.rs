@@ -5,12 +5,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
+use nenjo_models::{ChatRole, ConversationMessage};
 use nenjo_sessions::{
     CheckpointQuery, CheckpointStore, DomainSessionUpsert, SessionCheckpoint,
     SessionCheckpointUpdate, SessionKind, SessionLease, SessionLeaseGrant, SessionLeaseRequest,
     SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus, SessionStore,
-    SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent, SessionTransition,
-    SessionUpsert, SessionWriteOutcome, TraceEvent, TraceStore, TranscriptQuery, TranscriptStore,
+    SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent, SessionTranscriptEventPayload,
+    SessionTransition, SessionUpsert, SessionWriteOutcome, TraceEvent, TraceStore, TranscriptQuery,
+    TranscriptStore,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
@@ -273,6 +275,17 @@ impl FileSessionRuntime {
             next.refs.transcript_ref = Some(transcript_ref);
             next.summary.last_transcript_seq = event.seq;
             next.summary.transcript_state = append.transcript_state;
+            if next.summary.first_user_prompt.is_none()
+                && let SessionTranscriptEventPayload::ConversationMessage { message } =
+                    &append.payload
+                && let ConversationMessage::Chat(chat) = message
+                && chat.role == ChatRole::User
+            {
+                next.summary.first_user_prompt = Some(SessionSummary::bounded(
+                    &chat.content,
+                    SessionSummary::FIRST_USER_PROMPT_MAX_CHARS,
+                ));
+            }
             next.version += 1;
             next.updated_at = event.recorded_at;
 
@@ -624,6 +637,26 @@ impl SessionRuntime for FileSessionRuntime {
 
     async fn delete_session(&self, session_id: Uuid) -> Result<()> {
         self.records.delete(session_id)
+    }
+
+    async fn set_session_title(&self, session_id: Uuid, title: &str) -> Result<bool> {
+        const MAX_CAS_RETRIES: usize = 8;
+        let bounded = SessionSummary::bounded(title, SessionSummary::TITLE_MAX_CHARS);
+        for _ in 0..MAX_CAS_RETRIES {
+            let Some(record) = self.records.get(session_id)? else {
+                return Ok(false);
+            };
+            let mut next = record.clone();
+            next.summary.title = Some(bounded.clone());
+            next.version += 1;
+            if self
+                .records
+                .compare_and_swap(session_id, record.version, &next)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
     }
 
     async fn read_transcript(
