@@ -1937,3 +1937,275 @@ async fn worker_factory_registers_assigned_package_script_tools() {
         "package script tools must not be dispatchable from scripts"
     );
 }
+
+#[tokio::test]
+async fn worker_factory_hides_session_history_without_backend() {
+    let temp = tempdir().unwrap();
+    let config = crate::config::Config {
+        workspace_dir: temp.path().join("workspace"),
+        state_dir: temp.path().join("state"),
+        manifests_dir: temp.path().join("manifests"),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider =
+        Arc::new(WorkerAuthProvider::load_or_create(temp.path().join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp);
+    let agent = AgentManifest {
+        name: "tester".into(),
+        slug: Slug::derive("test-agent"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        abilities: vec![],
+        prompt_locked: false,
+        source_type: None,
+        metadata: serde_json::json!({}),
+    };
+    let names: Vec<_> = factory
+        .create_tools(&agent)
+        .await
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    for tool in ["session_list", "session_read", "session_search"] {
+        assert!(
+            !names.iter().any(|name| name == tool),
+            "session history should be hidden without a backend, got: {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn worker_factory_exposes_session_history_with_backend() {
+    let temp = tempdir().unwrap();
+    let config = crate::config::Config {
+        workspace_dir: temp.path().join("workspace"),
+        state_dir: temp.path().join("state"),
+        manifests_dir: temp.path().join("manifests"),
+        backend_api_url: Some("http://localhost:3001".into()),
+        api_key: "test-api-key".into(),
+        ..Default::default()
+    };
+    let security = SecurityPolicy::with_workspace_dir(config.workspace_dir.clone());
+    let external_mcp = Arc::new(crate::external_mcp::ExternalMcpPool::new());
+    let auth_provider =
+        Arc::new(WorkerAuthProvider::load_or_create(temp.path().join("crypto")).unwrap());
+    let platform = test_platform_services(&config, auth_provider);
+    let session_runtime = crate::sessions::WorkerSessionRuntime::with_host(
+        crate::sessions::WorkerSessionStores::new(&config.state_dir),
+        "history-test",
+    );
+    let factory = WorkerToolFactory::new(security, NativeRuntime, config, platform, external_mcp)
+        .with_session_history(Arc::new(session_runtime) as Arc<dyn nenjo_sessions::SessionRuntime>);
+    let agent = AgentManifest {
+        name: "tester".into(),
+        slug: Slug::derive("test-agent"),
+        description: None,
+        prompt_config: PromptConfig::default(),
+        color: None,
+        model: None,
+        domains: vec![],
+        platform_scopes: vec![],
+        mcp_servers: vec![],
+        script_tools: Vec::new(),
+        media: Vec::new(),
+        abilities: vec![],
+        prompt_locked: false,
+        source_type: None,
+        metadata: serde_json::json!({}),
+    };
+    let names: Vec<_> = factory
+        .create_tools(&agent)
+        .await
+        .iter()
+        .map(|tool| tool.name().to_string())
+        .collect();
+    for tool in ["session_list", "session_read", "session_search"] {
+        assert!(
+            names.iter().any(|name| name == tool),
+            "session history tools should be registered with a backend, got: {names:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn session_history_tools_list_paginate_read_and_search() {
+    use nenjo_sessions::{
+        SessionLeaseRequest, SessionOwnerKind, SessionRuntimeEvent, SessionRuntime,
+        SessionTranscriptAppend, SessionTranscriptEventPayload, SessionUpsert, TranscriptState,
+    };
+
+    let temp = tempdir().unwrap();
+    let runtime = crate::sessions::WorkerSessionRuntime::with_host(
+        crate::sessions::WorkerSessionStores::new(temp.path()),
+        "history-it",
+    );
+    let runtime = Arc::new(runtime) as Arc<dyn nenjo_sessions::SessionRuntime>;
+
+    let seed = |session_id: uuid::Uuid, first_prompt: String| {
+        let runtime = runtime.clone();
+        async move {
+            let grant = runtime
+                .acquire_session_lease(SessionLeaseRequest {
+                    session_id,
+                    worker_id: "history-it".to_string(),
+                    owner_kind: SessionOwnerKind::Chat,
+                    ttl: std::time::Duration::from_secs(30),
+                })
+                .await
+                .unwrap();
+            runtime
+                .record_batch(
+                    &grant,
+                    vec![
+                        SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+                            session_id,
+                            kind: nenjo_sessions::SessionKind::Chat,
+                            status: nenjo_sessions::SessionStatus::Completed,
+                            agent: Some("tester".to_string()),
+                            project: Some("demo".to_string()),
+                            task_id: None,
+                            routine: None,
+                            execution_run_id: None,
+                            parent_session_id: None,
+                            lease: None,
+                            memory_namespace: None,
+                            refs: Default::default(),
+                            metadata: serde_json::Value::Null,
+                        }),
+                        SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                            session_id,
+                            turn_id: None,
+                            payload: SessionTranscriptEventPayload::ConversationMessage {
+                                message: nenjo_models::ConversationMessage::user(first_prompt),
+                            },
+                            transcript_state: TranscriptState::MidTurn,
+                        }),
+                        SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                            session_id,
+                            turn_id: None,
+                            payload: SessionTranscriptEventPayload::TurnCompleted {
+                                final_output: "done".to_string(),
+                            },
+                            transcript_state: TranscriptState::Clean,
+                        }),
+                    ],
+                )
+                .await
+                .unwrap();
+            runtime.release_session_lease(grant).await.unwrap();
+        }
+    };
+
+    let compaction_session = uuid::Uuid::new_v4();
+    let unrelated_session = uuid::Uuid::new_v4();
+    seed(
+        compaction_session,
+        "how should the compaction strategy behave".to_string(),
+    )
+    .await;
+    seed(unrelated_session, "tell me a joke".to_string()).await;
+
+    let tools = crate::tools::session_history::session_history_tools(runtime.clone());
+    let tool = |name: &str| {
+        tools
+            .iter()
+            .find(|tool| tool.name() == name)
+            .unwrap_or_else(|| panic!("{name} missing"))
+    };
+
+    // List: both sessions appear with first prompt as label.
+    let result = tool("session_list")
+        .execute(serde_json::json!({ "limit": 1 }))
+        .await
+        .unwrap();
+    assert!(result.success);
+    let page: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
+    assert_eq!(page["sessions"].as_array().unwrap().len(), 1);
+    assert!(page["next_cursor"].is_string());
+    let cursor = page["next_cursor"].as_str().unwrap().to_string();
+
+    // Pagination resumes without overlap or loss.
+    let result = tool("session_list")
+        .execute(serde_json::json!({ "limit": 10, "cursor": cursor }))
+        .await
+        .unwrap();
+    let page2: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    let total: usize =
+        page["sessions"].as_array().unwrap().len() + page2["sessions"].as_array().unwrap().len();
+    assert_eq!(total, 2);
+    let listed_ids: Vec<&str> = page2["sessions"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|row| row["session_id"].as_str().unwrap())
+        .collect();
+    assert!(listed_ids.contains(&unrelated_session.to_string().as_str()));
+
+    // Kind filter.
+    let result = tool("session_list")
+        .execute(serde_json::json!({ "kind": "task" }))
+        .await
+        .unwrap();
+    let page3: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    assert_eq!(page3["sessions"].as_array().unwrap().len(), 0);
+
+    // Search by first-prompt fragment.
+    let result = tool("session_search")
+        .execute(serde_json::json!({ "query": "COMPACTION" }))
+        .await
+        .unwrap();
+    let matches: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    let rows = matches["matches"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["session_id"].as_str().unwrap(),
+        compaction_session.to_string()
+    );
+
+    // Read: events bounded, previews present, next_seq continues.
+    let result = tool("session_read")
+        .execute(serde_json::json!({ "session_id": compaction_session, "limit": 1 }))
+        .await
+        .unwrap();
+    let read: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    let events = read["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["payload"]["type"], "conversation_message");
+    assert!(events[0]["payload"]["text"].as_str().unwrap().contains("compaction"));
+    let next_seq = read["next_seq"].as_u64().unwrap();
+
+    let result = tool("session_read")
+        .execute(
+            serde_json::json!({ "session_id": compaction_session, "after_seq": next_seq }),
+        )
+        .await
+        .unwrap();
+    let read2: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    let events2 = read2["events"].as_array().unwrap();
+    assert_eq!(events2.len(), 1);
+    assert_eq!(events2[0]["payload"]["type"], "turn_completed");
+
+    // Unknown session errors cleanly.
+    let result = tool("session_read")
+        .execute(serde_json::json!({ "session_id": uuid::Uuid::new_v4() }))
+        .await
+        .unwrap();
+    assert!(!result.success);
+}

@@ -359,3 +359,158 @@ async fn file_transcript_store_appends_without_rewriting_existing_events() {
     assert_eq!(events[0].seq, 1);
     assert_eq!(events[1].seq, 2);
 }
+
+async fn seeded_session(dir: &tempfile::TempDir, session_id: Uuid) -> FileSessionRuntime {
+    let stores = FileSessionStores::new(dir.path());
+    let runtime = FileSessionRuntime::new(stores);
+    let grant = runtime
+        .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+            session_id,
+            worker_id: "test".to_string(),
+            owner_kind: SessionOwnerKind::Chat,
+            ttl: std::time::Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+    runtime
+        .record_batch(
+            &grant,
+            vec![SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+                session_id,
+                kind: SessionKind::Chat,
+                status: SessionStatus::Active,
+                agent: Some("test_agent".to_string()),
+                project: None,
+                task_id: None,
+                routine: None,
+                execution_run_id: None,
+                parent_session_id: None,
+                lease: None,
+                memory_namespace: None,
+                refs: SessionRefs::default(),
+                metadata: serde_json::Value::Null,
+            })],
+        )
+        .await
+        .unwrap();
+    runtime.release_session_lease(grant).await.unwrap();
+    runtime
+}
+
+#[tokio::test]
+async fn first_user_message_is_recorded_in_session_summary() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    let grant = runtime
+        .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+            session_id,
+            worker_id: "test".to_string(),
+            owner_kind: SessionOwnerKind::Chat,
+            ttl: std::time::Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+    let long_content = "explain ".repeat(80);
+    runtime
+        .record_batch(
+            &grant,
+            vec![SessionRuntimeEvent::TranscriptAppend(
+                SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::user(long_content.clone()),
+                    },
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    runtime.release_session_lease(grant).await.unwrap();
+
+    let record = runtime.get_session(session_id).await.unwrap().unwrap();
+    let first = record.summary.first_user_prompt.expect("first user prompt recorded");
+    assert_eq!(first.chars().count(), nenjo_sessions::SessionSummary::FIRST_USER_PROMPT_MAX_CHARS);
+    assert!(long_content.starts_with(&first));
+}
+
+#[tokio::test]
+async fn first_user_prompt_ignores_non_user_and_subsequent_messages() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    let grant = runtime
+        .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+            session_id,
+            worker_id: "test".to_string(),
+            owner_kind: SessionOwnerKind::Chat,
+            ttl: std::time::Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+    runtime
+        .record_batch(
+            &grant,
+            vec![
+                SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::system("system prompt"),
+                    },
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                }),
+                SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::user("the real question"),
+                    },
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                }),
+                SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::user("second question"),
+                    },
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+    runtime.release_session_lease(grant).await.unwrap();
+
+    let record = runtime.get_session(session_id).await.unwrap().unwrap();
+    assert_eq!(
+        record.summary.first_user_prompt.as_deref(),
+        Some("the real question")
+    );
+}
+
+#[tokio::test]
+async fn set_session_title_bounds_and_persists() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    let long_title = "a very long session title that keeps going and going".repeat(6);
+    let applied = runtime.set_session_title(session_id, &long_title).await.unwrap();
+    assert!(applied);
+    let record = runtime.get_session(session_id).await.unwrap().unwrap();
+    let stored = record.summary.title.clone().expect("title recorded");
+    assert_eq!(
+        stored.chars().count(),
+        nenjo_sessions::SessionSummary::TITLE_MAX_CHARS
+    );
+    assert!(long_title.starts_with(&stored));
+
+    // Missing sessions report not-applied rather than erroring.
+    let missing = runtime.set_session_title(Uuid::new_v4(), "nope").await.unwrap();
+    assert!(!missing);
+}
