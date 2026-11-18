@@ -6,7 +6,7 @@ use async_trait::async_trait;
 use serde_json::json;
 
 use nenjo_sessions::{
-    SessionRuntime, SessionRecord, SessionStatus, SessionSummary, SessionTranscriptEvent,
+    SessionRecord, SessionRuntime, SessionStatus, SessionSummary, SessionTranscriptEvent,
     SessionTranscriptEventPayload, TranscriptQuery,
 };
 
@@ -256,9 +256,9 @@ fn listed_sessions<'a>(
                 project.as_deref(),
                 *after,
                 *before,
-            ) && cursor.as_deref().is_none_or(|cursor| {
-                cursor_boundary(record, cursor) == std::cmp::Ordering::Greater
-            })
+            ) && cursor
+                .as_deref()
+                .is_none_or(|cursor| cursor_boundary(record, cursor) == std::cmp::Ordering::Greater)
         })
         .collect();
     matching.sort_by(|left, right| {
@@ -385,7 +385,11 @@ fn transcript_event_row(event: &SessionTranscriptEvent) -> serde_json::Value {
 fn search_matches(record: &SessionRecord, query_lower: &str) -> bool {
     let haystacks = [
         session_label(record),
-        record.summary.last_error_summary.clone().unwrap_or_default(),
+        record
+            .summary
+            .last_error_summary
+            .clone()
+            .unwrap_or_default(),
         record
             .summary
             .last_progress_message
@@ -476,13 +480,18 @@ impl Tool for SessionListTool {
                 "pending" | "active" | "paused" | "waiting" | "completed" | "cancelled" | "failed"
             )
         {
-            return Ok(invalid_arguments(&format!("unknown session status: {other}")));
+            return Ok(invalid_arguments(&format!(
+                "unknown session status: {other}"
+            )));
         }
         let filters = SessionListFilters::from_args(&args, LIST_DEFAULT_LIMIT, LIST_MAX_LIMIT);
 
         let records = self.backend.list_sessions().await?;
         let (page, next_cursor) = listed_sessions(&records, &filters);
-        let rows: Vec<serde_json::Value> = page.iter().map(|record| session_summary_row(record)).collect();
+        let rows: Vec<serde_json::Value> = page
+            .iter()
+            .map(|record| session_summary_row(record))
+            .collect();
         let output = json!({
             "sessions": rows,
             "next_cursor": next_cursor,

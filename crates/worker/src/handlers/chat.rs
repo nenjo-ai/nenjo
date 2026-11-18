@@ -1200,7 +1200,10 @@ where
         )
         .await;
         if let Some(title) = title.as_deref() {
-            harness.sessions().set_title(request.session_id, title).await;
+            harness
+                .sessions()
+                .set_title(request.session_id, title)
+                .await;
         }
         title
     } else {

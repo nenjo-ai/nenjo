@@ -432,8 +432,14 @@ async fn first_user_message_is_recorded_in_session_summary() {
     runtime.release_session_lease(grant).await.unwrap();
 
     let record = runtime.get_session(session_id).await.unwrap().unwrap();
-    let first = record.summary.first_user_prompt.expect("first user prompt recorded");
-    assert_eq!(first.chars().count(), nenjo_sessions::SessionSummary::FIRST_USER_PROMPT_MAX_CHARS);
+    let first = record
+        .summary
+        .first_user_prompt
+        .expect("first user prompt recorded");
+    assert_eq!(
+        first.chars().count(),
+        nenjo_sessions::SessionSummary::FIRST_USER_PROMPT_MAX_CHARS
+    );
     assert!(long_content.starts_with(&first));
 }
 
@@ -500,7 +506,10 @@ async fn set_session_title_bounds_and_persists() {
     let runtime = seeded_session(&dir, session_id).await;
 
     let long_title = "a very long session title that keeps going and going".repeat(6);
-    let applied = runtime.set_session_title(session_id, &long_title).await.unwrap();
+    let applied = runtime
+        .set_session_title(session_id, &long_title)
+        .await
+        .unwrap();
     assert!(applied);
     let record = runtime.get_session(session_id).await.unwrap().unwrap();
     let stored = record.summary.title.clone().expect("title recorded");
@@ -511,6 +520,9 @@ async fn set_session_title_bounds_and_persists() {
     assert!(long_title.starts_with(&stored));
 
     // Missing sessions report not-applied rather than erroring.
-    let missing = runtime.set_session_title(Uuid::new_v4(), "nope").await.unwrap();
+    let missing = runtime
+        .set_session_title(Uuid::new_v4(), "nope")
+        .await
+        .unwrap();
     assert!(!missing);
 }

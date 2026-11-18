@@ -2042,7 +2042,7 @@ async fn worker_factory_exposes_session_history_with_backend() {
 #[tokio::test]
 async fn session_history_tools_list_paginate_read_and_search() {
     use nenjo_sessions::{
-        SessionLeaseRequest, SessionOwnerKind, SessionRuntimeEvent, SessionRuntime,
+        SessionLeaseRequest, SessionOwnerKind, SessionRuntime, SessionRuntimeEvent,
         SessionTranscriptAppend, SessionTranscriptEventPayload, SessionUpsert, TranscriptState,
     };
 
@@ -2153,8 +2153,7 @@ async fn session_history_tools_list_paginate_read_and_search() {
         .execute(serde_json::json!({ "limit": 10, "cursor": cursor }))
         .await
         .unwrap();
-    let page2: serde_json::Value =
-        serde_json::from_str(&result.output.text_content()).unwrap();
+    let page2: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
     let total: usize =
         page["sessions"].as_array().unwrap().len() + page2["sessions"].as_array().unwrap().len();
     assert_eq!(total, 2);
@@ -2171,8 +2170,7 @@ async fn session_history_tools_list_paginate_read_and_search() {
         .execute(serde_json::json!({ "kind": "task" }))
         .await
         .unwrap();
-    let page3: serde_json::Value =
-        serde_json::from_str(&result.output.text_content()).unwrap();
+    let page3: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
     assert_eq!(page3["sessions"].as_array().unwrap().len(), 0);
 
     // Search by first-prompt fragment (index-backed).
@@ -2180,8 +2178,7 @@ async fn session_history_tools_list_paginate_read_and_search() {
         .execute(serde_json::json!({ "query": "COMPACTION" }))
         .await
         .unwrap();
-    let matches: serde_json::Value =
-        serde_json::from_str(&result.output.text_content()).unwrap();
+    let matches: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
     assert_eq!(matches["engine"], "index");
     let rows = matches["matches"].as_array().unwrap();
     // The summary doc (first prompt as title/body) and the user event doc both
@@ -2235,22 +2232,23 @@ async fn session_history_tools_list_paginate_read_and_search() {
         .execute(serde_json::json!({ "session_id": compaction_session, "limit": 1 }))
         .await
         .unwrap();
-    let read: serde_json::Value =
-        serde_json::from_str(&result.output.text_content()).unwrap();
+    let read: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
     let events = read["events"].as_array().unwrap();
     assert_eq!(events.len(), 1);
     assert_eq!(events[0]["payload"]["type"], "conversation_message");
-    assert!(events[0]["payload"]["text"].as_str().unwrap().contains("compaction"));
+    assert!(
+        events[0]["payload"]["text"]
+            .as_str()
+            .unwrap()
+            .contains("compaction")
+    );
     let next_seq = read["next_seq"].as_u64().unwrap();
 
     let result = tool("session_read")
-        .execute(
-            serde_json::json!({ "session_id": compaction_session, "after_seq": next_seq }),
-        )
+        .execute(serde_json::json!({ "session_id": compaction_session, "after_seq": next_seq }))
         .await
         .unwrap();
-    let read2: serde_json::Value =
-        serde_json::from_str(&result.output.text_content()).unwrap();
+    let read2: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
     let events2 = read2["events"].as_array().unwrap();
     assert_eq!(events2.len(), 1);
     assert_eq!(events2[0]["payload"]["type"], "turn_completed");
