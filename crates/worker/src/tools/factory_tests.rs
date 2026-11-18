@@ -2053,7 +2053,7 @@ async fn session_history_tools_list_paginate_read_and_search() {
     );
     let runtime = Arc::new(runtime) as Arc<dyn nenjo_sessions::SessionRuntime>;
 
-    let seed = |session_id: uuid::Uuid, first_prompt: String| {
+    let seed = |session_id: uuid::Uuid, first_prompt: String, final_output: String| {
         let runtime = runtime.clone();
         async move {
             let grant = runtime
@@ -2095,9 +2095,7 @@ async fn session_history_tools_list_paginate_read_and_search() {
                         SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
                             session_id,
                             turn_id: None,
-                            payload: SessionTranscriptEventPayload::TurnCompleted {
-                                final_output: "done".to_string(),
-                            },
+                            payload: SessionTranscriptEventPayload::TurnCompleted { final_output },
                             transcript_state: TranscriptState::Clean,
                         }),
                     ],
@@ -2113,11 +2111,25 @@ async fn session_history_tools_list_paginate_read_and_search() {
     seed(
         compaction_session,
         "how should the compaction strategy behave".to_string(),
+        "done: the juggernaut analysis completed".to_string(),
     )
     .await;
-    seed(unrelated_session, "tell me a joke".to_string()).await;
+    seed(
+        unrelated_session,
+        "tell me a joke".to_string(),
+        "done: here is a joke".to_string(),
+    )
+    .await;
 
-    let tools = crate::tools::session_history::session_history_tools(runtime.clone());
+    let tools = crate::tools::session_history::session_history_tools(
+        runtime.clone(),
+        Some(Arc::new(nenjo_harness::SessionSearchService::new(
+            Arc::new(crate::sessions::WorkerSessionRuntime::with_host(
+                crate::sessions::WorkerSessionStores::new(temp.path()),
+                "history-it",
+            )),
+        ))),
+    );
     let tool = |name: &str| {
         tools
             .iter()
@@ -2163,19 +2175,60 @@ async fn session_history_tools_list_paginate_read_and_search() {
         serde_json::from_str(&result.output.text_content()).unwrap();
     assert_eq!(page3["sessions"].as_array().unwrap().len(), 0);
 
-    // Search by first-prompt fragment.
+    // Search by first-prompt fragment (index-backed).
     let result = tool("session_search")
         .execute(serde_json::json!({ "query": "COMPACTION" }))
         .await
         .unwrap();
     let matches: serde_json::Value =
         serde_json::from_str(&result.output.text_content()).unwrap();
+    assert_eq!(matches["engine"], "index");
     let rows = matches["matches"].as_array().unwrap();
-    assert_eq!(rows.len(), 1);
+    // The summary doc (first prompt as title/body) and the user event doc both
+    // contain the term, so the same session appears with two distinct seqs.
+    assert_eq!(rows.len(), 2);
+    assert!(
+        rows.iter()
+            .all(|row| row["session_id"].as_str().unwrap() == compaction_session.to_string())
+    );
+    assert!(rows.iter().any(|row| row["hit_seq"].as_u64() == Some(0)));
+    assert!(rows.iter().any(|row| row["hit_seq"].as_u64() == Some(1)));
+    assert!(rows[0]["score"].as_f64().unwrap() > 0.0);
+    assert!(!rows[0]["matched_fields"].as_array().unwrap().is_empty());
+    assert!(!rows[0]["excerpt"].as_str().unwrap().is_empty());
+
+    // Transcript-body hit: a term that appears only in a later turn's
+    // TurnCompleted output, not in any summary field.
+    let result = tool("session_search")
+        .execute(serde_json::json!({
+            "query": "juggernaut",
+            "search_transcripts": true
+        }))
+        .await
+        .unwrap();
+    let body_matches: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    let body_rows = body_matches["matches"].as_array().unwrap();
+    assert_eq!(body_rows.len(), 1);
     assert_eq!(
-        rows[0]["session_id"].as_str().unwrap(),
+        body_rows[0]["session_id"].as_str().unwrap(),
         compaction_session.to_string()
     );
+    assert_eq!(body_matches["engine"], "index");
+
+    // Summaries-only search must NOT hit the transcript-only term: same index
+    // engine, but only summary docs were indexed for this query shape.
+    let result = tool("session_search")
+        .execute(serde_json::json!({
+            "query": "juggernaut",
+            "search_transcripts": false
+        }))
+        .await
+        .unwrap();
+    let summary_only: serde_json::Value =
+        serde_json::from_str(&result.output.text_content()).unwrap();
+    assert_eq!(summary_only["engine"], "index");
+    assert_eq!(summary_only["matches"].as_array().unwrap().len(), 0);
 
     // Read: events bounded, previews present, next_seq continues.
     let result = tool("session_read")

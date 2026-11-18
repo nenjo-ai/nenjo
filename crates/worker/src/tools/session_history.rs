@@ -10,6 +10,8 @@ use nenjo_sessions::{
     SessionTranscriptEventPayload, TranscriptQuery,
 };
 
+use nenjo_harness::SessionSearchFilter;
+
 use super::{Tool, ToolCategory, ToolResult};
 
 const SESSION_LIST_TOOL_NAME: &str = "session_list";
@@ -35,12 +37,17 @@ pub(crate) struct SessionReadTool {
     backend: SessionHistoryBackend,
 }
 
-/// `session_search`: substring search over session summary fields.
+/// `session_search`: index-backed full-text search over session summaries and
+/// transcripts, with a lexical substring fallback.
 pub(crate) struct SessionSearchTool {
     backend: SessionHistoryBackend,
+    search_service: Option<Arc<nenjo_harness::SessionSearchService>>,
 }
 
-pub(crate) fn session_history_tools(backend: SessionHistoryBackend) -> Vec<Arc<dyn Tool>> {
+pub(crate) fn session_history_tools(
+    backend: SessionHistoryBackend,
+    search_service: Option<Arc<nenjo_harness::SessionSearchService>>,
+) -> Vec<Arc<dyn Tool>> {
     vec![
         Arc::new(SessionListTool {
             backend: backend.clone(),
@@ -48,7 +55,10 @@ pub(crate) fn session_history_tools(backend: SessionHistoryBackend) -> Vec<Arc<d
         Arc::new(SessionReadTool {
             backend: backend.clone(),
         }),
-        Arc::new(SessionSearchTool { backend }),
+        Arc::new(SessionSearchTool {
+            backend,
+            search_service,
+        }),
     ]
 }
 
@@ -565,7 +575,7 @@ impl Tool for SessionSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Search session summaries by case-insensitive substring match against titles, first user prompts, error summaries, progress messages, agent, and project names. Returns matching session rows, newest first. Use session_read to inspect a match."
+        "Full-text search over prior sessions. Index-backed BM25 search covers titles, first user prompts, error summaries, and full transcript bodies (user, assistant, and tool text); falls back to a substring scan when the index is unavailable. Results are ranked by relevance with matched fields and excerpts. Use session_read to inspect a match from its seq."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -574,16 +584,20 @@ impl Tool for SessionSearchTool {
             "properties": {
                 "query": {
                     "type": "string",
-                    "description": "Case-insensitive substring to search for."
+                    "description": "Search terms; all terms must match (AND semantics)."
                 },
                 "kind": {
                     "type": "string",
                     "enum": ["chat", "task", "domain"],
                     "description": "Filter by session kind."
                 },
+                "search_transcripts": {
+                    "type": "boolean",
+                    "description": "Include transcript bodies in the search, not just session summaries. Default true."
+                },
                 "limit": {
                     "type": "integer",
-                    "description": format!("Maximum matches to return (default {LIST_DEFAULT_LIMIT}, max {SEARCH_MAX_LIMIT}).")
+                    "description": format!("Maximum hits to return (default {LIST_DEFAULT_LIMIT}, max {SEARCH_MAX_LIMIT}).")
                 }
             },
             "required": ["query"],
@@ -599,8 +613,7 @@ impl Tool for SessionSearchTool {
         let Some(query) = args.get("query").and_then(serde_json::Value::as_str) else {
             return Ok(invalid_arguments("query is required"));
         };
-        let query_lower = query.trim().to_lowercase();
-        if query_lower.is_empty() {
+        if query.trim().is_empty() {
             return Ok(invalid_arguments("query must not be empty"));
         }
         if let Some(other) = args.get("kind").and_then(serde_json::Value::as_str)
@@ -608,9 +621,62 @@ impl Tool for SessionSearchTool {
         {
             return Ok(invalid_arguments(&format!("unknown session kind: {other}")));
         }
+        let include_transcripts = args
+            .get("search_transcripts")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(true);
         let kind = parse_kind(&args);
+        let filter = SessionSearchFilter {
+            kind: kind.map(|kind| match kind {
+                nenjo_sessions::SessionKind::Chat => "chat".to_string(),
+                nenjo_sessions::SessionKind::Task => "task".to_string(),
+                nenjo_sessions::SessionKind::Domain => "domain".to_string(),
+            }),
+        };
         let limit = parse_limit(&args, LIST_DEFAULT_LIMIT, SEARCH_MAX_LIMIT);
 
+        // Index-backed path when a search service is wired and transcripts are
+        // in scope; otherwise (or on index failure) fall back to the summary
+        // substring scan over session records.
+        if let Some(service) = self.search_service.as_ref()
+            && let Some(hits) = service
+                .search(query, &filter, limit, include_transcripts)
+                .await
+                .ok()
+                .flatten()
+        {
+            let session_ids: std::collections::HashSet<uuid::Uuid> =
+                hits.iter().map(|hit| hit.session_id).collect();
+            let records = self.backend.list_sessions().await?;
+            let rows: Vec<serde_json::Value> = hits
+                .iter()
+                .map(|hit| {
+                    let record = records
+                        .iter()
+                        .find(|record| record.session_id == hit.session_id);
+                    let mut row = match record {
+                        Some(record) => session_summary_row(record),
+                        None => json!({ "session_id": hit.session_id }),
+                    };
+                    row["hit_seq"] = json!(hit.seq);
+                    row["hit_role"] = json!(hit.role);
+                    row["score"] = json!(hit.score);
+                    row["matched_fields"] = json!(hit.matched_fields);
+                    row["excerpt"] = json!(hit.excerpt);
+                    row
+                })
+                .collect();
+            let output = json!({
+                "query": query,
+                "engine": "index",
+                "sessions_scanned": session_ids.len(),
+                "matches": rows,
+            });
+            return Ok(ToolResult::success(output.to_string()));
+        }
+
+        // Lexical fallback: summary fields only.
+        let query_lower = query.trim().to_lowercase();
         let records = self.backend.list_sessions().await?;
         let mut matches: Vec<&SessionRecord> = records
             .iter()
@@ -631,6 +697,7 @@ impl Tool for SessionSearchTool {
             .collect();
         let output = json!({
             "query": query,
+            "engine": "lexical",
             "matches": rows,
         });
         Ok(ToolResult::success(output.to_string()))

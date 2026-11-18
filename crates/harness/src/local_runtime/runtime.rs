@@ -679,6 +679,149 @@ impl SessionRuntime for FileSessionRuntime {
     }
 }
 
+#[async_trait::async_trait]
+impl super::session_search::SessionSearchBackend for FileSessionRuntime {
+    async fn search_corpus(
+        &self,
+    ) -> Result<(
+        Vec<super::session_search::SessionSearchDoc>,
+        super::session_search::SessionCorpusVersion,
+    )> {
+        use super::session_search::{SessionCorpusVersion, SessionSearchDoc};
+
+        const EVENT_TEXT_MAX_CHARS: usize = 2_000;
+
+        let records = self.records.list()?;
+        let session_count = records.len();
+        let max_updated_at = records.iter().map(|record| record.updated_at).max();
+        let mut docs = Vec::new();
+        for record in records {
+            let kind = match record.kind {
+                SessionKind::Chat => "chat",
+                SessionKind::Task => "task",
+                SessionKind::Domain => "domain",
+            }
+            .to_string();
+            let title =
+                record.summary.title.clone().unwrap_or_else(|| {
+                    record.summary.first_user_prompt.clone().unwrap_or_default()
+                });
+            let mut summary_parts = Vec::new();
+            if !title.is_empty() {
+                summary_parts.push(title.clone());
+            }
+            if let Some(error) = record.summary.last_error_summary.as_ref()
+                && !error.is_empty()
+            {
+                summary_parts.push(error.clone());
+            }
+            if let Some(progress) = record.summary.last_progress_message.as_ref()
+                && !progress.is_empty()
+            {
+                summary_parts.push(progress.clone());
+            }
+            docs.push(SessionSearchDoc {
+                session_id: record.session_id,
+                seq: 0,
+                kind: kind.clone(),
+                title,
+                role: "summary".to_string(),
+                body: summary_parts
+                    .join("\n")
+                    .chars()
+                    .take(EVENT_TEXT_MAX_CHARS)
+                    .collect(),
+            });
+
+            let events = self
+                .transcripts
+                .read(
+                    record.session_id,
+                    TranscriptQuery {
+                        after_seq: None,
+                        limit: None,
+                    },
+                )
+                .await
+                .unwrap_or_default();
+            let start = events
+                .len()
+                .saturating_sub(super::session_search::MAX_EVENTS_PER_SESSION);
+            for event in events.into_iter().skip(start) {
+                let Some((role, text)) = session_search_event_text(&event.payload) else {
+                    continue;
+                };
+                let text: String = text.chars().take(EVENT_TEXT_MAX_CHARS).collect();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                docs.push(SessionSearchDoc {
+                    session_id: record.session_id,
+                    seq: event.seq,
+                    kind: kind.clone(),
+                    title: String::new(),
+                    role,
+                    body: text,
+                });
+            }
+        }
+        Ok((
+            docs,
+            SessionCorpusVersion {
+                session_count,
+                max_updated_at,
+                summaries_only: false,
+            },
+        ))
+    }
+}
+
+/// Extract `(role, text)` from a transcript payload for indexing.
+fn session_search_event_text(payload: &SessionTranscriptEventPayload) -> Option<(String, String)> {
+    use SessionTranscriptEventPayload as Payload;
+    match payload {
+        Payload::ConversationMessage { message } => match message {
+            nenjo_models::ConversationMessage::Chat(chat) => Some((
+                match chat.role {
+                    nenjo_models::ChatRole::User => "user",
+                    nenjo_models::ChatRole::Assistant => "assistant",
+                    _ => "system",
+                }
+                .to_string(),
+                chat.content.clone(),
+            )),
+            nenjo_models::ConversationMessage::AssistantToolCalls { text, .. } => {
+                Some(("assistant".to_string(), text.clone().unwrap_or_default()))
+            }
+            nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => {
+                Some(("assistant".to_string(), analysis.text.clone()))
+            }
+            _ => None,
+        },
+        Payload::ToolResult {
+            output_preview,
+            error_preview,
+            ..
+        } => {
+            let text = output_preview
+                .clone()
+                .or_else(|| error_preview.clone())
+                .unwrap_or_default();
+            Some(("tool".to_string(), text))
+        }
+        Payload::AbilityCompleted { final_output, .. } => {
+            Some(("assistant".to_string(), final_output.clone()))
+        }
+        Payload::DelegationCompleted { final_output, .. } => {
+            Some(("assistant".to_string(), final_output.clone()))
+        }
+        Payload::TurnCompleted { final_output } => {
+            Some(("assistant".to_string(), final_output.clone()))
+        }
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
