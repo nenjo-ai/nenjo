@@ -2260,3 +2260,102 @@ async fn session_history_tools_list_paginate_read_and_search() {
         .unwrap();
     assert!(!result.success);
 }
+
+#[tokio::test]
+async fn session_search_falls_back_to_lexical_when_index_backend_fails() {
+    use nenjo_sessions::{
+        SessionRuntimeEvent, SessionTranscriptAppend, SessionTranscriptEventPayload, SessionUpsert,
+        TranscriptState,
+    };
+    struct FailingBackend;
+
+    #[async_trait::async_trait]
+    impl nenjo_harness::SessionSearchBackend for FailingBackend {
+        async fn search_corpus(
+            &self,
+        ) -> anyhow::Result<(
+            Vec<nenjo_harness::SessionSearchDoc>,
+            nenjo_harness::SessionCorpusVersion,
+        )> {
+            anyhow::bail!("corpus unavailable");
+        }
+    }
+
+    let temp = tempdir().unwrap();
+    let runtime = crate::sessions::WorkerSessionRuntime::with_host(
+        crate::sessions::WorkerSessionStores::new(temp.path()),
+        "fallback-it",
+    );
+    let runtime = Arc::new(runtime) as Arc<dyn nenjo_sessions::SessionRuntime>;
+
+    // Seed one session whose summary fields contain the query term.
+    let grant = runtime
+        .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+            session_id: uuid::Uuid::new_v4(),
+            worker_id: "fallback-it".to_string(),
+            owner_kind: nenjo_sessions::SessionOwnerKind::Chat,
+            ttl: std::time::Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+    let seeded_session_id = grant.session_id;
+    runtime
+        .record_batch(
+            &grant,
+            vec![
+                SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+                    session_id: seeded_session_id,
+                    kind: nenjo_sessions::SessionKind::Chat,
+                    status: nenjo_sessions::SessionStatus::Completed,
+                    agent: Some("tester".to_string()),
+                    project: None,
+                    task_id: None,
+                    routine: None,
+                    execution_run_id: None,
+                    parent_session_id: None,
+                    lease: None,
+                    memory_namespace: None,
+                    refs: Default::default(),
+                    metadata: serde_json::Value::Null,
+                }),
+                SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                    session_id: seeded_session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::user(
+                            "the fallback beacon phrase".to_string(),
+                        ),
+                    },
+                    transcript_state: TranscriptState::MidTurn,
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+    runtime.release_session_lease(grant).await.unwrap();
+
+    let tools = crate::tools::session_history::session_history_tools(
+        runtime.clone(),
+        Some(Arc::new(nenjo_harness::SessionSearchService::new(
+            Arc::new(FailingBackend),
+        ))),
+    );
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == "session_search")
+        .expect("session_search missing");
+
+    let result = tool
+        .execute(serde_json::json!({ "query": "fallback beacon" }))
+        .await
+        .unwrap();
+    assert!(result.success);
+    let output: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
+    assert_eq!(output["engine"], "lexical");
+    let rows = output["matches"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["session_id"].as_str().unwrap(),
+        seeded_session_id.to_string()
+    );
+}

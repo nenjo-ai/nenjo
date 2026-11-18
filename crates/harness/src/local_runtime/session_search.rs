@@ -653,4 +653,56 @@ mod tests {
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|hit| hit.session_id == task));
     }
+
+    #[tokio::test]
+    async fn index_caps_hits_per_session() {
+        let session = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let mut docs = vec![summary_doc(session, "chat", "caps", "repeated term")];
+        for seq in 1..=8 {
+            docs.push(event_doc(session, seq, "user", "repeated term everywhere"));
+        }
+        // A second session also matching, to confirm caps are per-session.
+        docs.push(summary_doc(other, "chat", "caps", "repeated term"));
+        let cache = SessionSearchCache::new();
+        let version = SessionCorpusVersion {
+            session_count: 2,
+            max_updated_at: Some(Utc::now()),
+            summaries_only: false,
+        };
+        let hits = cache
+            .search(
+                docs,
+                &version,
+                "repeated term",
+                &SessionSearchFilter::default(),
+            )
+            .await
+            .expect("capped search");
+        let session_hits = hits.iter().filter(|hit| hit.session_id == session).count();
+        let other_hits = hits.iter().filter(|hit| hit.session_id == other).count();
+        assert_eq!(session_hits, MAX_HITS_PER_SESSION);
+        assert_eq!(other_hits, 1);
+    }
+
+    #[tokio::test]
+    async fn service_error_propagates_for_tool_fallback() {
+        struct FailingBackend;
+
+        #[async_trait::async_trait]
+        impl SessionSearchBackend for FailingBackend {
+            async fn search_corpus(&self) -> Result<(Vec<SessionSearchDoc>, SessionCorpusVersion)> {
+                anyhow::bail!("corpus unavailable");
+            }
+        }
+
+        let service = SessionSearchService::new(Arc::new(FailingBackend));
+        let result = service
+            .search("anything", &SessionSearchFilter::default(), 10, true)
+            .await;
+        assert!(
+            result.is_err(),
+            "backend errors must reach the caller so tools can fall back"
+        );
+    }
 }
