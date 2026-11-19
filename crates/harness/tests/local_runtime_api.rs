@@ -8,9 +8,10 @@ use nenjo_harness::{
     ModelProviderFactory, NoopToolFactory, Provider, Streaming,
 };
 use nenjo_sessions::{
-    SessionKind, SessionOwnerKind, SessionRefs, SessionRuntimeEvent, SessionStatus, SessionStore,
-    SessionTranscriptEvent, SessionTranscriptEventPayload, SessionTranscriptRecord, SessionUpsert,
-    TokenUsage, TraceEvent, TracePhase, TranscriptQuery, TranscriptStore,
+    SessionKind, SessionOwnerKind, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus,
+    SessionStore, SessionTranscriptAppend, SessionTranscriptEvent, SessionTranscriptEventPayload,
+    SessionTranscriptRecord, SessionUpsert, TokenUsage, TraceEvent, TracePhase, TranscriptQuery,
+    TranscriptStore,
 };
 use tempfile::tempdir;
 use uuid::Uuid;
@@ -357,4 +358,475 @@ async fn file_transcript_store_appends_without_rewriting_existing_events() {
     assert_eq!(events.len(), 2);
     assert_eq!(events[0].seq, 1);
     assert_eq!(events[1].seq, 2);
+}
+
+async fn seeded_session(dir: &tempfile::TempDir, session_id: Uuid) -> FileSessionRuntime {
+    let stores = FileSessionStores::new(dir.path());
+    let runtime = FileSessionRuntime::new(stores);
+    let grant = runtime
+        .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+            session_id,
+            worker_id: "test".to_string(),
+            owner_kind: SessionOwnerKind::Chat,
+            ttl: std::time::Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+    runtime
+        .record_batch(
+            &grant,
+            vec![SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+                session_id,
+                kind: SessionKind::Chat,
+                status: SessionStatus::Active,
+                agent: Some("test_agent".to_string()),
+                project: None,
+                task_id: None,
+                routine: None,
+                execution_run_id: None,
+                parent_session_id: None,
+                lease: None,
+                memory_namespace: None,
+                refs: SessionRefs::default(),
+                metadata: serde_json::Value::Null,
+            })],
+        )
+        .await
+        .unwrap();
+    runtime.release_session_lease(grant).await.unwrap();
+    runtime
+}
+
+#[tokio::test]
+async fn first_user_message_is_recorded_in_session_summary() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    let grant = runtime
+        .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+            session_id,
+            worker_id: "test".to_string(),
+            owner_kind: SessionOwnerKind::Chat,
+            ttl: std::time::Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+    let long_content = "explain ".repeat(80);
+    runtime
+        .record_batch(
+            &grant,
+            vec![SessionRuntimeEvent::TranscriptAppend(
+                SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::user(long_content.clone()),
+                    },
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    runtime.release_session_lease(grant).await.unwrap();
+
+    let record = runtime.get_session(session_id).await.unwrap().unwrap();
+    let first = record
+        .summary
+        .first_user_prompt
+        .expect("first user prompt recorded");
+    assert_eq!(
+        first.chars().count(),
+        nenjo_sessions::SessionSummary::FIRST_USER_PROMPT_MAX_CHARS
+    );
+    assert!(long_content.starts_with(&first));
+}
+
+#[tokio::test]
+async fn first_user_prompt_ignores_non_user_and_subsequent_messages() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    let grant = runtime
+        .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+            session_id,
+            worker_id: "test".to_string(),
+            owner_kind: SessionOwnerKind::Chat,
+            ttl: std::time::Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+    runtime
+        .record_batch(
+            &grant,
+            vec![
+                SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::system("system prompt"),
+                    },
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                }),
+                SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::user("the real question"),
+                    },
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                }),
+                SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload: SessionTranscriptEventPayload::ConversationMessage {
+                        message: nenjo_models::ConversationMessage::user("second question"),
+                    },
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                }),
+            ],
+        )
+        .await
+        .unwrap();
+    runtime.release_session_lease(grant).await.unwrap();
+
+    let record = runtime.get_session(session_id).await.unwrap().unwrap();
+    assert_eq!(
+        record.summary.first_user_prompt.as_deref(),
+        Some("the real question")
+    );
+}
+
+#[tokio::test]
+async fn set_session_title_bounds_and_persists() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    let long_title = "a very long session title that keeps going and going".repeat(6);
+    let applied = runtime
+        .set_session_title(session_id, &long_title)
+        .await
+        .unwrap();
+    assert!(applied);
+    let record = runtime.get_session(session_id).await.unwrap().unwrap();
+    let stored = record.summary.title.clone().expect("title recorded");
+    assert_eq!(
+        stored.chars().count(),
+        nenjo_sessions::SessionSummary::TITLE_MAX_CHARS
+    );
+    assert!(long_title.starts_with(&stored));
+
+    // Missing sessions report not-applied rather than erroring.
+    let missing = runtime
+        .set_session_title(Uuid::new_v4(), "nope")
+        .await
+        .unwrap();
+    assert!(!missing);
+}
+
+async fn append_message(
+    runtime: &FileSessionRuntime,
+    session_id: Uuid,
+    payload: SessionTranscriptEventPayload,
+) {
+    let grant = runtime
+        .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+            session_id,
+            worker_id: "test".to_string(),
+            owner_kind: SessionOwnerKind::Chat,
+            ttl: std::time::Duration::from_secs(30),
+        })
+        .await
+        .unwrap();
+    runtime
+        .record_batch(
+            &grant,
+            vec![SessionRuntimeEvent::TranscriptAppend(
+                SessionTranscriptAppend {
+                    session_id,
+                    turn_id: None,
+                    payload,
+                    transcript_state: nenjo_sessions::TranscriptState::MidTurn,
+                },
+            )],
+        )
+        .await
+        .unwrap();
+    runtime.release_session_lease(grant).await.unwrap();
+}
+
+fn search_service(runtime: FileSessionRuntime) -> nenjo_harness::SessionSearchService {
+    nenjo_harness::SessionSearchService::new(Arc::new(runtime))
+}
+
+#[tokio::test]
+async fn search_corpus_truncates_to_the_most_recent_events_per_session() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    let total = 510;
+    let kept = nenjo_harness::MAX_EVENTS_PER_SESSION;
+    for seq in 1..=total {
+        append_message(
+            &runtime,
+            session_id,
+            SessionTranscriptEventPayload::ConversationMessage {
+                message: nenjo_models::ConversationMessage::user(format!("uq{seq}x filler token")),
+            },
+        )
+        .await;
+    }
+
+    let (docs, version) = {
+        use nenjo_harness::SessionSearchBackend;
+        runtime.search_corpus().await.unwrap()
+    };
+    // Summary doc + exactly the most recent `kept` events.
+    assert_eq!(docs.len(), 1 + kept);
+    assert_eq!(docs.iter().filter(|doc| doc.seq > 0).count(), kept);
+    assert_eq!(version.session_count, 1);
+    let min_event_seq = docs
+        .iter()
+        .filter(|doc| doc.seq > 0)
+        .map(|doc| doc.seq)
+        .min();
+    assert_eq!(min_event_seq, Some((total - kept + 1) as u64));
+
+    let service = search_service(runtime);
+    // A truncated event's unique token is gone from the corpus.
+    let hits = service
+        .search(
+            "uq2x",
+            &nenjo_harness::SessionSearchFilter::default(),
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search");
+    assert!(hits.is_empty(), "truncated events must not be searchable");
+
+    // A retained event is searchable and reports its real seq.
+    let hits = service
+        .search(
+            "uq505x",
+            &nenjo_harness::SessionSearchFilter::default(),
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].seq, 505);
+    assert_eq!(hits[0].role, "user");
+
+    // The first event was truncated, but its text survives in the session
+    // summary through first_user_prompt (designed behavior).
+    let hits = service
+        .search(
+            "uq1x",
+            &nenjo_harness::SessionSearchFilter::default(),
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].seq, 0);
+    assert_eq!(hits[0].role, "summary");
+}
+
+#[tokio::test]
+async fn search_indexes_tool_results_and_session_titles() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    append_message(
+        &runtime,
+        session_id,
+        SessionTranscriptEventPayload::ToolResult {
+            parent_tool_name: None,
+            tool_name: "read".to_string(),
+            success: true,
+            output_preview: Some("the magic word is lantern".to_string()),
+            error_preview: None,
+        },
+    )
+    .await;
+    assert!(
+        runtime
+            .set_session_title(session_id, "Quarterly review notes")
+            .await
+            .unwrap()
+    );
+
+    let service = search_service(runtime);
+    let hits = service
+        .search(
+            "lantern",
+            &nenjo_harness::SessionSearchFilter::default(),
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].role, "tool");
+    assert!(hits[0].excerpt.contains("lantern"));
+
+    // Title-set sessions are findable by title terms in the summary doc.
+    let hits = service
+        .search(
+            "quarterly review",
+            &nenjo_harness::SessionSearchFilter::default(),
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].seq, 0);
+    assert_eq!(hits[0].role, "summary");
+}
+
+#[tokio::test]
+async fn deleted_sessions_leave_the_search_corpus() {
+    let dir = tempdir().unwrap();
+    let kept_session = Uuid::new_v4();
+    let removed_session = Uuid::new_v4();
+    let runtime = seeded_session(&dir, kept_session).await;
+    // Seed a second session in the same store through a fresh lease.
+    {
+        let grant = runtime
+            .acquire_session_lease(nenjo_sessions::SessionLeaseRequest {
+                session_id: removed_session,
+                worker_id: "test".to_string(),
+                owner_kind: SessionOwnerKind::Chat,
+                ttl: std::time::Duration::from_secs(30),
+            })
+            .await
+            .unwrap();
+        runtime
+            .record_batch(
+                &grant,
+                vec![SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+                    session_id: removed_session,
+                    kind: SessionKind::Chat,
+                    status: SessionStatus::Active,
+                    agent: Some("test_agent".to_string()),
+                    project: None,
+                    task_id: None,
+                    routine: None,
+                    execution_run_id: None,
+                    parent_session_id: None,
+                    lease: None,
+                    memory_namespace: None,
+                    refs: SessionRefs::default(),
+                    metadata: serde_json::Value::Null,
+                })],
+            )
+            .await
+            .unwrap();
+        runtime.release_session_lease(grant).await.unwrap();
+    }
+    append_message(
+        &runtime,
+        kept_session,
+        SessionTranscriptEventPayload::ConversationMessage {
+            message: nenjo_models::ConversationMessage::user(
+                "the deletion marker phrase".to_string(),
+            ),
+        },
+    )
+    .await;
+    append_message(
+        &runtime,
+        removed_session,
+        SessionTranscriptEventPayload::ConversationMessage {
+            message: nenjo_models::ConversationMessage::user(
+                "the deletion marker phrase".to_string(),
+            ),
+        },
+    )
+    .await;
+
+    let service = search_service(runtime.clone());
+    let hits = service
+        .search(
+            "deletion marker phrase",
+            &nenjo_harness::SessionSearchFilter::default(),
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search");
+    assert_eq!(
+        hits.iter()
+            .map(|hit| hit.session_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        2
+    );
+
+    runtime.delete_session(removed_session).await.unwrap();
+
+    let hits = service
+        .search(
+            "deletion marker phrase",
+            &nenjo_harness::SessionSearchFilter::default(),
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search after delete");
+    assert!(
+        hits.iter().all(|hit| hit.session_id == kept_session),
+        "deleted session must disappear from search results"
+    );
+}
+
+#[tokio::test]
+async fn interrupted_turns_are_indexed_with_interrupted_status() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    append_message(
+        &runtime,
+        session_id,
+        SessionTranscriptEventPayload::TurnInterrupted {
+            reason: "the user cancelled the deploy mid-run".to_string(),
+        },
+    )
+    .await;
+
+    let service = search_service(runtime);
+    let hits = service
+        .search(
+            "cancelled deploy",
+            &nenjo_harness::SessionSearchFilter {
+                status: Some("interrupted".to_string()),
+                ..Default::default()
+            },
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].role, "system");
+    assert_eq!(hits[0].status, "interrupted");
+    assert!(hits[0].excerpt.contains("cancelled"));
 }

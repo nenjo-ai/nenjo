@@ -5,12 +5,14 @@ use anyhow::Result;
 use async_trait::async_trait;
 use chrono::Utc;
 use dashmap::DashMap;
+use nenjo_models::{ChatRole, ConversationMessage};
 use nenjo_sessions::{
     CheckpointQuery, CheckpointStore, DomainSessionUpsert, SessionCheckpoint,
     SessionCheckpointUpdate, SessionKind, SessionLease, SessionLeaseGrant, SessionLeaseRequest,
     SessionRecord, SessionRefs, SessionRuntime, SessionRuntimeEvent, SessionStatus, SessionStore,
-    SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent, SessionTransition,
-    SessionUpsert, SessionWriteOutcome, TraceEvent, TraceStore, TranscriptQuery, TranscriptStore,
+    SessionSummary, SessionTranscriptAppend, SessionTranscriptEvent, SessionTranscriptEventPayload,
+    SessionTransition, SessionUpsert, SessionWriteOutcome, TraceEvent, TraceStore, TranscriptQuery,
+    TranscriptStore,
 };
 use tokio::sync::{Mutex, OwnedMutexGuard};
 use tracing::warn;
@@ -273,6 +275,17 @@ impl FileSessionRuntime {
             next.refs.transcript_ref = Some(transcript_ref);
             next.summary.last_transcript_seq = event.seq;
             next.summary.transcript_state = append.transcript_state;
+            if next.summary.first_user_prompt.is_none()
+                && let SessionTranscriptEventPayload::ConversationMessage { message } =
+                    &append.payload
+                && let ConversationMessage::Chat(chat) = message
+                && chat.role == ChatRole::User
+            {
+                next.summary.first_user_prompt = Some(SessionSummary::bounded(
+                    &chat.content,
+                    SessionSummary::FIRST_USER_PROMPT_MAX_CHARS,
+                ));
+            }
             next.version += 1;
             next.updated_at = event.recorded_at;
 
@@ -626,6 +639,26 @@ impl SessionRuntime for FileSessionRuntime {
         self.records.delete(session_id)
     }
 
+    async fn set_session_title(&self, session_id: Uuid, title: &str) -> Result<bool> {
+        const MAX_CAS_RETRIES: usize = 8;
+        let bounded = SessionSummary::bounded(title, SessionSummary::TITLE_MAX_CHARS);
+        for _ in 0..MAX_CAS_RETRIES {
+            let Some(record) = self.records.get(session_id)? else {
+                return Ok(false);
+            };
+            let mut next = record.clone();
+            next.summary.title = Some(bounded.clone());
+            next.version += 1;
+            if self
+                .records
+                .compare_and_swap(session_id, record.version, &next)?
+            {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
     async fn read_transcript(
         &self,
         session_id: Uuid,
@@ -643,6 +676,196 @@ impl SessionRuntime for FileSessionRuntime {
         query: CheckpointQuery,
     ) -> Result<Option<SessionCheckpoint>> {
         self.checkpoints.load_latest(session_id, query).await
+    }
+}
+
+#[async_trait::async_trait]
+impl super::session_search::SessionSearchBackend for FileSessionRuntime {
+    async fn search_corpus(
+        &self,
+    ) -> Result<(
+        Vec<super::session_search::SessionSearchDoc>,
+        super::session_search::SessionCorpusVersion,
+    )> {
+        use super::session_search::{SessionCorpusVersion, SessionSearchDoc};
+
+        const EVENT_TEXT_MAX_CHARS: usize = 2_000;
+
+        let records = self.records.list()?;
+        let session_count = records.len();
+        let max_updated_at = records.iter().map(|record| record.updated_at).max();
+        let mut docs = Vec::new();
+        for record in records {
+            let kind = match record.kind {
+                SessionKind::Chat => "chat",
+                SessionKind::Task => "task",
+                SessionKind::Domain => "domain",
+            }
+            .to_string();
+            let title =
+                record.summary.title.clone().unwrap_or_else(|| {
+                    record.summary.first_user_prompt.clone().unwrap_or_default()
+                });
+            let mut summary_parts = Vec::new();
+            if !title.is_empty() {
+                summary_parts.push(title.clone());
+            }
+            if let Some(error) = record.summary.last_error_summary.as_ref()
+                && !error.is_empty()
+            {
+                summary_parts.push(error.clone());
+            }
+            if let Some(progress) = record.summary.last_progress_message.as_ref()
+                && !progress.is_empty()
+            {
+                summary_parts.push(progress.clone());
+            }
+            docs.push(SessionSearchDoc {
+                session_id: record.session_id,
+                seq: 0,
+                kind: kind.clone(),
+                title,
+                role: "summary".to_string(),
+                status: "summary".to_string(),
+                body: summary_parts
+                    .join("\n")
+                    .chars()
+                    .take(EVENT_TEXT_MAX_CHARS)
+                    .collect(),
+            });
+
+            let events = self
+                .transcripts
+                .read(
+                    record.session_id,
+                    TranscriptQuery {
+                        after_seq: None,
+                        limit: None,
+                    },
+                )
+                .await
+                .unwrap_or_default();
+            let start = events
+                .len()
+                .saturating_sub(super::session_search::MAX_EVENTS_PER_SESSION);
+            for event in events.into_iter().skip(start) {
+                let Some((role, status, text)) = session_search_event_text(&event.payload) else {
+                    continue;
+                };
+                let text: String = text.chars().take(EVENT_TEXT_MAX_CHARS).collect();
+                if text.trim().is_empty() {
+                    continue;
+                }
+                docs.push(SessionSearchDoc {
+                    session_id: record.session_id,
+                    seq: event.seq,
+                    kind: kind.clone(),
+                    title: String::new(),
+                    role,
+                    status,
+                    body: text,
+                });
+            }
+        }
+        Ok((
+            docs,
+            SessionCorpusVersion {
+                session_count,
+                max_updated_at,
+                summaries_only: false,
+            },
+        ))
+    }
+}
+
+/// Extract `(role, status, text)` from a transcript payload for indexing.
+///
+/// `status` is `ok` for successful events, `error` for failed tool results,
+/// and `interrupted` for interrupted turns.
+fn session_search_event_text(
+    payload: &SessionTranscriptEventPayload,
+) -> Option<(String, String, String)> {
+    use SessionTranscriptEventPayload as Payload;
+    match payload {
+        Payload::ConversationMessage { message } => match message {
+            nenjo_models::ConversationMessage::Chat(chat) => Some((
+                match chat.role {
+                    nenjo_models::ChatRole::User => "user",
+                    nenjo_models::ChatRole::Assistant => "assistant",
+                    _ => "system",
+                }
+                .to_string(),
+                "ok".to_string(),
+                chat.content.clone(),
+            )),
+            nenjo_models::ConversationMessage::AssistantToolCalls { text, .. } => Some((
+                "assistant".to_string(),
+                "ok".to_string(),
+                text.clone().unwrap_or_default(),
+            )),
+            nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => Some((
+                "assistant".to_string(),
+                "ok".to_string(),
+                analysis.text.clone(),
+            )),
+            _ => None,
+        },
+        Payload::ToolResult {
+            tool_name,
+            success,
+            output_preview,
+            error_preview,
+            ..
+        } => {
+            let (text, status) = if *success {
+                (output_preview.clone(), "ok")
+            } else {
+                (
+                    error_preview.clone().or_else(|| output_preview.clone()),
+                    "error",
+                )
+            };
+            let text = text.unwrap_or_default();
+            // Include the tool name so queries like "git push failed" recall
+            // the failed call even when the error text omits it.
+            let body = if text.trim().is_empty() {
+                tool_name.clone()
+            } else {
+                format!("{tool_name} {text}")
+            };
+            Some(("tool".to_string(), status.to_string(), body))
+        }
+        Payload::AbilityCompleted {
+            ability_name,
+            success,
+            final_output,
+            ..
+        } => Some((
+            "assistant".to_string(),
+            if *success { "ok" } else { "error" }.to_string(),
+            format!("{ability_name} {final_output}"),
+        )),
+        Payload::DelegationCompleted {
+            target_agent_name,
+            success,
+            final_output,
+            ..
+        } => Some((
+            "assistant".to_string(),
+            if *success { "ok" } else { "error" }.to_string(),
+            format!("{target_agent_name} {final_output}"),
+        )),
+        Payload::TurnCompleted { final_output } => Some((
+            "assistant".to_string(),
+            "ok".to_string(),
+            final_output.clone(),
+        )),
+        Payload::TurnInterrupted { reason } => Some((
+            "system".to_string(),
+            "interrupted".to_string(),
+            reason.clone(),
+        )),
+        _ => None,
     }
 }
 

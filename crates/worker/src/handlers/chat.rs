@@ -619,6 +619,9 @@ where
                         &output.text,
                     )
                     .await;
+                    if let Some(title) = suggested_title.as_deref() {
+                        harness.sessions().set_title(event_session_id, title).await;
+                    }
                 }
                 for mut se in turn_event_to_stream_events(&ev, &aname, &run_id, event_session_id) {
                     bind_chat_response_context(&mut se, &run_id, input_message_id);
@@ -1189,13 +1192,20 @@ where
             .iter()
             .find(|manifest| manifest.slug == council)
             .map(|manifest| manifest.leader_agent.clone());
-        generate_session_title(
+        let title = generate_session_title(
             harness.provider().as_ref(),
             leader_agent.as_ref(),
             request.content,
             &result.output,
         )
-        .await
+        .await;
+        if let Some(title) = title.as_deref() {
+            harness
+                .sessions()
+                .set_title(request.session_id, title)
+                .await;
+        }
+        title
     } else {
         None
     };
