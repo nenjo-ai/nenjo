@@ -36,8 +36,10 @@ pub struct SessionSearchDoc {
     pub kind: String,
     /// Session title or first user prompt.
     pub title: String,
-    /// `summary`, `user`, `assistant`, or `tool`.
+    /// `summary`, `user`, `assistant`, `tool`, or `system`.
     pub role: String,
+    /// `summary`, `ok`, `error`, or `interrupted`.
+    pub status: String,
     /// Indexed text: summary fields for `summary`, event text otherwise.
     pub body: String,
 }
@@ -57,8 +59,10 @@ pub struct SessionCorpusVersion {
 pub struct SessionSearchHit {
     pub session_id: Uuid,
     pub seq: u64,
-    /// `summary`, `user`, `assistant`, or `tool`.
+    /// `summary`, `user`, `assistant`, `tool`, or `system`.
     pub role: String,
+    /// `summary`, `ok`, `error`, or `interrupted`.
+    pub status: String,
     pub score: f64,
     pub matched_fields: Vec<String>,
     /// A short window of the matched text.
@@ -69,6 +73,8 @@ pub struct SessionSearchHit {
 #[derive(Debug, Clone, Default)]
 pub struct SessionSearchFilter {
     pub kind: Option<String>,
+    /// `error`, `ok`, or `interrupted`.
+    pub status: Option<String>,
 }
 
 struct SessionSearchSchema {
@@ -77,6 +83,7 @@ struct SessionSearchSchema {
     kind: Field,
     title: Field,
     role: Field,
+    status: Field,
     body: Field,
     doc_index: Field,
 }
@@ -90,6 +97,7 @@ impl SessionSearchSchema {
         let kind = builder.add_text_field("kind", TEXT);
         let title = builder.add_text_field("title", TEXT);
         let role = builder.add_text_field("role", TEXT);
+        let status = builder.add_text_field("status", TEXT);
         let body = builder.add_text_field("body", TEXT);
         let schema = builder.build();
         (
@@ -100,6 +108,7 @@ impl SessionSearchSchema {
                 kind,
                 title,
                 role,
+                status,
                 body,
                 doc_index,
             },
@@ -107,7 +116,7 @@ impl SessionSearchSchema {
     }
 
     fn search_fields(&self) -> Vec<Field> {
-        vec![self.kind, self.title, self.role, self.body]
+        vec![self.kind, self.title, self.role, self.status, self.body]
     }
 }
 
@@ -170,6 +179,7 @@ impl SessionSearchIndex {
                 fields.kind => document.kind.as_str(),
                 fields.title => document.title.as_str(),
                 fields.role => document.role.as_str(),
+                fields.status => document.status.as_str(),
                 fields.body => document.body.as_str(),
             ))?;
         }
@@ -227,6 +237,11 @@ impl SessionSearchIndex {
             {
                 continue;
             }
+            if let Some(status) = filter.status.as_deref()
+                && document.status != status
+            {
+                continue;
+            }
             let session_hits = hits_per_session.entry(document.session_id).or_default();
             if *session_hits >= MAX_HITS_PER_SESSION {
                 continue;
@@ -237,6 +252,7 @@ impl SessionSearchIndex {
                 session_id: document.session_id,
                 seq: document.seq,
                 role: document.role.clone(),
+                status: document.status.clone(),
                 score: score as f64,
                 matched_fields: matched_fields(document, &query_terms),
                 excerpt: excerpt_for(&query_terms, &document.body),
@@ -416,6 +432,11 @@ pub fn lexical_search(
         {
             continue;
         }
+        if let Some(status) = filter.status.as_deref()
+            && document.status != status
+        {
+            continue;
+        }
         let session_hits = per_session.entry(document.session_id).or_default();
         if *session_hits >= MAX_HITS_PER_SESSION {
             continue;
@@ -433,6 +454,7 @@ pub fn lexical_search(
             session_id: document.session_id,
             seq: document.seq,
             role: document.role.clone(),
+            status: document.status.clone(),
             score: 0.0,
             matched_fields: matched_fields(
                 document,
@@ -461,6 +483,7 @@ mod tests {
             kind: kind.to_string(),
             title: title.to_string(),
             role: "summary".to_string(),
+            status: "summary".to_string(),
             body: body.to_string(),
         }
     }
@@ -472,6 +495,19 @@ mod tests {
             kind: "chat".to_string(),
             title: String::new(),
             role: role.to_string(),
+            status: "ok".to_string(),
+            body: body.to_string(),
+        }
+    }
+
+    fn tool_doc(session_id: Uuid, seq: u64, success: bool, body: &str) -> SessionSearchDoc {
+        SessionSearchDoc {
+            session_id,
+            seq,
+            kind: "chat".to_string(),
+            title: String::new(),
+            role: "tool".to_string(),
+            status: if success { "ok" } else { "error" }.to_string(),
             body: body.to_string(),
         }
     }
@@ -528,6 +564,7 @@ mod tests {
         ];
         let filter = SessionSearchFilter {
             kind: Some("task".to_string()),
+            ..SessionSearchFilter::default()
         };
         let hits = lexical_search(&docs, "deployment", &filter, 10);
         assert_eq!(hits.len(), 1);
@@ -645,6 +682,7 @@ mod tests {
         };
         let filter = SessionSearchFilter {
             kind: Some("task".to_string()),
+            ..SessionSearchFilter::default()
         };
         let hits = cache
             .search(docs, &version, "deployment", &filter)
@@ -652,6 +690,83 @@ mod tests {
             .expect("filtered search");
         assert!(!hits.is_empty());
         assert!(hits.iter().all(|hit| hit.session_id == task));
+    }
+
+    #[test]
+    fn lexical_search_filters_by_status() {
+        let session = Uuid::new_v4();
+        let docs = vec![
+            tool_doc(session, 1, false, "git push rejected"),
+            tool_doc(session, 2, true, "git push accepted"),
+            event_doc(session, 3, "user", "retry the push"),
+        ];
+        let filter = SessionSearchFilter {
+            status: Some("error".to_string()),
+            ..SessionSearchFilter::default()
+        };
+        let hits = lexical_search(&docs, "push", &filter, 10);
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].seq, 1);
+        assert_eq!(hits[0].status, "error");
+
+        let filter = SessionSearchFilter {
+            status: Some("ok".to_string()),
+            ..SessionSearchFilter::default()
+        };
+        let hits = lexical_search(&docs, "push", &filter, 10);
+        // Both the successful tool result and the user event are status ok.
+        assert_eq!(hits.len(), 2);
+        assert!(hits.iter().all(|hit| hit.status == "ok"));
+    }
+
+    #[tokio::test]
+    async fn index_filters_by_status() {
+        let session = Uuid::new_v4();
+        let docs = vec![
+            tool_doc(session, 1, false, "the deploy failed with exit code 1"),
+            tool_doc(session, 2, true, "the deploy succeeded cleanly"),
+        ];
+        let cache = SessionSearchCache::new();
+        let version = SessionCorpusVersion {
+            session_count: 1,
+            max_updated_at: Some(Utc::now()),
+            summaries_only: false,
+        };
+        let filter = SessionSearchFilter {
+            status: Some("error".to_string()),
+            ..SessionSearchFilter::default()
+        };
+        let hits = cache
+            .search(docs, &version, "deploy", &filter)
+            .await
+            .expect("filtered search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].seq, 1);
+        assert_eq!(hits[0].status, "error");
+        assert!(hits[0].excerpt.contains("failed"));
+    }
+
+    #[tokio::test]
+    async fn index_matches_error_status_as_query_term() {
+        // status is a search field: querying "error" finds failed calls even
+        // when the error text does not literally contain the word.
+        let session = Uuid::new_v4();
+        let docs = vec![
+            tool_doc(session, 1, false, "exit code 1"),
+            tool_doc(session, 2, true, "exit code 0"),
+        ];
+        let cache = SessionSearchCache::new();
+        let version = SessionCorpusVersion {
+            session_count: 1,
+            max_updated_at: Some(Utc::now()),
+            summaries_only: false,
+        };
+        let hits = cache
+            .search(docs, &version, "error", &SessionSearchFilter::default())
+            .await
+            .expect("status term search");
+        assert_eq!(hits.len(), 1);
+        assert_eq!(hits[0].seq, 1);
     }
 
     #[tokio::test]

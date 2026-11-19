@@ -2359,3 +2359,165 @@ async fn session_search_falls_back_to_lexical_when_index_backend_fails() {
         seeded_session_id.to_string()
     );
 }
+
+#[tokio::test]
+async fn session_search_finds_errored_tool_calls_by_status() {
+    use nenjo_sessions::{
+        SessionLeaseRequest, SessionOwnerKind, SessionRuntimeEvent, SessionTranscriptAppend,
+        SessionTranscriptEventPayload, SessionUpsert, TranscriptState,
+    };
+
+    let temp = tempdir().unwrap();
+    let runtime = crate::sessions::WorkerSessionRuntime::with_host(
+        crate::sessions::WorkerSessionStores::new(temp.path()),
+        "status-it",
+    );
+    let runtime = Arc::new(runtime) as Arc<dyn nenjo_sessions::SessionRuntime>;
+
+    let seed_tool_result = |session_id: uuid::Uuid, success: bool, text: String| {
+        let runtime = runtime.clone();
+        async move {
+            let grant = runtime
+                .acquire_session_lease(SessionLeaseRequest {
+                    session_id,
+                    worker_id: "status-it".to_string(),
+                    owner_kind: SessionOwnerKind::Chat,
+                    ttl: std::time::Duration::from_secs(30),
+                })
+                .await
+                .unwrap();
+            runtime
+                .record_batch(
+                    &grant,
+                    vec![
+                        SessionRuntimeEvent::SessionUpsert(SessionUpsert {
+                            session_id,
+                            kind: nenjo_sessions::SessionKind::Chat,
+                            status: nenjo_sessions::SessionStatus::Completed,
+                            agent: Some("tester".to_string()),
+                            project: None,
+                            task_id: None,
+                            routine: None,
+                            execution_run_id: None,
+                            parent_session_id: None,
+                            lease: None,
+                            memory_namespace: None,
+                            refs: Default::default(),
+                            metadata: serde_json::Value::Null,
+                        }),
+                        SessionRuntimeEvent::TranscriptAppend(SessionTranscriptAppend {
+                            session_id,
+                            turn_id: None,
+                            payload: SessionTranscriptEventPayload::ToolResult {
+                                parent_tool_name: None,
+                                tool_name: "shell".to_string(),
+                                success,
+                                output_preview: if success { Some(text.clone()) } else { None },
+                                error_preview: if success { None } else { Some(text) },
+                            },
+                            transcript_state: TranscriptState::MidTurn,
+                        }),
+                    ],
+                )
+                .await
+                .unwrap();
+            runtime.release_session_lease(grant).await.unwrap();
+        }
+    };
+
+    let failed_session = uuid::Uuid::new_v4();
+    let clean_session = uuid::Uuid::new_v4();
+    seed_tool_result(
+        failed_session,
+        false,
+        "the lighthouse check failed with exit code 3".to_string(),
+    )
+    .await;
+    seed_tool_result(
+        clean_session,
+        true,
+        "the lighthouse check passed cleanly".to_string(),
+    )
+    .await;
+
+    let tools = crate::tools::session_history::session_history_tools(
+        runtime.clone(),
+        Some(Arc::new(nenjo_harness::SessionSearchService::new(
+            Arc::new(crate::sessions::WorkerSessionRuntime::with_host(
+                crate::sessions::WorkerSessionStores::new(temp.path()),
+                "status-it",
+            )),
+        ))),
+    );
+    let tool = tools
+        .iter()
+        .find(|tool| tool.name() == "session_search")
+        .expect("session_search missing");
+
+    // status=error finds only the failed call, with tool name in the excerpt.
+    let result = tool
+        .execute(serde_json::json!({
+            "query": "lighthouse check",
+            "status": "error"
+        }))
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
+    let rows = output["matches"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["session_id"].as_str().unwrap(),
+        failed_session.to_string()
+    );
+    assert_eq!(rows[0]["hit_status"], "error");
+    assert_eq!(rows[0]["hit_role"], "tool");
+    assert!(rows[0]["excerpt"].as_str().unwrap().contains("shell"));
+
+    // The same query without the filter returns both sessions.
+    let result = tool
+        .execute(serde_json::json!({ "query": "lighthouse check" }))
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
+    assert_eq!(output["matches"].as_array().unwrap().len(), 2);
+
+    // Tool-name-only recall: the failed call is findable by "shell" alone
+    // because the corpus body includes the tool name.
+    let result = tool
+        .execute(serde_json::json!({
+            "query": "shell lighthouse",
+            "status": "error"
+        }))
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
+    let rows = output["matches"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["session_id"].as_str().unwrap(),
+        failed_session.to_string()
+    );
+
+    // status=ok excludes the failed call.
+    let result = tool
+        .execute(serde_json::json!({
+            "query": "lighthouse check",
+            "status": "ok"
+        }))
+        .await
+        .unwrap();
+    let output: serde_json::Value = serde_json::from_str(&result.output.text_content()).unwrap();
+    let rows = output["matches"].as_array().unwrap();
+    assert_eq!(rows.len(), 1);
+    assert_eq!(
+        rows[0]["session_id"].as_str().unwrap(),
+        clean_session.to_string()
+    );
+
+    // Invalid status values are rejected with a clean error.
+    let result = tool
+        .execute(serde_json::json!({ "query": "x", "status": "failed" }))
+        .await
+        .unwrap();
+    assert!(!result.success);
+}

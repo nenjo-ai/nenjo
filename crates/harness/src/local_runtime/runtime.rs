@@ -726,6 +726,7 @@ impl super::session_search::SessionSearchBackend for FileSessionRuntime {
                 kind: kind.clone(),
                 title,
                 role: "summary".to_string(),
+                status: "summary".to_string(),
                 body: summary_parts
                     .join("\n")
                     .chars()
@@ -748,7 +749,7 @@ impl super::session_search::SessionSearchBackend for FileSessionRuntime {
                 .len()
                 .saturating_sub(super::session_search::MAX_EVENTS_PER_SESSION);
             for event in events.into_iter().skip(start) {
-                let Some((role, text)) = session_search_event_text(&event.payload) else {
+                let Some((role, status, text)) = session_search_event_text(&event.payload) else {
                     continue;
                 };
                 let text: String = text.chars().take(EVENT_TEXT_MAX_CHARS).collect();
@@ -761,6 +762,7 @@ impl super::session_search::SessionSearchBackend for FileSessionRuntime {
                     kind: kind.clone(),
                     title: String::new(),
                     role,
+                    status,
                     body: text,
                 });
             }
@@ -776,8 +778,13 @@ impl super::session_search::SessionSearchBackend for FileSessionRuntime {
     }
 }
 
-/// Extract `(role, text)` from a transcript payload for indexing.
-fn session_search_event_text(payload: &SessionTranscriptEventPayload) -> Option<(String, String)> {
+/// Extract `(role, status, text)` from a transcript payload for indexing.
+///
+/// `status` is `ok` for successful events, `error` for failed tool results,
+/// and `interrupted` for interrupted turns.
+fn session_search_event_text(
+    payload: &SessionTranscriptEventPayload,
+) -> Option<(String, String, String)> {
     use SessionTranscriptEventPayload as Payload;
     match payload {
         Payload::ConversationMessage { message } => match message {
@@ -788,36 +795,76 @@ fn session_search_event_text(payload: &SessionTranscriptEventPayload) -> Option<
                     _ => "system",
                 }
                 .to_string(),
+                "ok".to_string(),
                 chat.content.clone(),
             )),
-            nenjo_models::ConversationMessage::AssistantToolCalls { text, .. } => {
-                Some(("assistant".to_string(), text.clone().unwrap_or_default()))
-            }
-            nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => {
-                Some(("assistant".to_string(), analysis.text.clone()))
-            }
+            nenjo_models::ConversationMessage::AssistantToolCalls { text, .. } => Some((
+                "assistant".to_string(),
+                "ok".to_string(),
+                text.clone().unwrap_or_default(),
+            )),
+            nenjo_models::ConversationMessage::ArtifactAnalysis(analysis) => Some((
+                "assistant".to_string(),
+                "ok".to_string(),
+                analysis.text.clone(),
+            )),
             _ => None,
         },
         Payload::ToolResult {
+            tool_name,
+            success,
             output_preview,
             error_preview,
             ..
         } => {
-            let text = output_preview
-                .clone()
-                .or_else(|| error_preview.clone())
-                .unwrap_or_default();
-            Some(("tool".to_string(), text))
+            let (text, status) = if *success {
+                (output_preview.clone(), "ok")
+            } else {
+                (
+                    error_preview.clone().or_else(|| output_preview.clone()),
+                    "error",
+                )
+            };
+            let text = text.unwrap_or_default();
+            // Include the tool name so queries like "git push failed" recall
+            // the failed call even when the error text omits it.
+            let body = if text.trim().is_empty() {
+                tool_name.clone()
+            } else {
+                format!("{tool_name} {text}")
+            };
+            Some(("tool".to_string(), status.to_string(), body))
         }
-        Payload::AbilityCompleted { final_output, .. } => {
-            Some(("assistant".to_string(), final_output.clone()))
-        }
-        Payload::DelegationCompleted { final_output, .. } => {
-            Some(("assistant".to_string(), final_output.clone()))
-        }
-        Payload::TurnCompleted { final_output } => {
-            Some(("assistant".to_string(), final_output.clone()))
-        }
+        Payload::AbilityCompleted {
+            ability_name,
+            success,
+            final_output,
+            ..
+        } => Some((
+            "assistant".to_string(),
+            if *success { "ok" } else { "error" }.to_string(),
+            format!("{ability_name} {final_output}"),
+        )),
+        Payload::DelegationCompleted {
+            target_agent_name,
+            success,
+            final_output,
+            ..
+        } => Some((
+            "assistant".to_string(),
+            if *success { "ok" } else { "error" }.to_string(),
+            format!("{target_agent_name} {final_output}"),
+        )),
+        Payload::TurnCompleted { final_output } => Some((
+            "assistant".to_string(),
+            "ok".to_string(),
+            final_output.clone(),
+        )),
+        Payload::TurnInterrupted { reason } => Some((
+            "system".to_string(),
+            "interrupted".to_string(),
+            reason.clone(),
+        )),
         _ => None,
     }
 }

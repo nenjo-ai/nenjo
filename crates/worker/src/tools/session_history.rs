@@ -584,7 +584,7 @@ impl Tool for SessionSearchTool {
     }
 
     fn description(&self) -> &str {
-        "Full-text search over prior sessions. Index-backed BM25 search covers titles, first user prompts, error summaries, and full transcript bodies (user, assistant, and tool text); falls back to a substring scan when the index is unavailable. Results are ranked by relevance with matched fields and excerpts. Use session_read to inspect a match from its seq."
+        "Full-text search over prior sessions. Index-backed BM25 search covers titles, first user prompts, error summaries, and full transcript bodies (user, assistant, tool text, and tool call status); falls back to a substring scan when the index is unavailable. Pass status=error to find failed tool calls. Results are ranked by relevance with matched fields and excerpts. Use session_read to inspect a match from its seq."
     }
 
     fn parameters_schema(&self) -> serde_json::Value {
@@ -599,6 +599,11 @@ impl Tool for SessionSearchTool {
                     "type": "string",
                     "enum": ["chat", "task", "domain"],
                     "description": "Filter by session kind."
+                },
+                "status": {
+                    "type": "string",
+                    "enum": ["error", "ok", "interrupted"],
+                    "description": "Filter by event status: errored tool calls, successful events, or interrupted turns."
                 },
                 "search_transcripts": {
                     "type": "boolean",
@@ -630,6 +635,11 @@ impl Tool for SessionSearchTool {
         {
             return Ok(invalid_arguments(&format!("unknown session kind: {other}")));
         }
+        if let Some(other) = args.get("status").and_then(serde_json::Value::as_str)
+            && !matches!(other, "error" | "ok" | "interrupted")
+        {
+            return Ok(invalid_arguments(&format!("unknown event status: {other}")));
+        }
         let include_transcripts = args
             .get("search_transcripts")
             .and_then(serde_json::Value::as_bool)
@@ -641,6 +651,10 @@ impl Tool for SessionSearchTool {
                 nenjo_sessions::SessionKind::Task => "task".to_string(),
                 nenjo_sessions::SessionKind::Domain => "domain".to_string(),
             }),
+            status: args
+                .get("status")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string),
         };
         let limit = parse_limit(&args, LIST_DEFAULT_LIMIT, SEARCH_MAX_LIMIT);
 
@@ -669,6 +683,7 @@ impl Tool for SessionSearchTool {
                     };
                     row["hit_seq"] = json!(hit.seq);
                     row["hit_role"] = json!(hit.role);
+                    row["hit_status"] = json!(hit.status);
                     row["score"] = json!(hit.score);
                     row["matched_fields"] = json!(hit.matched_fields);
                     row["excerpt"] = json!(hit.excerpt);

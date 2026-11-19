@@ -795,3 +795,38 @@ async fn deleted_sessions_leave_the_search_corpus() {
         "deleted session must disappear from search results"
     );
 }
+
+#[tokio::test]
+async fn interrupted_turns_are_indexed_with_interrupted_status() {
+    let dir = tempdir().unwrap();
+    let session_id = Uuid::new_v4();
+    let runtime = seeded_session(&dir, session_id).await;
+
+    append_message(
+        &runtime,
+        session_id,
+        SessionTranscriptEventPayload::TurnInterrupted {
+            reason: "the user cancelled the deploy mid-run".to_string(),
+        },
+    )
+    .await;
+
+    let service = search_service(runtime);
+    let hits = service
+        .search(
+            "cancelled deploy",
+            &nenjo_harness::SessionSearchFilter {
+                status: Some("interrupted".to_string()),
+                ..Default::default()
+            },
+            10,
+            true,
+        )
+        .await
+        .unwrap()
+        .expect("index search");
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].role, "system");
+    assert_eq!(hits[0].status, "interrupted");
+    assert!(hits[0].excerpt.contains("cancelled"));
+}
