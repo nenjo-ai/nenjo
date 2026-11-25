@@ -58,6 +58,24 @@ pub struct SessionSummary {
     pub last_error_summary: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_progress_message: Option<String>,
+    /// Truncated text of the first user-authored conversation message.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub first_user_prompt: Option<String>,
+    /// Human-readable session title, when one has been generated or set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+}
+
+impl SessionSummary {
+    /// Maximum stored length for `first_user_prompt`.
+    pub const FIRST_USER_PROMPT_MAX_CHARS: usize = 200;
+    /// Maximum stored length for `title`.
+    pub const TITLE_MAX_CHARS: usize = 120;
+
+    /// Truncate text to a bounded character count on a char boundary.
+    pub fn bounded(text: &str, max_chars: usize) -> String {
+        text.chars().take(max_chars).collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

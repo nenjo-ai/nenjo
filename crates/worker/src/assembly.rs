@@ -277,6 +277,16 @@ pub(crate) async fn build_provider(
         )),
         (Some(_), None) | (None, Some(_)) | (None, None) => None,
     };
+    let session_history_runtime = Arc::new(WorkerSessionRuntime::with_host(
+        WorkerSessionStores::new(&config.state_dir),
+        "session-history-tools",
+    )) as Arc<dyn nenjo_sessions::SessionRuntime>;
+    let session_search_service = Arc::new(nenjo_harness::SessionSearchService::new(Arc::new(
+        WorkerSessionRuntime::with_host(
+            WorkerSessionStores::new(&config.state_dir),
+            "session-search-index",
+        ),
+    )));
     let tool_factory = WorkerToolFactory::with_skill_registry_and_provider_registry(
         security,
         NativeRuntime,
@@ -286,6 +296,8 @@ pub(crate) async fn build_provider(
         external_mcp.clone(),
         skill_registry,
     )
+    .with_session_history(session_history_runtime)
+    .with_session_search(session_search_service)
     .with_local_execution_watcher(local_execution_watcher);
 
     let memory_dir = config.state_dir.join("memory");

@@ -8,6 +8,7 @@ mod event_store;
 mod lease_store;
 mod record_store;
 mod runtime;
+mod session_search;
 mod task_runtime_store;
 
 pub use event_store::{
@@ -16,4 +17,8 @@ pub use event_store::{
 };
 pub use record_store::FileSessionStore;
 pub use runtime::{DomainSessionRecovery, FileSessionRuntime, SessionRecoveryHandler};
+pub use session_search::{
+    MAX_EVENTS_PER_SESSION, SessionCorpusVersion, SessionSearchBackend, SessionSearchCache,
+    SessionSearchDoc, SessionSearchFilter, SessionSearchHit, SessionSearchService, lexical_search,
+};
 pub use task_runtime_store::FileTaskRuntimeStore;

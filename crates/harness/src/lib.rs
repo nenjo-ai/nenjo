@@ -96,7 +96,9 @@ pub use handle::{HarnessChatHandle, HarnessExecutionHandle};
 #[cfg(feature = "local-runtime")]
 pub use local_runtime::{
     FileCheckpointStore, FileSessionRuntime, FileSessionStore, FileSessionStores, FileTraceStore,
-    FileTranscriptStore, SessionRecoveryHandler,
+    FileTranscriptStore, MAX_EVENTS_PER_SESSION, SessionCorpusVersion, SessionRecoveryHandler,
+    SessionSearchBackend, SessionSearchDoc, SessionSearchFilter, SessionSearchHit,
+    SessionSearchService, lexical_search,
 };
 pub use nenjo::{Buffered, ChatDelivery, Streaming};
 pub use request::{ChatDomainActivation, ChatRequest, TaskRequest};
